@@ -1,0 +1,32 @@
+<UserControl
+    x:Class="maildot.Views.AccountSetupView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:maildot.Views"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" Padding="32">
+        <Border Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="12" Padding="32" MaxWidth="520" HorizontalAlignment="Center" VerticalAlignment="Center">
+            <StackPanel Spacing="12">
+                <TextBlock Text="Connect to your IMAP server" FontSize="24" FontWeight="SemiBold" />
+
+                <TextBox x:Name="ServerTextBox" Header="IMAP Server" PlaceholderText="imap.example.com" />
+                <TextBox x:Name="PortTextBox" Header="Port" PlaceholderText="993" InputScope="Number" />
+                <TextBox x:Name="UsernameTextBox" Header="Username" PlaceholderText="me@example.com" />
+                <PasswordBox x:Name="PasswordBox" Header="Password" PasswordRevealMode="Peek" KeyDown="OnPasswordKeyDown" />
+                <CheckBox x:Name="SslCheckBox" Content="Use SSL / TLS" IsChecked="True" />
+
+                <Button x:Name="SaveButton"
+                        Content="Save &amp; continue"
+                        Click="OnSaveClicked"
+                        HorizontalAlignment="Stretch"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"
+                        BorderBrush="{ThemeResource AccentFillColorDefaultBrush}" />
+                <TextBlock x:Name="StatusTextBlock" Foreground="{ThemeResource TextFillColorPrimaryBrush}" TextWrapping="WrapWholeWords" />
+            </StackPanel>
+        </Border>
+    </Grid>
+</UserControl>
