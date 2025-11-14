@@ -5,6 +5,7 @@
     xmlns:local="using:maildot.Views"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:viewModels="using:maildot.ViewModels"
     mc:Ignorable="d">
 
     <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
@@ -16,36 +17,61 @@
         <Border Grid.Column="0" Padding="16" BorderBrush="{ThemeResource SurfaceStrokeColorDefaultBrush}" BorderThickness="1">
             <StackPanel>
                 <TextBlock Text="Folders" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,12" />
-                <ListView>
-                    <ListViewItem Content="Inbox" />
-                    <ListViewItem Content="Sent" />
-                    <ListViewItem Content="Drafts" />
-                    <ListViewItem Content="Archive" />
-                    <ListViewItem Content="Spam" />
+                <ListView x:Name="FoldersList"
+                          ItemsSource="{Binding Folders}"
+                          SelectedItem="{Binding SelectedFolder, Mode=TwoWay}"
+                          SelectionChanged="OnFolderSelectionChanged">
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="viewModels:MailFolderViewModel">
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Stretch" Spacing="8">
+                                <TextBlock Text="{x:Bind DisplayName}" Width="150" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Text="{x:Bind UnreadCount}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
                 </ListView>
             </StackPanel>
         </Border>
 
-        <Grid Grid.Column="1" Padding="24">
+        <Grid Grid.Column="1" Padding="24" RowSpacing="12">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
-            <StackPanel>
-                <TextBlock x:Name="AccountSummaryTextBlock" Text="Connected to IMAP" FontSize="18" FontWeight="SemiBold" />
-                <Button x:Name="ReauthButton" Content="Re-enter password" Click="OnReauthClicked" HorizontalAlignment="Left" Margin="0,12,0,0" />
+            <StackPanel Spacing="6">
+                <TextBlock Text="{Binding AccountSummary}" FontSize="18" FontWeight="SemiBold" />
+                <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding CurrentFolderTitle}"
+                               FontSize="20"
+                               FontWeight="SemiBold" />
+                    <ProgressRing Width="24" Height="24" IsActive="{Binding IsBusy}" />
+                </StackPanel>
+                <TextBlock Text="{Binding StatusMessage}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <Button x:Name="ReauthButton"
+                        Content="Re-enter password"
+                        Click="OnReauthClicked"
+                        HorizontalAlignment="Left" />
             </StackPanel>
 
-            <Border Grid.Row="1" Margin="0,20,0,0" Padding="16" Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="8">
-                <StackPanel>
-                    <TextBlock Text="Mailbox preview" FontSize="16" FontWeight="SemiBold" />
-                    <TextBlock Text="Select a folder to show messages here. Vector experiments will surface here as well." Margin="0,4,0,12" TextWrapping="Wrap" />
-                    <ListView>
-                        <ListViewItem Content="Sample message 1" />
-                        <ListViewItem Content="Sample message 2" />
+            <Border Grid.Row="1" Padding="0" Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="8">
+                <Grid>
+                    <ListView x:Name="MessagesList"
+                              ItemsSource="{Binding Messages}">
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="viewModels:EmailMessageViewModel">
+                                <StackPanel Padding="16" Spacing="4">
+                                    <TextBlock Text="{x:Bind Subject}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Text="{x:Bind Sender}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <StackPanel Orientation="Horizontal" Spacing="12">
+                                        <TextBlock Text="{x:Bind ReceivedDisplay}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <TextBlock Text="{x:Bind Preview}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
                     </ListView>
-                </StackPanel>
+                </Grid>
             </Border>
         </Grid>
     </Grid>

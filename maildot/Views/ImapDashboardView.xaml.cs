@@ -1,7 +1,7 @@
 using System;
+using maildot.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using maildot.Models;
 
 namespace maildot.Views;
 
@@ -13,14 +13,23 @@ public sealed partial class ImapDashboardView : UserControl
     }
 
     public event EventHandler? RequestReauthentication;
+    public event EventHandler<MailFolderViewModel>? FolderSelected;
 
-    public void UpdateAccountInfo(AccountSettings settings)
+    public void BindViewModel(MailboxViewModel viewModel)
     {
-        AccountSummaryTextBlock.Text = $"Connected to {settings.Server} as {settings.Username}.";
+        DataContext = viewModel;
     }
 
     private void OnReauthClicked(object sender, RoutedEventArgs e)
     {
         RequestReauthentication?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void OnFolderSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (FoldersList.SelectedItem is MailFolderViewModel folder)
+        {
+            FolderSelected?.Invoke(this, folder);
+        }
     }
 }

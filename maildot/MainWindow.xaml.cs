@@ -3,6 +3,7 @@ using System.Threading.Tasks;
 using maildot.Models;
 using maildot.Services;
 using maildot.Views;
+using maildot.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
@@ -12,6 +13,8 @@ namespace maildot
     {
         private AccountSetupView? _accountSetupView;
         private ImapDashboardView? _dashboardView;
+        private MailboxViewModel? _mailboxViewModel;
+        private ImapSyncService? _imapService;
         private bool _startupInitialized;
 
         public MainWindow()
@@ -41,19 +44,21 @@ namespace maildot
                 var credentialResponse = await CredentialManager.RequestPasswordAsync(storedSettings.Username);
                 if (credentialResponse.Result == CredentialAccessResult.Success && !string.IsNullOrWhiteSpace(credentialResponse.Password))
                 {
-                    ShowDashboard(storedSettings);
+                    ShowDashboard(storedSettings, credentialResponse.Password);
                     return;
                 }
 
-                ShowAccountSetup(storedSettings, GetStatusMessage(credentialResponse.Result));
+                await ShowAccountSetup(storedSettings, GetStatusMessage(credentialResponse.Result));
                 return;
             }
 
-            ShowAccountSetup(null, "Please enter your IMAP server details to begin.");
+            await ShowAccountSetup(null, "Please enter your IMAP server details to begin.");
         }
 
-        private void ShowAccountSetup(AccountSettings? existing, string? statusMessage = null)
+        private async Task ShowAccountSetup(AccountSettings? existing, string? statusMessage = null)
         {
+            await CleanupImapServiceAsync();
+
             _accountSetupView ??= new AccountSetupView();
             _accountSetupView.SettingsSaved -= OnAccountSettingsSaved;
             _accountSetupView.SettingsSaved += OnAccountSettingsSaved;
@@ -61,26 +66,64 @@ namespace maildot
             RootContent.Content = _accountSetupView;
         }
 
-        private void ShowDashboard(AccountSettings settings)
+        private void ShowDashboard(AccountSettings settings, string password)
         {
+            _mailboxViewModel = new MailboxViewModel();
+            _mailboxViewModel.SetAccountSummary($"Connected to {settings.Server} as {settings.Username}");
+
             _dashboardView ??= new ImapDashboardView();
             _dashboardView.RequestReauthentication -= OnDashboardReauthRequested;
             _dashboardView.RequestReauthentication += OnDashboardReauthRequested;
-            _dashboardView.UpdateAccountInfo(settings);
+            _dashboardView.FolderSelected -= OnFolderSelected;
+            _dashboardView.FolderSelected += OnFolderSelected;
+            _dashboardView.BindViewModel(_mailboxViewModel);
             RootContent.Content = _dashboardView;
+
+            _ = StartImapSyncAsync(settings, password);
         }
 
         private void OnAccountSettingsSaved(object? sender, AccountSetupResultEventArgs e)
         {
             AccountSettingsStore.Save(e.Settings);
             CredentialManager.SavePassword(e.Settings.Username, e.Password);
-            ShowDashboard(e.Settings);
+            ShowDashboard(e.Settings, e.Password);
         }
 
-        private void OnDashboardReauthRequested(object? sender, EventArgs e)
+        private async void OnDashboardReauthRequested(object? sender, EventArgs e)
         {
             var stored = AccountSettingsStore.Load();
-            ShowAccountSetup(stored, "Windows Hello verification failed or expired; please re-enter your password.");
+            await ShowAccountSetup(stored, "Please re-enter your password.");
+        }
+
+        private async Task StartImapSyncAsync(AccountSettings settings, string password)
+        {
+            if (_mailboxViewModel == null)
+            {
+                return;
+            }
+
+            await CleanupImapServiceAsync();
+            _imapService = new ImapSyncService(_mailboxViewModel, DispatcherQueue);
+            await _imapService.StartAsync(settings, password);
+        }
+
+        private void OnFolderSelected(object? sender, MailFolderViewModel folder)
+        {
+            if (_imapService == null)
+            {
+                return;
+            }
+
+            _ = _imapService.LoadFolderAsync(folder.Id);
+        }
+
+        private async Task CleanupImapServiceAsync()
+        {
+            if (_imapService != null)
+            {
+                await _imapService.DisposeAsync();
+                _imapService = null;
+            }
         }
 
         private static string? GetStatusMessage(CredentialAccessResult result) => result switch
