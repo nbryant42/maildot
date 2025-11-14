@@ -2,7 +2,6 @@ using System;
 using System.Linq;
 using System.Threading.Tasks;
 using Windows.Security.Credentials;
-using Windows.Security.Credentials.UI;
 
 namespace maildot.Services;
 
@@ -39,30 +38,19 @@ internal static class CredentialManager
         vault.Add(credential);
     }
 
-    public static async Task<CredentialAccessResponse> RequestPasswordAsync(string username)
+    // This is *possibly* async because in future we might want to prompt the user for consent.
+    public static Task<CredentialAccessResponse> RequestPasswordAsync(string username)
     {
-        var availability = await UserConsentVerifier.CheckAvailabilityAsync();
-        if (availability != UserConsentVerifierAvailability.Available)
-        {
-            return new CredentialAccessResponse(CredentialAccessResult.MissingHello, null);
-        }
-
-        var verification = await UserConsentVerifier.RequestVerificationAsync("Unlock stored IMAP credentials for maildot.");
-        if (verification != UserConsentVerificationResult.Verified)
-        {
-            return new CredentialAccessResponse(CredentialAccessResult.ConsentDenied, null);
-        }
-
         try
         {
             var vault = new PasswordVault();
             var credential = vault.Retrieve(ResourceName, username);
             credential.RetrievePassword();
-            return new CredentialAccessResponse(CredentialAccessResult.Success, credential.Password);
+            return Task.FromResult(new CredentialAccessResponse(CredentialAccessResult.Success, credential.Password));
         }
         catch
         {
-            return new CredentialAccessResponse(CredentialAccessResult.NotFound, null);
+            return Task.FromResult(new CredentialAccessResponse(CredentialAccessResult.NotFound, null));
         }
     }
 
