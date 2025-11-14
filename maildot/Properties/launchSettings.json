@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "maildot (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "maildot (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

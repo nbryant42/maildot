@@ -1,0 +1,4 @@
+*.user
+maildot/obj/
+maildot/bin/
+.vs/
