@@ -14,11 +14,14 @@ namespace maildot.Services;
 
 public sealed class ImapSyncService : IAsyncDisposable
 {
+    private const int PageSize = 40;
+
     private readonly MailboxViewModel _viewModel;
     private readonly DispatcherQueue _dispatcher;
     private readonly CancellationTokenSource _cts = new();
     private readonly SemaphoreSlim _semaphore = new(1, 1);
     private readonly Dictionary<string, IMailFolder> _folderCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> _folderNextEndIndex = new(StringComparer.OrdinalIgnoreCase);
 
     private ImapClient? _client;
 
@@ -94,35 +97,27 @@ public sealed class ImapSyncService : IAsyncDisposable
             var messageCount = folder.Count;
             if (messageCount == 0)
             {
+                _folderNextEndIndex[folderId] = -1;
                 await EnqueueAsync(() =>
                 {
                     _viewModel.SetMessages(folderDisplay, Array.Empty<EmailMessageViewModel>());
                     _viewModel.SetStatus("Folder is empty.", false);
+                    _viewModel.SetLoadMoreAvailability(false);
                 });
                 return;
             }
 
-            var start = Math.Max(0, messageCount - 40);
-            var summaries = await folder.FetchAsync(start, -1,
-                MessageSummaryItems.Envelope | MessageSummaryItems.UniqueId | MessageSummaryItems.InternalDate,
-                _cts.Token);
+            var endIndex = messageCount - 1;
+            var startIndex = Math.Max(0, endIndex - PageSize + 1);
+            var emailItems = await FetchMessagesAsync(folder, startIndex, endIndex);
 
-            var emailItems = summaries
-                .OrderByDescending(s => s.InternalDate?.UtcDateTime ?? DateTime.MinValue)
-                .Select(summary => new EmailMessageViewModel
-                {
-                    Id = summary.UniqueId.Id.ToString(),
-                    Subject = summary.Envelope?.Subject ?? "(No subject)",
-                    Sender = summary.Envelope?.From?.FirstOrDefault()?.ToString() ?? "(Unknown sender)",
-                    Preview = summary.Envelope?.Subject ?? string.Empty,
-                    Received = summary.InternalDate?.DateTime ?? DateTime.UtcNow
-                })
-                .ToList();
+            _folderNextEndIndex[folderId] = startIndex - 1;
 
             await EnqueueAsync(() =>
             {
                 _viewModel.SetMessages(folderDisplay, emailItems);
                 _viewModel.SetStatus("Mailbox is up to date.", false);
+                _viewModel.SetLoadMoreAvailability(startIndex > 0);
             });
         }
         catch (OperationCanceledException)
@@ -131,6 +126,77 @@ public sealed class ImapSyncService : IAsyncDisposable
         catch (Exception ex)
         {
             await ReportStatusAsync($"Unable to load messages: {ex.Message}", false);
+        }
+        finally
+        {
+            try
+            {
+                if (folder.IsOpen)
+                {
+                    await folder.CloseAsync(false, _cts.Token);
+                }
+            }
+            catch
+            {
+            }
+
+            _semaphore.Release();
+        }
+    }
+
+    public async Task LoadOlderMessagesAsync(string folderId)
+    {
+        if (string.IsNullOrEmpty(folderId))
+        {
+            return;
+        }
+
+        if (_client == null)
+        {
+            return;
+        }
+
+        if (!_folderCache.TryGetValue(folderId, out var folder))
+        {
+            return;
+        }
+
+        if (!_folderNextEndIndex.TryGetValue(folderId, out var nextEndIndex) || nextEndIndex < 0)
+        {
+            await ReportStatusAsync("No more messages to load.", false);
+            await EnqueueAsync(() => _viewModel.SetLoadMoreAvailability(false));
+            return;
+        }
+
+        await _semaphore.WaitAsync(_cts.Token);
+        try
+        {
+            var folderDisplay = string.IsNullOrEmpty(folder.Name) ? folderId : folder.Name;
+            await ReportStatusAsync($"Loading older messages for {folderDisplay}…", true);
+            if (!folder.IsOpen)
+            {
+                await folder.OpenAsync(FolderAccess.ReadOnly, _cts.Token);
+            }
+
+            var endIndex = nextEndIndex;
+            var startIndex = Math.Max(0, endIndex - PageSize + 1);
+            var emailItems = await FetchMessagesAsync(folder, startIndex, endIndex);
+
+            _folderNextEndIndex[folderId] = startIndex - 1;
+
+            await EnqueueAsync(() =>
+            {
+                _viewModel.AppendMessages(emailItems);
+                _viewModel.SetStatus("Mailbox is up to date.", false);
+                _viewModel.SetLoadMoreAvailability(startIndex > 0);
+            });
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            await ReportStatusAsync($"Unable to load earlier messages: {ex.Message}", false);
         }
         finally
         {
@@ -188,6 +254,25 @@ public sealed class ImapSyncService : IAsyncDisposable
         }
 
         return folders;
+    }
+
+    private async Task<List<EmailMessageViewModel>> FetchMessagesAsync(IMailFolder folder, int startIndex, int endIndex)
+    {
+        var summaries = await folder.FetchAsync(startIndex, endIndex,
+            MessageSummaryItems.Envelope | MessageSummaryItems.UniqueId | MessageSummaryItems.InternalDate,
+            _cts.Token);
+
+        return summaries
+            .OrderByDescending(s => s.InternalDate?.UtcDateTime ?? DateTime.MinValue)
+            .Select(summary => new EmailMessageViewModel
+            {
+                Id = summary.UniqueId.Id.ToString(),
+                Subject = summary.Envelope?.Subject ?? "(No subject)",
+                Sender = summary.Envelope?.From?.FirstOrDefault()?.ToString() ?? "(Unknown sender)",
+                Preview = summary.Envelope?.Subject ?? string.Empty,
+                Received = summary.InternalDate?.DateTime ?? DateTime.UtcNow
+            })
+            .ToList();
     }
 
     private Task ReportStatusAsync(string message, bool busy) =>

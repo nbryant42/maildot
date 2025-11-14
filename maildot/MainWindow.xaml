@@ -13,7 +13,5 @@
         <MicaBackdrop />
     </Window.SystemBackdrop>
 
-    <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
-        <ContentControl x:Name="RootContent" />
-    </Grid>
+    <ContentControl x:Name="RootContent"/>
 </Window>

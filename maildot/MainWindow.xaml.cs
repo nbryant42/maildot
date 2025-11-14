@@ -76,6 +76,8 @@ namespace maildot
             _dashboardView.RequestReauthentication += OnDashboardReauthRequested;
             _dashboardView.FolderSelected -= OnFolderSelected;
             _dashboardView.FolderSelected += OnFolderSelected;
+            _dashboardView.LoadMoreRequested -= OnLoadMoreRequested;
+            _dashboardView.LoadMoreRequested += OnLoadMoreRequested;
             _dashboardView.BindViewModel(_mailboxViewModel);
             RootContent.Content = _dashboardView;
 
@@ -115,6 +117,16 @@ namespace maildot
             }
 
             _ = _imapService.LoadFolderAsync(folder.Id);
+        }
+
+        private void OnLoadMoreRequested(object? sender, EventArgs e)
+        {
+            if (_imapService == null || _mailboxViewModel?.SelectedFolder is not MailFolderViewModel folder)
+            {
+                return;
+            }
+
+            _ = _imapService.LoadOlderMessagesAsync(folder.Id);
         }
 
         private async Task CleanupImapServiceAsync()

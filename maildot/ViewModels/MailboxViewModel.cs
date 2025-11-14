@@ -13,6 +13,7 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
     private bool _isBusy;
     private string _currentFolderTitle = "Mailbox";
     private string _accountSummary = "Connected to IMAP";
+    private bool _canLoadMore;
 
     public ObservableCollection<MailFolderViewModel> Folders { get; } = new();
     public ObservableCollection<EmailMessageViewModel> Messages { get; } = new();
@@ -108,6 +109,19 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
         }
     }
 
+    public bool CanLoadMore
+    {
+        get => _canLoadMore;
+        private set
+        {
+            if (_canLoadMore != value)
+            {
+                _canLoadMore = value;
+                OnPropertyChanged(nameof(CanLoadMore));
+            }
+        }
+    }
+
     public void SetStatus(string message, bool isBusy)
     {
         StatusMessage = message;
@@ -117,6 +131,19 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
     public void SetAccountSummary(string summary)
     {
         AccountSummary = summary;
+    }
+
+    public void SetLoadMoreAvailability(bool canLoadMore)
+    {
+        CanLoadMore = canLoadMore;
+    }
+
+    public void AppendMessages(IEnumerable<EmailMessageViewModel> messages)
+    {
+        foreach (var message in messages)
+        {
+            Messages.Add(message);
+        }
     }
 
     public void UpdateFolderCounts(string folderId, int unreadCount)

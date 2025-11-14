@@ -8,7 +8,7 @@
     xmlns:viewModels="using:maildot.ViewModels"
     mc:Ignorable="d">
 
-    <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+    <Grid>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="250" />
             <ColumnDefinition Width="*" />
@@ -57,7 +57,8 @@
             <Border Grid.Row="1" Padding="0" Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="8">
                 <Grid>
                     <ListView x:Name="MessagesList"
-                              ItemsSource="{Binding Messages}">
+                              ItemsSource="{Binding Messages}"
+                              Loaded="OnMessagesListLoaded">
                         <ListView.ItemTemplate>
                             <DataTemplate x:DataType="viewModels:EmailMessageViewModel">
                                 <StackPanel Padding="16" Spacing="4">
