@@ -8,7 +8,7 @@
     xmlns:viewModels="using:maildot.ViewModels"
     mc:Ignorable="d">
 
-    <Grid>
+    <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="250" />
             <ColumnDefinition Width="*" />
@@ -33,7 +33,7 @@
             </StackPanel>
         </Border>
 
-        <Grid Grid.Column="1" Padding="24" RowSpacing="12">
+        <Grid Grid.Column="1" Padding="24" RowSpacing="12" Width="420" HorizontalAlignment="Left">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
@@ -61,14 +61,29 @@
                               Loaded="OnMessagesListLoaded">
                         <ListView.ItemTemplate>
                             <DataTemplate x:DataType="viewModels:EmailMessageViewModel">
-                                <StackPanel Padding="16" Spacing="4">
-                                    <TextBlock Text="{x:Bind Subject}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                                    <TextBlock Text="{x:Bind Sender}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                    <StackPanel Orientation="Horizontal" Spacing="12">
-                                        <TextBlock Text="{x:Bind ReceivedDisplay}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                        <TextBlock Text="{x:Bind Preview}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                                <Grid Padding="12" ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid Width="36" Height="36">
+                                        <Ellipse Fill="{ThemeResource AccentFillColorDefaultBrush}" />
+                                        <TextBlock Text="{x:Bind SenderInitials}"
+                                                   HorizontalAlignment="Center"
+                                                   VerticalAlignment="Center"
+                                                   Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"
+                                                   FontWeight="SemiBold" />
+                                    </Grid>
+
+                                    <StackPanel Grid.Column="1" Spacing="4">
+                                        <TextBlock Text="{x:Bind Subject}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Text="{x:Bind Sender}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <StackPanel Orientation="Horizontal" Spacing="12">
+                                            <TextBlock Text="{x:Bind ReceivedDisplay}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                            <TextBlock Text="{x:Bind Preview}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                                        </StackPanel>
                                     </StackPanel>
-                                </StackPanel>
+                                </Grid>
                             </DataTemplate>
                         </ListView.ItemTemplate>
                     </ListView>

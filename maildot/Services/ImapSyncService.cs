@@ -9,6 +9,7 @@ using MailKit.Security;
 using maildot.Models;
 using maildot.ViewModels;
 using Microsoft.UI.Dispatching;
+using MimeKit;
 
 namespace maildot.Services;
 
@@ -264,13 +265,24 @@ public sealed class ImapSyncService : IAsyncDisposable
 
         return summaries
             .OrderByDescending(s => s.InternalDate?.UtcDateTime ?? DateTime.MinValue)
-            .Select(summary => new EmailMessageViewModel
+            .Select(summary =>
             {
-                Id = summary.UniqueId.Id.ToString(),
-                Subject = summary.Envelope?.Subject ?? "(No subject)",
-                Sender = summary.Envelope?.From?.FirstOrDefault()?.ToString() ?? "(Unknown sender)",
-                Preview = summary.Envelope?.Subject ?? string.Empty,
-                Received = summary.InternalDate?.DateTime ?? DateTime.UtcNow
+                var mailbox = summary.Envelope?.From?.OfType<MailboxAddress>().FirstOrDefault();
+                var senderName = mailbox?.Name;
+                var senderAddress = mailbox?.Address;
+                var senderDisplay = !string.IsNullOrWhiteSpace(senderName)
+                    ? senderName!
+                    : senderAddress ?? "(Unknown sender)";
+
+                return new EmailMessageViewModel
+                {
+                    Id = summary.UniqueId.Id.ToString(),
+                    Subject = summary.Envelope?.Subject ?? "(No subject)",
+                    Sender = senderDisplay,
+                    SenderInitials = SenderInitialsHelper.From(senderName, senderAddress),
+                    Preview = summary.Envelope?.Subject ?? string.Empty,
+                    Received = summary.InternalDate?.DateTime ?? DateTime.UtcNow
+                };
             })
             .ToList();
     }
