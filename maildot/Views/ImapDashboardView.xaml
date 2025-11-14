@@ -47,7 +47,12 @@
                                FontWeight="SemiBold" />
                     <ProgressRing Width="24" Height="24" IsActive="{Binding IsBusy}" />
                 </StackPanel>
-                <TextBlock Text="{Binding StatusMessage}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <TextBlock Text="{Binding StatusMessage}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="WrapWholeWords" />
+                <Button Content="Retry"
+                        Margin="0,4,0,0"
+                        Visibility="{Binding RetryVisibility}"
+                        Click="OnRetryClicked"
+                        HorizontalAlignment="Left" />
                 <Button x:Name="ReauthButton"
                         Content="Re-enter password"
                         Click="OnReauthClicked"
@@ -69,7 +74,7 @@
                                     <Grid Width="36" Height="36">
                                         <Ellipse>
                                             <Ellipse.Fill>
-                                                <SolidColorBrush Color="{Binding SenderColor}" />
+                                                <SolidColorBrush Color="{x:Bind SenderColor}" />
                                             </Ellipse.Fill>
                                         </Ellipse>
                                         <TextBlock Text="{x:Bind SenderInitials}"

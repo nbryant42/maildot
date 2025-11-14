@@ -19,6 +19,7 @@ public sealed partial class ImapDashboardView : UserControl
 
     public event EventHandler? RequestReauthentication;
     public event EventHandler<MailFolderViewModel>? FolderSelected;
+    public event EventHandler? RetryRequested;
     public event EventHandler? LoadMoreRequested;
 
     public void BindViewModel(MailboxViewModel viewModel)
@@ -38,6 +39,11 @@ public sealed partial class ImapDashboardView : UserControl
             FolderSelected?.Invoke(this, folder);
             _hasRequestedMore = false;
         }
+    }
+
+    private void OnRetryClicked(object sender, RoutedEventArgs e)
+    {
+        RetryRequested?.Invoke(this, EventArgs.Empty);
     }
 
     private void OnMessagesListLoaded(object sender, RoutedEventArgs e)

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -26,6 +27,8 @@ public sealed class ImapSyncService : IAsyncDisposable
     private readonly Dictionary<string, int> _folderNextEndIndex = new(StringComparer.OrdinalIgnoreCase);
 
     private ImapClient? _client;
+    private AccountSettings? _settings;
+    private string? _password;
 
     public ImapSyncService(MailboxViewModel viewModel, DispatcherQueue dispatcher)
     {
@@ -35,30 +38,12 @@ public sealed class ImapSyncService : IAsyncDisposable
 
     public async Task StartAsync(AccountSettings settings, string password)
     {
-        await _semaphore.WaitAsync(_cts.Token);
-        try
-        {
-            await ReportStatusAsync("Connecting to IMAP…", true);
+        _settings = settings;
+        _password = password;
 
-            _client = new ImapClient();
-            await _client.ConnectAsync(settings.Server, settings.Port, settings.UseSsl, _cts.Token);
-            await _client.AuthenticateAsync(settings.Username, password, _cts.Token);
-
-            await ReportStatusAsync("Loading folders…", true);
-            var folders = await LoadFoldersAsync(_cts.Token);
-            await EnqueueAsync(() => _viewModel.SetFolders(folders));
-        }
-        catch (OperationCanceledException)
+        if (!await ConnectAsync("Connecting to IMAP…"))
         {
-            // App is closing or user reconfigured the account.
-        }
-        catch (Exception ex)
-        {
-            await ReportStatusAsync($"IMAP error: {ex.Message}", false);
-        }
-        finally
-        {
-            _semaphore.Release();
+            return;
         }
 
         if (_viewModel.SelectedFolder is { } initialFolder)
@@ -67,29 +52,34 @@ public sealed class ImapSyncService : IAsyncDisposable
         }
     }
 
-    public async Task LoadFolderAsync(string folderId)
+    public Task LoadFolderAsync(string folderId) => LoadFolderInternalAsync(folderId, allowReconnect: true);
+
+    private async Task LoadFolderInternalAsync(string folderId, bool allowReconnect)
     {
         if (string.IsNullOrEmpty(folderId))
         {
             return;
         }
 
-        if (_client == null)
-        {
-            await ReportStatusAsync("IMAP client is not connected.", false);
-            return;
-        }
-
-        if (!_folderCache.TryGetValue(folderId, out var folder))
-        {
-            await ReportStatusAsync("Folder could not be found on the server.", false);
-            return;
-        }
+        IMailFolder? folder = null;
+        string folderDisplay = folderId;
+        Exception? failure = null;
+        var shouldRetry = false;
 
         await _semaphore.WaitAsync(_cts.Token);
         try
         {
-            var folderDisplay = string.IsNullOrEmpty(folder.Name) ? folderId : folder.Name;
+            if (_client == null)
+            {
+                throw new ServiceNotConnectedException();
+            }
+
+            if (!_folderCache.TryGetValue(folderId, out folder))
+            {
+                throw new InvalidOperationException("Folder could not be found on the server.");
+            }
+
+            folderDisplay = string.IsNullOrEmpty(folder.Name) ? folderId : folder.Name;
             await ReportStatusAsync($"Loading {folderDisplay}…", true);
             if (!folder.IsOpen)
             {
@@ -105,6 +95,7 @@ public sealed class ImapSyncService : IAsyncDisposable
                     _viewModel.SetMessages(folderDisplay, Array.Empty<EmailMessageViewModel>());
                     _viewModel.SetStatus("Folder is empty.", false);
                     _viewModel.SetLoadMoreAvailability(false);
+                    _viewModel.SetRetryVisible(false);
                 });
                 return;
             }
@@ -120,20 +111,24 @@ public sealed class ImapSyncService : IAsyncDisposable
                 _viewModel.SetMessages(folderDisplay, emailItems);
                 _viewModel.SetStatus("Mailbox is up to date.", false);
                 _viewModel.SetLoadMoreAvailability(startIndex > 0);
+                _viewModel.SetRetryVisible(false);
             });
+            return;
         }
         catch (OperationCanceledException)
         {
+            return;
         }
         catch (Exception ex)
         {
-            await ReportStatusAsync($"Unable to load messages: {ex.Message}", false);
+            failure = ex;
+            shouldRetry = allowReconnect && IsRecoverable(ex);
         }
         finally
         {
             try
             {
-                if (folder.IsOpen)
+                if (folder?.IsOpen == true)
                 {
                     await folder.CloseAsync(false, _cts.Token);
                 }
@@ -144,35 +139,57 @@ public sealed class ImapSyncService : IAsyncDisposable
 
             _semaphore.Release();
         }
+
+        if (shouldRetry && await TryReconnectAsync())
+        {
+            await LoadFolderInternalAsync(folderId, false);
+            return;
+        }
+
+        if (failure != null)
+        {
+            await ReportStatusAsync($"Unable to load messages: {failure.Message}", false);
+            await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
+        }
     }
 
-    public async Task LoadOlderMessagesAsync(string folderId)
+    public Task LoadOlderMessagesAsync(string folderId) => LoadOlderMessagesInternalAsync(folderId, allowReconnect: true);
+
+    private async Task LoadOlderMessagesInternalAsync(string folderId, bool allowReconnect)
     {
         if (string.IsNullOrEmpty(folderId))
         {
             return;
         }
 
-        if (_client == null)
-        {
-            return;
-        }
-
-        if (!_folderCache.TryGetValue(folderId, out var folder))
-        {
-            return;
-        }
-
-        if (!_folderNextEndIndex.TryGetValue(folderId, out var nextEndIndex) || nextEndIndex < 0)
-        {
-            await ReportStatusAsync("No more messages to load.", false);
-            await EnqueueAsync(() => _viewModel.SetLoadMoreAvailability(false));
-            return;
-        }
+        IMailFolder? folder = null;
+        Exception? failure = null;
+        var shouldRetry = false;
 
         await _semaphore.WaitAsync(_cts.Token);
         try
         {
+            if (_client == null)
+            {
+                throw new ServiceNotConnectedException();
+            }
+
+            if (!_folderCache.TryGetValue(folderId, out folder))
+            {
+                throw new InvalidOperationException("Folder could not be found on the server.");
+            }
+
+            if (!_folderNextEndIndex.TryGetValue(folderId, out var nextEndIndex) || nextEndIndex < 0)
+            {
+                await ReportStatusAsync("No more messages to load.", false);
+                await EnqueueAsync(() =>
+                {
+                    _viewModel.SetLoadMoreAvailability(false);
+                    _viewModel.SetRetryVisible(false);
+                });
+                return;
+            }
+
             var folderDisplay = string.IsNullOrEmpty(folder.Name) ? folderId : folder.Name;
             await ReportStatusAsync($"Loading older messages for {folderDisplay}…", true);
             if (!folder.IsOpen)
@@ -191,20 +208,24 @@ public sealed class ImapSyncService : IAsyncDisposable
                 _viewModel.AppendMessages(emailItems);
                 _viewModel.SetStatus("Mailbox is up to date.", false);
                 _viewModel.SetLoadMoreAvailability(startIndex > 0);
+                _viewModel.SetRetryVisible(false);
             });
+            return;
         }
         catch (OperationCanceledException)
         {
+            return;
         }
         catch (Exception ex)
         {
-            await ReportStatusAsync($"Unable to load earlier messages: {ex.Message}", false);
+            failure = ex;
+            shouldRetry = allowReconnect && IsRecoverable(ex);
         }
         finally
         {
             try
             {
-                if (folder.IsOpen)
+                if (folder?.IsOpen == true)
                 {
                     await folder.CloseAsync(false, _cts.Token);
                 }
@@ -215,7 +236,68 @@ public sealed class ImapSyncService : IAsyncDisposable
 
             _semaphore.Release();
         }
+
+        if (shouldRetry && await TryReconnectAsync())
+        {
+            await LoadOlderMessagesInternalAsync(folderId, false);
+            return;
+        }
+
+        if (failure != null)
+        {
+            await ReportStatusAsync($"Unable to load earlier messages: {failure.Message}", false);
+            await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
+        }
     }
+
+    private async Task<bool> ConnectAsync(string statusMessage)
+    {
+        if (_settings == null || _password == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            await ReportStatusAsync(statusMessage, true);
+
+            _client?.Dispose();
+            _client = new ImapClient();
+            await _client.ConnectAsync(_settings.Server, _settings.Port, _settings.UseSsl, _cts.Token);
+            await _client.AuthenticateAsync(_settings.Username, _password, _cts.Token);
+
+            _folderCache.Clear();
+            _folderNextEndIndex.Clear();
+
+            await ReportStatusAsync("Loading folders…", true);
+            var folders = await LoadFoldersAsync(_cts.Token);
+            await EnqueueAsync(() =>
+            {
+                _viewModel.SetFolders(folders);
+                _viewModel.SetRetryVisible(false);
+            });
+
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (Exception ex)
+        {
+            await ReportStatusAsync($"IMAP connection failed: {ex.Message}", false);
+            await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
+            return false;
+        }
+    }
+
+    private Task<bool> TryReconnectAsync() => ConnectAsync("Reconnecting to IMAP…");
+
+    private static bool IsRecoverable(Exception ex) =>
+        ex is ServiceNotConnectedException ||
+        ex is ImapProtocolException ||
+        ex is ImapCommandException ||
+        ex is IOException;
 
     private async Task<IReadOnlyList<MailFolderViewModel>> LoadFoldersAsync(CancellationToken token)
     {
@@ -347,6 +429,8 @@ public sealed class ImapSyncService : IAsyncDisposable
             _client = null;
         }
 
+        _settings = null;
+        _password = null;
         _cts.Dispose();
     }
 }

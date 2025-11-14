@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
+using Microsoft.UI.Xaml;
 using Windows.UI;
 
 namespace maildot.ViewModels;
@@ -15,6 +16,7 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
     private string _currentFolderTitle = "Mailbox";
     private string _accountSummary = "Connected to IMAP";
     private bool _canLoadMore;
+    private bool _isRetryVisible;
 
     public ObservableCollection<MailFolderViewModel> Folders { get; } = new();
     public ObservableCollection<EmailMessageViewModel> Messages { get; } = new();
@@ -123,6 +125,22 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
         }
     }
 
+    public bool IsRetryVisible
+    {
+        get => _isRetryVisible;
+        private set
+        {
+            if (_isRetryVisible != value)
+            {
+                _isRetryVisible = value;
+                OnPropertyChanged(nameof(IsRetryVisible));
+                OnPropertyChanged(nameof(RetryVisibility));
+            }
+        }
+    }
+
+    public Visibility RetryVisibility => _isRetryVisible ? Visibility.Visible : Visibility.Collapsed;
+
     public void SetStatus(string message, bool isBusy)
     {
         StatusMessage = message;
@@ -145,6 +163,11 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
         {
             Messages.Add(message);
         }
+    }
+
+    public void SetRetryVisible(bool isVisible)
+    {
+        IsRetryVisible = isVisible;
     }
 
     public void UpdateFolderCounts(string folderId, int unreadCount)

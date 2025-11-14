@@ -78,6 +78,8 @@ namespace maildot
             _dashboardView.FolderSelected += OnFolderSelected;
             _dashboardView.LoadMoreRequested -= OnLoadMoreRequested;
             _dashboardView.LoadMoreRequested += OnLoadMoreRequested;
+            _dashboardView.RetryRequested -= OnRetryRequested;
+            _dashboardView.RetryRequested += OnRetryRequested;
             _dashboardView.BindViewModel(_mailboxViewModel);
             RootContent.Content = _dashboardView;
 
@@ -127,6 +129,17 @@ namespace maildot
             }
 
             _ = _imapService.LoadOlderMessagesAsync(folder.Id);
+        }
+
+        private void OnRetryRequested(object? sender, EventArgs e)
+        {
+            if (_imapService == null || _mailboxViewModel?.SelectedFolder is not MailFolderViewModel folder)
+            {
+                return;
+            }
+
+            _mailboxViewModel.SetRetryVisible(false);
+            _ = _imapService.LoadFolderAsync(folder.Id);
         }
 
         private async Task CleanupImapServiceAsync()
