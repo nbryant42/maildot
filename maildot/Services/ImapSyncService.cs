@@ -10,6 +10,7 @@ using maildot.Models;
 using maildot.ViewModels;
 using Microsoft.UI.Dispatching;
 using MimeKit;
+using Windows.UI;
 
 namespace maildot.Services;
 
@@ -274,12 +275,22 @@ public sealed class ImapSyncService : IAsyncDisposable
                     ? senderName!
                     : senderAddress ?? "(Unknown sender)";
 
+                var colorComponents = SenderColorHelper.GetColor(senderName, senderAddress);
+                var messageColor = new Color
+                {
+                    A = 255,
+                    R = colorComponents.R,
+                    G = colorComponents.G,
+                    B = colorComponents.B
+                };
+
                 return new EmailMessageViewModel
                 {
                     Id = summary.UniqueId.Id.ToString(),
                     Subject = summary.Envelope?.Subject ?? "(No subject)",
                     Sender = senderDisplay,
                     SenderInitials = SenderInitialsHelper.From(senderName, senderAddress),
+                    SenderColor = messageColor,
                     Preview = summary.Envelope?.Subject ?? string.Empty,
                     Received = summary.InternalDate?.DateTime ?? DateTime.UtcNow
                 };

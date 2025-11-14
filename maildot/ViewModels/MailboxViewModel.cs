@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
+using Windows.UI;
 
 namespace maildot.ViewModels;
 
@@ -197,6 +198,7 @@ public sealed class EmailMessageViewModel
     public string Subject { get; init; } = "(No subject)";
     public string Sender { get; init; } = "(Unknown sender)";
     public string SenderInitials { get; init; } = string.Empty;
+    public Color SenderColor { get; init; }
     public string Preview { get; init; } = string.Empty;
     public DateTime Received { get; init; }
 

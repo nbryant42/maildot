@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <Compile Include="..\maildot\Services\SenderInitialsHelper.cs" Link="SenderInitialsHelper.cs" />
+    <Compile Include="..\maildot\Services\SenderColorHelper.cs" Link="SenderColorHelper.cs" />
   </ItemGroup>
 
 </Project>

@@ -67,7 +67,11 @@
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
                                     <Grid Width="36" Height="36">
-                                        <Ellipse Fill="{ThemeResource AccentFillColorDefaultBrush}" />
+                                        <Ellipse>
+                                            <Ellipse.Fill>
+                                                <SolidColorBrush Color="{Binding SenderColor}" />
+                                            </Ellipse.Fill>
+                                        </Ellipse>
                                         <TextBlock Text="{x:Bind SenderInitials}"
                                                    HorizontalAlignment="Center"
                                                    VerticalAlignment="Center"
