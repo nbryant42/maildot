@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using System.Threading.Tasks;
+using maildot.Models;
 using Windows.Security.Credentials;
 
 namespace maildot.Services;
@@ -27,24 +28,27 @@ public sealed class CredentialAccessResponse
 
 internal static class CredentialManager
 {
-    private const string ResourceName = "maildot.imap";
-
-    public static void SavePassword(string username, string password)
+    public static void SavePassword(AccountSettings account, string password)
     {
-        var vault = new PasswordVault();
-        RemoveExisting(vault, username);
+        if (account == null) throw new ArgumentNullException(nameof(account));
 
-        var credential = new PasswordCredential(ResourceName, username, password);
+        var resource = GetResourceName(account);
+        var vault = new PasswordVault();
+        RemoveExisting(vault, resource, account.Username);
+
+        var credential = new PasswordCredential(resource, account.Username, password);
         vault.Add(credential);
     }
 
-    // This is *possibly* async because in future we might want to prompt the user for consent.
-    public static Task<CredentialAccessResponse> RequestPasswordAsync(string username)
+    public static Task<CredentialAccessResponse> RequestPasswordAsync(AccountSettings account)
     {
+        if (account == null) throw new ArgumentNullException(nameof(account));
+
+        var resource = GetResourceName(account);
         try
         {
             var vault = new PasswordVault();
-            var credential = vault.Retrieve(ResourceName, username);
+            var credential = vault.Retrieve(resource, account.Username);
             credential.RetrievePassword();
             return Task.FromResult(new CredentialAccessResponse(CredentialAccessResult.Success, credential.Password));
         }
@@ -54,11 +58,11 @@ internal static class CredentialManager
         }
     }
 
-    private static void RemoveExisting(PasswordVault vault, string username)
+    private static void RemoveExisting(PasswordVault vault, string resourceName, string username)
     {
         try
         {
-            var existing = vault.FindAllByResource(ResourceName)
+            var existing = vault.FindAllByResource(resourceName)
                 .Where(c => string.Equals(c.UserName, username, StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
@@ -73,4 +77,10 @@ internal static class CredentialManager
         }
     }
 
+    private static string GetResourceName(AccountSettings account)
+    {
+        var host = account.Server?.Trim() ?? "unknown";
+        var username = account.Username?.Trim() ?? "user";
+        return $"IMAP:{host}:{username}";
+    }
 }

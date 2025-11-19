@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using maildot.Models;
 using maildot.Services;
@@ -15,6 +17,8 @@ namespace maildot
         private ImapDashboardView? _dashboardView;
         private MailboxViewModel? _mailboxViewModel;
         private ImapSyncService? _imapService;
+        private readonly List<AccountSettings> _accounts = new();
+        private AccountSettings? _activeAccount;
         private bool _startupInitialized;
 
         public MainWindow()
@@ -38,21 +42,22 @@ namespace maildot
 
         private async Task EvaluateStartupAsync()
         {
-            var storedSettings = AccountSettingsStore.Load();
-            if (storedSettings is { HasServerInfo: true })
+            RefreshAccounts();
+            if (_accounts.Count == 0)
             {
-                var credentialResponse = await CredentialManager.RequestPasswordAsync(storedSettings.Username);
-                if (credentialResponse.Result == CredentialAccessResult.Success && !string.IsNullOrWhiteSpace(credentialResponse.Password))
-                {
-                    ShowDashboard(storedSettings, credentialResponse.Password);
-                    return;
-                }
-
-                await ShowAccountSetup(storedSettings, GetStatusMessage(credentialResponse.Result));
+                await ShowAccountSetup(null, "Please enter your IMAP server details to begin.");
                 return;
             }
 
-            await ShowAccountSetup(null, "Please enter your IMAP server details to begin.");
+            var activeAccount = AccountSettingsStore.GetActiveAccount() ?? _accounts.First();
+            AccountSettingsStore.SetActiveAccount(activeAccount.Id);
+            await SignInAsync(activeAccount);
+        }
+
+        private void RefreshAccounts()
+        {
+            _accounts.Clear();
+            _accounts.AddRange(AccountSettingsStore.GetAllAccounts());
         }
 
         private async Task ShowAccountSetup(AccountSettings? existing, string? statusMessage = null)
@@ -60,43 +65,88 @@ namespace maildot
             await CleanupImapServiceAsync();
 
             _accountSetupView ??= new AccountSetupView();
-            _accountSetupView.SettingsSaved -= OnAccountSettingsSaved;
-            _accountSetupView.SettingsSaved += OnAccountSettingsSaved;
+            _accountSetupView.SettingsSaved -= OnAccountSettingsSavedAsync;
+            _accountSetupView.SettingsSaved += OnAccountSettingsSavedAsync;
             _accountSetupView.Initialize(existing, statusMessage);
             RootContent.Content = _accountSetupView;
         }
 
+        private async void OnAccountSettingsSavedAsync(object? sender, AccountSetupResultEventArgs e)
+        {
+            AccountSettingsStore.AddOrUpdate(e.Settings);
+            RefreshAccounts();
+            CredentialManager.SavePassword(e.Settings, e.Password);
+            await SignInAsync(e.Settings);
+        }
+
+        private async Task SignInAsync(AccountSettings account)
+        {
+            var response = await CredentialManager.RequestPasswordAsync(account);
+            if (response.Result == CredentialAccessResult.Success && !string.IsNullOrWhiteSpace(response.Password))
+            {
+                ShowDashboard(account, response.Password);
+                return;
+            }
+
+            var manualPassword = await PromptForPasswordAsync(account);
+            if (!string.IsNullOrWhiteSpace(manualPassword))
+            {
+                CredentialManager.SavePassword(account, manualPassword);
+                ShowDashboard(account, manualPassword);
+                return;
+            }
+
+            await ShowAccountSetup(account, "Password is required to connect.");
+        }
+
+        private async Task<string?> PromptForPasswordAsync(AccountSettings account)
+        {
+            var passwordBox = new PasswordBox { PlaceholderText = "Password", Width = 300 };
+            var content = new StackPanel { Spacing = 8 };
+            content.Children.Add(new TextBlock
+            {
+                Text = $"Enter the password for {account.AccountName ?? account.Username}.",
+                TextWrapping = TextWrapping.Wrap
+            });
+            content.Children.Add(passwordBox);
+
+            var dialog = new ContentDialog
+            {
+                Title = "Password required",
+                PrimaryButtonText = "Save",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+                Content = content,
+                XamlRoot = RootContent.XamlRoot
+            };
+
+            var result = await dialog.ShowAsync();
+            return result == ContentDialogResult.Primary ? passwordBox.Password : null;
+        }
+
         private void ShowDashboard(AccountSettings settings, string password)
         {
-            _mailboxViewModel = new MailboxViewModel();
-            _mailboxViewModel.SetAccountSummary($"Connected to {settings.Server} as {settings.Username}");
-
-            _dashboardView ??= new ImapDashboardView();
-            _dashboardView.RequestReauthentication -= OnDashboardReauthRequested;
-            _dashboardView.RequestReauthentication += OnDashboardReauthRequested;
-            _dashboardView.FolderSelected -= OnFolderSelected;
-            _dashboardView.FolderSelected += OnFolderSelected;
-            _dashboardView.LoadMoreRequested -= OnLoadMoreRequested;
-            _dashboardView.LoadMoreRequested += OnLoadMoreRequested;
-            _dashboardView.RetryRequested -= OnRetryRequested;
-            _dashboardView.RetryRequested += OnRetryRequested;
-            _dashboardView.BindViewModel(_mailboxViewModel);
-            RootContent.Content = _dashboardView;
-
+            _activeAccount = settings;
+            EnsureDashboard();
+            _mailboxViewModel!.SetAccountSummary($"{settings.AccountName} ({settings.Username})");
             _ = StartImapSyncAsync(settings, password);
         }
 
-        private void OnAccountSettingsSaved(object? sender, AccountSetupResultEventArgs e)
+        private void EnsureDashboard()
         {
-            AccountSettingsStore.Save(e.Settings);
-            CredentialManager.SavePassword(e.Settings.Username, e.Password);
-            ShowDashboard(e.Settings, e.Password);
-        }
+            _mailboxViewModel ??= new MailboxViewModel();
 
-        private async void OnDashboardReauthRequested(object? sender, EventArgs e)
-        {
-            var stored = AccountSettingsStore.Load();
-            await ShowAccountSetup(stored, "Please re-enter your password.");
+            if (_dashboardView == null)
+            {
+                _dashboardView = new ImapDashboardView();
+                _dashboardView.FolderSelected += OnFolderSelected;
+                _dashboardView.LoadMoreRequested += OnLoadMoreRequested;
+                _dashboardView.RetryRequested += OnRetryRequested;
+                _dashboardView.SettingsRequested += OnSettingsRequested;
+            }
+
+            _dashboardView.BindViewModel(_mailboxViewModel);
+            RootContent.Content = _dashboardView;
         }
 
         private async Task StartImapSyncAsync(AccountSettings settings, string password)
@@ -133,13 +183,97 @@ namespace maildot
 
         private void OnRetryRequested(object? sender, EventArgs e)
         {
-            if (_imapService == null || _mailboxViewModel?.SelectedFolder is not MailFolderViewModel folder)
+            if (_imapService != null && _mailboxViewModel?.SelectedFolder is MailFolderViewModel folder)
+            {
+                _mailboxViewModel.SetRetryVisible(false);
+                _ = _imapService.LoadFolderAsync(folder.Id);
+                return;
+            }
+
+            if (_activeAccount != null)
+            {
+                _mailboxViewModel?.SetRetryVisible(false);
+                _ = SignInAsync(_activeAccount);
+            }
+        }
+
+        private async void OnSettingsRequested(object? sender, EventArgs e)
+        {
+            await ShowSettingsDialogAsync();
+        }
+
+        private async Task ShowSettingsDialogAsync()
+        {
+            if (_accounts.Count == 0)
+            {
+                await ShowAccountSetup(null);
+                return;
+            }
+
+            var settingsView = new SettingsView();
+            settingsView.Initialize(_accounts, _activeAccount?.Id);
+
+            var dialog = new ContentDialog
+            {
+                Title = "Settings",
+                Content = settingsView,
+                PrimaryButtonText = "Close",
+                XamlRoot = RootContent.XamlRoot
+            };
+
+            settingsView.AddAccountRequested += async (_, __) =>
+            {
+                dialog.Hide();
+                await ShowAccountSetup(null);
+            };
+
+            settingsView.SetActiveAccountRequested += async (_, id) =>
+            {
+                dialog.Hide();
+                await SwitchActiveAccountAsync(id);
+            };
+
+            settingsView.ReenterPasswordRequested += async (_, id) =>
+            {
+                dialog.Hide();
+                await ReenterPasswordAsync(id);
+            };
+
+            await dialog.ShowAsync();
+        }
+
+        private async Task SwitchActiveAccountAsync(Guid accountId)
+        {
+            RefreshAccounts();
+            var account = _accounts.FirstOrDefault(a => a.Id == accountId);
+            if (account == null)
             {
                 return;
             }
 
-            _mailboxViewModel.SetRetryVisible(false);
-            _ = _imapService.LoadFolderAsync(folder.Id);
+            AccountSettingsStore.SetActiveAccount(accountId);
+            await SignInAsync(account);
+        }
+
+        private async Task ReenterPasswordAsync(Guid accountId)
+        {
+            var account = _accounts.FirstOrDefault(a => a.Id == accountId);
+            if (account == null)
+            {
+                return;
+            }
+
+            var password = await PromptForPasswordAsync(account);
+            if (string.IsNullOrWhiteSpace(password))
+            {
+                return;
+            }
+
+            CredentialManager.SavePassword(account, password);
+            if (_activeAccount?.Id == account.Id)
+            {
+                ShowDashboard(account, password);
+            }
         }
 
         private async Task CleanupImapServiceAsync()
@@ -150,13 +284,5 @@ namespace maildot
                 _imapService = null;
             }
         }
-
-        private static string? GetStatusMessage(CredentialAccessResult result) => result switch
-        {
-            CredentialAccessResult.ConsentDenied => "Windows Hello verification was cancelled.",
-            CredentialAccessResult.MissingHello => "Windows Hello is unavailable; you need to re-enter your password.",
-            CredentialAccessResult.NotFound => "Stored credentials are missing; please re-enter your password.",
-            _ => null
-        };
     }
 }

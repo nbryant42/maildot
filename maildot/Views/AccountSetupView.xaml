@@ -12,6 +12,7 @@
             <StackPanel Spacing="12">
                 <TextBlock Text="Connect to your IMAP server" FontSize="24" FontWeight="SemiBold" />
 
+                <TextBox x:Name="AccountNameTextBox" Header="Account name" PlaceholderText="Work email" />
                 <TextBox x:Name="ServerTextBox" Header="IMAP Server" PlaceholderText="imap.example.com" />
                 <TextBox x:Name="PortTextBox" Header="Port" PlaceholderText="993" InputScope="Number" />
                 <TextBox x:Name="UsernameTextBox" Header="Username" PlaceholderText="me@example.com" />

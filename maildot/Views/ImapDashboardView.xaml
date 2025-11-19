@@ -53,10 +53,12 @@
                         Visibility="{Binding RetryVisibility}"
                         Click="OnRetryClicked"
                         HorizontalAlignment="Left" />
-                <Button x:Name="ReauthButton"
-                        Content="Re-enter password"
-                        Click="OnReauthClicked"
-                        HorizontalAlignment="Left" />
+                <Button x:Name="SettingsButton"
+                        Click="OnSettingsClicked"
+                        HorizontalAlignment="Left"
+                        ToolTipService.ToolTip="Open settings">
+                    <FontIcon Glyph="&#xE713;" />
+                </Button>
             </StackPanel>
 
             <Border Grid.Row="1" Padding="0" Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="8">

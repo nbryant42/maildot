@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace maildot.Models;
 
@@ -9,10 +12,14 @@ namespace maildot.Models;
 /// </summary>
 public sealed class AccountSettings
 {
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string AccountName { get; set; } = string.Empty;
     public string Server { get; set; } = string.Empty;
     public int Port { get; set; } = 993;
     public bool UseSsl { get; set; } = true;
     public string Username { get; set; } = string.Empty;
+    [JsonIgnore]
+    public bool IsActive { get; set; }
 
     public bool HasServerInfo =>
         !string.IsNullOrWhiteSpace(Server) &&
@@ -20,38 +27,142 @@ public sealed class AccountSettings
         Port > 0;
 }
 
+internal sealed class AccountStoreModel
+{
+    public Guid? ActiveAccountId { get; set; }
+    public List<AccountSettings> Accounts { get; set; } = new();
+}
+
 internal static class AccountSettingsStore
 {
     private static readonly string SettingsPath =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "maildot",
-            "account.json");
+            "accounts.json");
 
-    public static AccountSettings? Load()
+    private static readonly JsonSerializerOptions SerializerOptions = new()
+    {
+        WriteIndented = true
+    };
+
+    public static IReadOnlyList<AccountSettings> GetAllAccounts()
+    {
+        var store = LoadStore();
+        NormalizeStore(store);
+        return store.Accounts
+            .OrderBy(a => a.AccountName)
+            .ThenBy(a => a.Username)
+            .ToList();
+    }
+
+    public static AccountSettings? GetActiveAccount()
+    {
+        var store = LoadStore();
+        NormalizeStore(store);
+        if (store.ActiveAccountId is Guid id)
+        {
+            return store.Accounts.FirstOrDefault(a => a.Id == id);
+        }
+
+        return store.Accounts.FirstOrDefault();
+    }
+
+    public static void AddOrUpdate(AccountSettings settings, bool makeActive = true)
+    {
+        var store = LoadStore();
+        NormalizeStore(store);
+        var existingIndex = store.Accounts.FindIndex(a => a.Id == settings.Id);
+        if (existingIndex >= 0)
+        {
+            store.Accounts[existingIndex] = settings;
+        }
+        else
+        {
+            store.Accounts.Add(settings);
+        }
+
+        if (makeActive)
+        {
+            store.ActiveAccountId = settings.Id;
+        }
+
+        NormalizeStore(store);
+        SaveStore(store);
+    }
+
+    public static void SetActiveAccount(Guid accountId)
+    {
+        var store = LoadStore();
+        if (store.Accounts.Any(a => a.Id == accountId))
+        {
+            store.ActiveAccountId = accountId;
+            NormalizeStore(store);
+            SaveStore(store);
+        }
+    }
+
+    public static void RemoveAccount(Guid accountId)
+    {
+        var store = LoadStore();
+        var removed = store.Accounts.RemoveAll(a => a.Id == accountId);
+        if (removed > 0)
+        {
+            if (store.ActiveAccountId == accountId)
+            {
+                store.ActiveAccountId = store.Accounts.FirstOrDefault()?.Id;
+            }
+
+            NormalizeStore(store);
+            SaveStore(store);
+        }
+    }
+
+    private static AccountStoreModel LoadStore()
     {
         try
         {
             if (!File.Exists(SettingsPath))
             {
-                return null;
+                return new AccountStoreModel();
             }
 
             var json = File.ReadAllText(SettingsPath);
             if (string.IsNullOrWhiteSpace(json))
             {
-                return null;
+                return new AccountStoreModel();
             }
 
-            return JsonSerializer.Deserialize<AccountSettings>(json);
+            var store = JsonSerializer.Deserialize<AccountStoreModel>(json);
+            if (store != null)
+            {
+                NormalizeStore(store);
+                return store;
+            }
+
+            // Migration path from single-account file.
+            var legacy = JsonSerializer.Deserialize<AccountSettings>(json);
+            if (legacy != null)
+            {
+                var migrated = new AccountStoreModel
+                {
+                    Accounts = new List<AccountSettings> { legacy },
+                    ActiveAccountId = legacy.Id
+                };
+                NormalizeStore(migrated);
+                return migrated;
+            }
         }
         catch
         {
             // Ignore to force reconfiguration.
-            return null;
         }
+
+        var fallback = new AccountStoreModel();
+        NormalizeStore(fallback);
+        return fallback;
     }
 
-    public static void Save(AccountSettings settings)
+    private static void SaveStore(AccountStoreModel store)
     {
         var directory = Path.GetDirectoryName(SettingsPath);
         if (!string.IsNullOrEmpty(directory))
@@ -59,15 +170,15 @@ internal static class AccountSettingsStore
             Directory.CreateDirectory(directory);
         }
 
-        var json = JsonSerializer.Serialize(settings);
+        var json = JsonSerializer.Serialize(store, SerializerOptions);
         File.WriteAllText(SettingsPath, json);
     }
 
-    public static void Clear()
+    private static void NormalizeStore(AccountStoreModel store)
     {
-        if (File.Exists(SettingsPath))
+        foreach (var account in store.Accounts)
         {
-            File.Delete(SettingsPath);
+            account.IsActive = store.ActiveAccountId == account.Id;
         }
     }
 }

@@ -9,6 +9,8 @@ namespace maildot.Views;
 
 public sealed partial class AccountSetupView : UserControl
 {
+    private Guid _accountId = Guid.NewGuid();
+
     public AccountSetupView()
     {
         InitializeComponent();
@@ -18,6 +20,8 @@ public sealed partial class AccountSetupView : UserControl
 
     public void Initialize(AccountSettings? settings, string? statusMessage = null)
     {
+        _accountId = settings?.Id ?? Guid.NewGuid();
+        AccountNameTextBox.Text = settings?.AccountName ?? string.Empty;
         ServerTextBox.Text = settings?.Server ?? string.Empty;
         PortTextBox.Text = settings is null ? "993" : settings.Port.ToString();
         UsernameTextBox.Text = settings?.Username ?? string.Empty;
@@ -54,8 +58,16 @@ public sealed partial class AccountSetupView : UserControl
             return;
         }
 
+        var accountName = AccountNameTextBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(accountName))
+        {
+            accountName = $"{username}@{server}";
+        }
+
         var settings = new AccountSettings
         {
+            Id = _accountId,
+            AccountName = accountName,
             Server = server,
             Port = port,
             Username = username,

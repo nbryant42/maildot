@@ -17,19 +17,14 @@ public sealed partial class ImapDashboardView : UserControl
         InitializeComponent();
     }
 
-    public event EventHandler? RequestReauthentication;
     public event EventHandler<MailFolderViewModel>? FolderSelected;
     public event EventHandler? RetryRequested;
     public event EventHandler? LoadMoreRequested;
+    public event EventHandler? SettingsRequested;
 
     public void BindViewModel(MailboxViewModel viewModel)
     {
         DataContext = viewModel;
-    }
-
-    private void OnReauthClicked(object sender, RoutedEventArgs e)
-    {
-        RequestReauthentication?.Invoke(this, EventArgs.Empty);
     }
 
     private void OnFolderSelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -44,6 +39,11 @@ public sealed partial class ImapDashboardView : UserControl
     private void OnRetryClicked(object sender, RoutedEventArgs e)
     {
         RetryRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void OnSettingsClicked(object sender, RoutedEventArgs e)
+    {
+        SettingsRequested?.Invoke(this, EventArgs.Empty);
     }
 
     private void OnMessagesListLoaded(object sender, RoutedEventArgs e)

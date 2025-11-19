@@ -1,0 +1,36 @@
+<UserControl
+    x:Class="maildot.Views.SettingsView"
+    x:Name="Root"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:models="using:maildot.Models">
+
+    <StackPanel Spacing="16" Width="420">
+        <TextBlock Text="Settings" FontSize="24" FontWeight="SemiBold" />
+
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="8">
+            <TextBlock Text="Accounts" FontSize="18" FontWeight="SemiBold" />
+            <Button Content="Add"
+                    Click="OnAddAccountClicked"
+                    HorizontalAlignment="Left" />
+        </StackPanel>
+
+        <ListView ItemsSource="{x:Bind Accounts}">
+            <ListView.ItemTemplate>
+                <DataTemplate x:DataType="models:AccountSettings">
+                    <StackPanel Spacing="4" Padding="8">
+                        <TextBlock Text="{x:Bind AccountName}" FontWeight="SemiBold" />
+                        <TextBlock Text="{x:Bind Username}" />
+                        <TextBlock Text="{x:Bind Server}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Content="Set active"
+                                    Click="OnSetActiveClicked" />
+                            <Button Content="Re-enter password"
+                                    Click="OnReenterPasswordClicked" />
+                        </StackPanel>
+                    </StackPanel>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+    </StackPanel>
+</UserControl>
