@@ -23,6 +23,10 @@ public sealed partial class ImapDashboardView : UserControl
     public event EventHandler? RetryRequested;
     public event EventHandler? LoadMoreRequested;
     public event EventHandler? SettingsRequested;
+    public event EventHandler? ComposeRequested;
+    public event EventHandler<EmailMessageViewModel>? ReplyRequested;
+    public event EventHandler<EmailMessageViewModel>? ReplyAllRequested;
+    public event EventHandler<EmailMessageViewModel>? ForwardRequested;
 
     public void BindViewModel(MailboxViewModel viewModel)
     {
@@ -46,6 +50,35 @@ public sealed partial class ImapDashboardView : UserControl
     private void OnSettingsClicked(object sender, RoutedEventArgs e)
     {
         SettingsRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void OnComposeClicked(object sender, RoutedEventArgs e)
+    {
+        ComposeRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void OnReplyClicked(object sender, RoutedEventArgs e)
+    {
+        if (MessagesList.SelectedItem is EmailMessageViewModel message)
+        {
+            ReplyRequested?.Invoke(this, message);
+        }
+    }
+
+    private void OnReplyAllClicked(object sender, RoutedEventArgs e)
+    {
+        if (MessagesList.SelectedItem is EmailMessageViewModel message)
+        {
+            ReplyAllRequested?.Invoke(this, message);
+        }
+    }
+
+    private void OnForwardClicked(object sender, RoutedEventArgs e)
+    {
+        if (MessagesList.SelectedItem is EmailMessageViewModel message)
+        {
+            ForwardRequested?.Invoke(this, message);
+        }
     }
 
     private void OnMessagesListLoaded(object sender, RoutedEventArgs e)

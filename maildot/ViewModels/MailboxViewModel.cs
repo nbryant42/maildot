@@ -234,6 +234,7 @@ public sealed class EmailMessageViewModel
     public string Id { get; init; } = Guid.NewGuid().ToString();
     public string Subject { get; init; } = "(No subject)";
     public string Sender { get; init; } = "(Unknown sender)";
+    public string SenderAddress { get; init; } = string.Empty;
     public string SenderInitials { get; init; } = string.Empty;
     public Color SenderColor { get; init; }
     public string Preview { get; init; } = string.Empty;

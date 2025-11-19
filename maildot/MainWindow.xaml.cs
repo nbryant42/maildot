@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 using maildot.Models;
 using maildot.Services;
@@ -8,6 +9,8 @@ using maildot.Views;
 using maildot.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using MimeKit;
+using Windows.System;
 
 namespace maildot
 {
@@ -152,6 +155,14 @@ namespace maildot
             _dashboardView.SettingsRequested += OnSettingsRequested;
             _dashboardView.MessageSelected -= OnMessageSelected;
             _dashboardView.MessageSelected += OnMessageSelected;
+            _dashboardView.ComposeRequested -= OnComposeRequested;
+            _dashboardView.ComposeRequested += OnComposeRequested;
+            _dashboardView.ReplyRequested -= OnReplyRequested;
+            _dashboardView.ReplyRequested += OnReplyRequested;
+            _dashboardView.ReplyAllRequested -= OnReplyAllRequested;
+            _dashboardView.ReplyAllRequested += OnReplyAllRequested;
+            _dashboardView.ForwardRequested -= OnForwardRequested;
+            _dashboardView.ForwardRequested += OnForwardRequested;
 
             _dashboardView.BindViewModel(_mailboxViewModel);
             RootContent.Content = _dashboardView;
@@ -320,6 +331,114 @@ namespace maildot
             {
                 await _dashboardView.ClearMessageContentAsync();
             }
+        }
+
+        private async void OnComposeRequested(object? sender, EventArgs e)
+        {
+            var uri = BuildMailToUri(Array.Empty<string>(), null, null);
+            await Launcher.LaunchUriAsync(uri);
+        }
+
+        private async void OnReplyRequested(object? sender, EmailMessageViewModel message) =>
+            await LaunchReplyAsync(message);
+
+        private async void OnReplyAllRequested(object? sender, EmailMessageViewModel message) =>
+            await LaunchReplyAsync(message);
+
+        private async Task LaunchReplyAsync(EmailMessageViewModel message)
+        {
+            var to = ExtractAddress(message);
+            if (string.IsNullOrEmpty(to))
+            {
+                return;
+            }
+
+            var body = BuildQuotedBody(message);
+            var uri = BuildMailToUri(new[] { to }, $"Re: {message.Subject}", body);
+            await Launcher.LaunchUriAsync(uri);
+        }
+
+        private async void OnForwardRequested(object? sender, EmailMessageViewModel message)
+        {
+            var body = $"Forwarded message:\r\nFrom: {message.Sender}\r\nSubject: {message.Subject}\r\n\r\n{message.Preview}";
+            var uri = BuildMailToUri(Array.Empty<string>(), $"Fwd: {message.Subject}", body);
+            await Launcher.LaunchUriAsync(uri);
+        }
+
+        private static Uri BuildMailToUri(IEnumerable<string> recipients, string? subject, string? body)
+        {
+            var builder = new StringBuilder("mailto:");
+            var toList = recipients?
+                .Where(r => !string.IsNullOrWhiteSpace(r))
+                .Select(r => r.Trim())
+                .ToList() ?? new List<string>();
+
+            if (toList.Count > 0)
+            {
+                builder.Append(string.Join(",", toList));
+            }
+
+            var parameters = new List<string>();
+            if (!string.IsNullOrWhiteSpace(subject))
+            {
+                parameters.Add($"subject={Uri.EscapeDataString(subject)}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(body))
+            {
+                parameters.Add($"body={Uri.EscapeDataString(body)}");
+            }
+
+            if (parameters.Count > 0)
+            {
+                builder.Append('?');
+                builder.Append(string.Join("&", parameters));
+            }
+
+            if (Uri.TryCreate(builder.ToString(), UriKind.Absolute, out var uri))
+            {
+                return uri;
+            }
+
+            return new Uri("mailto:");
+        }
+
+        private static string? ExtractAddress(EmailMessageViewModel message)
+        {
+            var address = message.SenderAddress;
+            if (!string.IsNullOrWhiteSpace(address))
+            {
+                return address;
+            }
+
+            var display = message.Sender;
+            if (MailboxAddress.TryParse(display, out var mailbox) && !string.IsNullOrWhiteSpace(mailbox.Address))
+            {
+                return mailbox.Address;
+            }
+
+            var trimmed = display?.Trim();
+            return trimmed != null && trimmed.Contains("@", StringComparison.Ordinal) ? trimmed : null;
+        }
+
+        private static string? BuildQuotedBody(EmailMessageViewModel message)
+        {
+            if (string.IsNullOrWhiteSpace(message.Preview))
+            {
+                return null;
+            }
+
+            var sb = new StringBuilder();
+            sb.AppendLine();
+            sb.AppendLine();
+            sb.Append("On ");
+            sb.Append(message.Received.ToString("g"));
+            sb.Append(", ");
+            sb.Append(message.Sender);
+            sb.AppendLine(" wrote:");
+            sb.AppendLine();
+            sb.AppendLine(message.Preview);
+            return sb.ToString();
         }
     }
 }

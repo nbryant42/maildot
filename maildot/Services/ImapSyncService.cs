@@ -371,6 +371,7 @@ public sealed class ImapSyncService : IAsyncDisposable
                     Id = summary.UniqueId.Id.ToString(),
                     Subject = summary.Envelope?.Subject ?? "(No subject)",
                     Sender = senderDisplay,
+                    SenderAddress = senderAddress ?? string.Empty,
                     SenderInitials = SenderInitialsHelper.From(senderName, senderAddress),
                     SenderColor = messageColor,
                     Preview = summary.Envelope?.Subject ?? string.Empty,
