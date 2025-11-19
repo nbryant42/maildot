@@ -17,6 +17,7 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
     private string _accountSummary = "Connected to IMAP";
     private bool _canLoadMore;
     private bool _isRetryVisible;
+    private EmailMessageViewModel? _selectedMessage;
 
     public ObservableCollection<MailFolderViewModel> Folders { get; } = new();
     public ObservableCollection<EmailMessageViewModel> Messages { get; } = new();
@@ -30,6 +31,19 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
             {
                 _selectedFolder = value;
                 OnPropertyChanged(nameof(SelectedFolder));
+            }
+        }
+    }
+
+    public EmailMessageViewModel? SelectedMessage
+    {
+        get => _selectedMessage;
+        set
+        {
+            if (_selectedMessage != value)
+            {
+                _selectedMessage = value;
+                OnPropertyChanged(nameof(SelectedMessage));
             }
         }
     }
@@ -224,6 +238,7 @@ public sealed class EmailMessageViewModel
     public Color SenderColor { get; init; }
     public string Preview { get; init; } = string.Empty;
     public DateTime Received { get; init; }
+    public string MessageId => Id;
 
     public string ReceivedDisplay => Received == default
         ? string.Empty

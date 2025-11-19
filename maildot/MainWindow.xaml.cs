@@ -128,6 +128,7 @@ namespace maildot
         {
             _activeAccount = settings;
             EnsureDashboard();
+            _ = _dashboardView!.ClearMessageContentAsync();
             _mailboxViewModel!.SetAccountSummary($"{settings.AccountName} ({settings.Username})");
             _ = StartImapSyncAsync(settings, password);
         }
@@ -139,11 +140,18 @@ namespace maildot
             if (_dashboardView == null)
             {
                 _dashboardView = new ImapDashboardView();
-                _dashboardView.FolderSelected += OnFolderSelected;
-                _dashboardView.LoadMoreRequested += OnLoadMoreRequested;
-                _dashboardView.RetryRequested += OnRetryRequested;
-                _dashboardView.SettingsRequested += OnSettingsRequested;
             }
+
+            _dashboardView.FolderSelected -= OnFolderSelected;
+            _dashboardView.FolderSelected += OnFolderSelected;
+            _dashboardView.LoadMoreRequested -= OnLoadMoreRequested;
+            _dashboardView.LoadMoreRequested += OnLoadMoreRequested;
+            _dashboardView.RetryRequested -= OnRetryRequested;
+            _dashboardView.RetryRequested += OnRetryRequested;
+            _dashboardView.SettingsRequested -= OnSettingsRequested;
+            _dashboardView.SettingsRequested += OnSettingsRequested;
+            _dashboardView.MessageSelected -= OnMessageSelected;
+            _dashboardView.MessageSelected += OnMessageSelected;
 
             _dashboardView.BindViewModel(_mailboxViewModel);
             RootContent.Content = _dashboardView;
@@ -168,6 +176,7 @@ namespace maildot
                 return;
             }
 
+            _dashboardView?.ClearMessageContentAsync();
             _ = _imapService.LoadFolderAsync(folder.Id);
         }
 
@@ -282,6 +291,34 @@ namespace maildot
             {
                 await _imapService.DisposeAsync();
                 _imapService = null;
+            }
+        }
+
+        private void OnMessageSelected(object? sender, EmailMessageViewModel e)
+        {
+            if (_imapService == null || _mailboxViewModel?.SelectedFolder == null)
+            {
+                return;
+            }
+
+            _ = LoadAndDisplayMessageAsync(_mailboxViewModel.SelectedFolder.Id, e.Id);
+        }
+
+        private async Task LoadAndDisplayMessageAsync(string folderId, string messageId)
+        {
+            if (_imapService == null || _dashboardView == null)
+            {
+                return;
+            }
+
+            var html = await _imapService.LoadMessageBodyAsync(folderId, messageId);
+            if (html != null)
+            {
+                await _dashboardView.DisplayMessageContentAsync(html);
+            }
+            else
+            {
+                await _dashboardView.ClearMessageContentAsync();
             }
         }
     }

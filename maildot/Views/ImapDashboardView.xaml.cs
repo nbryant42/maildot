@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 using maildot.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -18,6 +19,7 @@ public sealed partial class ImapDashboardView : UserControl
     }
 
     public event EventHandler<MailFolderViewModel>? FolderSelected;
+    public event EventHandler<EmailMessageViewModel>? MessageSelected;
     public event EventHandler? RetryRequested;
     public event EventHandler? LoadMoreRequested;
     public event EventHandler? SettingsRequested;
@@ -57,6 +59,14 @@ public sealed partial class ImapDashboardView : UserControl
         if (_messagesScrollViewer != null)
         {
             _messagesScrollViewer.ViewChanged += OnMessagesScrollViewerViewChanged;
+        }
+    }
+
+    private void OnMessagesSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (MessagesList.SelectedItem is EmailMessageViewModel message)
+        {
+            MessageSelected?.Invoke(this, message);
         }
     }
 
@@ -105,5 +115,32 @@ public sealed partial class ImapDashboardView : UserControl
         }
 
         return null;
+    }
+
+    public async Task DisplayMessageContentAsync(string html)
+    {
+        await EnsureWebViewAsync();
+        MessageWebView.NavigateToString(string.IsNullOrWhiteSpace(html) ? "<html><body></body></html>" : html);
+    }
+
+    public async Task ClearMessageContentAsync()
+    {
+        await EnsureWebViewAsync();
+        MessageWebView.NavigateToString("<html><body></body></html>");
+    }
+
+    private async Task EnsureWebViewAsync()
+    {
+        if (MessageWebView.CoreWebView2 != null)
+        {
+            return;
+        }
+
+        await MessageWebView.EnsureCoreWebView2Async();
+        var settings = MessageWebView.CoreWebView2!.Settings;
+        settings.IsScriptEnabled = false;
+        settings.AreDefaultScriptDialogsEnabled = false;
+        settings.AreDefaultContextMenusEnabled = false;
+        settings.AreDevToolsEnabled = false;
     }
 }

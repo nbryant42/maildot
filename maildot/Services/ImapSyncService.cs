@@ -433,4 +433,94 @@ public sealed class ImapSyncService : IAsyncDisposable
         _password = null;
         _cts.Dispose();
     }
+
+    public Task<string?> LoadMessageBodyAsync(string folderId, string messageId) =>
+        LoadMessageBodyInternalAsync(folderId, messageId, true);
+
+    private async Task<string?> LoadMessageBodyInternalAsync(string folderId, string messageId, bool allowReconnect)
+    {
+        if (string.IsNullOrEmpty(folderId) || string.IsNullOrEmpty(messageId))
+        {
+            return null;
+        }
+
+        var canRetry = allowReconnect;
+
+        while (true)
+        {
+            IMailFolder? folder = null;
+            await _semaphore.WaitAsync(_cts.Token);
+            try
+            {
+                if (_client == null)
+                {
+                    throw new ServiceNotConnectedException();
+                }
+
+                if (!_folderCache.TryGetValue(folderId, out folder))
+                {
+                    return null;
+                }
+
+                if (!uint.TryParse(messageId, out var idValue))
+                {
+                    return null;
+                }
+
+                if (!folder.IsOpen)
+                {
+                    await folder.OpenAsync(FolderAccess.ReadOnly, _cts.Token);
+                }
+
+                var uniqueId = new UniqueId(idValue);
+                var message = await folder.GetMessageAsync(uniqueId, _cts.Token);
+
+                var html = message.HtmlBody;
+                var plain = message.TextBody;
+
+                string htmlToRender;
+                if (!string.IsNullOrWhiteSpace(html))
+                {
+                    htmlToRender = HtmlSanitizer.Sanitize(html).Html;
+                }
+                else if (!string.IsNullOrWhiteSpace(plain))
+                {
+                    htmlToRender = $"<html><body><pre>{System.Net.WebUtility.HtmlEncode(plain)}</pre></body></html>";
+                }
+                else
+                {
+                    htmlToRender = "<html><body></body></html>";
+                }
+
+                return htmlToRender;
+            }
+            catch (Exception ex)
+            {
+                if (canRetry && IsRecoverable(ex) && await TryReconnectAsync())
+                {
+                    canRetry = false;
+                    continue;
+                }
+
+                await ReportStatusAsync($"Unable to load message: {ex.Message}", false);
+                await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
+                return null;
+            }
+            finally
+            {
+                try
+                {
+                    if (folder?.IsOpen == true)
+                    {
+                        await folder.CloseAsync(false, _cts.Token);
+                    }
+                }
+                catch
+                {
+                }
+
+                _semaphore.Release();
+            }
+        }
+    }
 }
