@@ -22,6 +22,7 @@ namespace maildot
         private ImapSyncService? _imapService;
         private readonly List<AccountSettings> _accounts = new();
         private AccountSettings? _activeAccount;
+        private PostgresSettings _postgresSettings = PostgresSettingsStore.Load();
         private bool _startupInitialized;
 
         public MainWindow()
@@ -222,6 +223,13 @@ namespace maildot
             await ShowSettingsDialogAsync();
         }
 
+        private void OnPostgresSettingsSaved(object? sender, PostgresSettingsSavedEventArgs e)
+        {
+            _postgresSettings = e.Settings;
+            PostgresSettingsStore.Save(e.Settings);
+            CredentialManager.SavePostgresPassword(e.Settings, e.Password);
+        }
+
         private async Task ShowSettingsDialogAsync()
         {
             if (_accounts.Count == 0)
@@ -231,7 +239,7 @@ namespace maildot
             }
 
             var settingsView = new SettingsView();
-            settingsView.Initialize(_accounts, _activeAccount?.Id);
+            settingsView.Initialize(_accounts, _activeAccount?.Id, _postgresSettings);
 
             var dialog = new ContentDialog
             {
@@ -259,7 +267,11 @@ namespace maildot
                 await ReenterPasswordAsync(id);
             };
 
+            settingsView.PostgresSettingsSaved += OnPostgresSettingsSaved;
+
             await dialog.ShowAsync();
+
+            settingsView.PostgresSettingsSaved -= OnPostgresSettingsSaved;
         }
 
         private async Task SwitchActiveAccountAsync(Guid accountId)

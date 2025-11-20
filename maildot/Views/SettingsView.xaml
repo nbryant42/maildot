@@ -5,32 +5,47 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:models="using:maildot.Models">
 
-    <StackPanel Spacing="16" Width="420">
-        <TextBlock Text="Settings" FontSize="24" FontWeight="SemiBold" />
+    <ScrollViewer>
+        <StackPanel Spacing="16" Width="460">
+            <TextBlock Text="Settings" FontSize="24" FontWeight="SemiBold" />
 
-        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="8">
-            <TextBlock Text="Accounts" FontSize="18" FontWeight="SemiBold" />
-            <Button Content="Add"
-                    Click="OnAddAccountClicked"
-                    HorizontalAlignment="Left" />
-        </StackPanel>
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="8">
+                <TextBlock Text="Accounts" FontSize="18" FontWeight="SemiBold" />
+                <Button Content="Add"
+                        Click="OnAddAccountClicked"
+                        HorizontalAlignment="Left" />
+            </StackPanel>
 
-        <ListView ItemsSource="{x:Bind Accounts}">
-            <ListView.ItemTemplate>
-                <DataTemplate x:DataType="models:AccountSettings">
-                    <StackPanel Spacing="4" Padding="8">
-                        <TextBlock Text="{x:Bind AccountName}" FontWeight="SemiBold" />
-                        <TextBlock Text="{x:Bind Username}" />
-                        <TextBlock Text="{x:Bind Server}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <Button Content="Set active"
-                                    Click="OnSetActiveClicked" />
-                            <Button Content="Re-enter password"
-                                    Click="OnReenterPasswordClicked" />
+            <ListView ItemsSource="{x:Bind Accounts}">
+                <ListView.ItemTemplate>
+                    <DataTemplate x:DataType="models:AccountSettings">
+                        <StackPanel Spacing="4" Padding="8">
+                            <TextBlock Text="{x:Bind AccountName}" FontWeight="SemiBold" />
+                            <TextBlock Text="{x:Bind Username}" />
+                            <TextBlock Text="{x:Bind Server}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Button Content="Set active"
+                                        Click="OnSetActiveClicked" />
+                                <Button Content="Re-enter password"
+                                        Click="OnReenterPasswordClicked" />
+                            </StackPanel>
                         </StackPanel>
-                    </StackPanel>
-                </DataTemplate>
-            </ListView.ItemTemplate>
-        </ListView>
-    </StackPanel>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+
+            <StackPanel Spacing="8">
+                <TextBlock Text="PostgreSQL" FontSize="18" FontWeight="SemiBold" />
+                <TextBox x:Name="PgHostTextBox" Header="Host" />
+                <TextBox x:Name="PgPortTextBox" Header="Port" PlaceholderText="5432" InputScope="Number" />
+                <TextBox x:Name="PgDatabaseTextBox" Header="Database" />
+                <TextBox x:Name="PgUsernameTextBox" Header="Username" />
+                <PasswordBox x:Name="PgPasswordBox" Header="Password" PasswordRevealMode="Peek" />
+                <CheckBox x:Name="PgSslCheckBox" Content="Use SSL" IsChecked="True" />
+                <TextBlock x:Name="PgStatusTextBlock" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                <Button Content="Save PostgreSQL settings"
+                        Click="OnSavePostgresClicked" />
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
 </UserControl>

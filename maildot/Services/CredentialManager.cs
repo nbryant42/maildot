@@ -32,23 +32,45 @@ internal static class CredentialManager
     {
         if (account == null) throw new ArgumentNullException(nameof(account));
 
-        var resource = GetResourceName(account);
-        var vault = new PasswordVault();
-        RemoveExisting(vault, resource, account.Username);
-
-        var credential = new PasswordCredential(resource, account.Username, password);
-        vault.Add(credential);
+        var resource = GetResourceName("IMAP", account.Server, account.Username);
+        Save(resource, account.Username, password);
     }
 
     public static Task<CredentialAccessResponse> RequestPasswordAsync(AccountSettings account)
     {
         if (account == null) throw new ArgumentNullException(nameof(account));
 
-        var resource = GetResourceName(account);
+        var resource = GetResourceName("IMAP", account.Server, account.Username);
+        return RetrieveAsync(resource, account.Username);
+    }
+
+    public static void SavePostgresPassword(PostgresSettings settings, string password)
+    {
+        var resource = GetResourceName("PG", settings.Host, settings.Username);
+        Save(resource, settings.Username, password);
+    }
+
+    public static Task<CredentialAccessResponse> RequestPostgresPasswordAsync(PostgresSettings settings)
+    {
+        var resource = GetResourceName("PG", settings.Host, settings.Username);
+        return RetrieveAsync(resource, settings.Username);
+    }
+
+    private static void Save(string resource, string username, string password)
+    {
+        var vault = new PasswordVault();
+        RemoveExisting(vault, resource, username);
+
+        var credential = new PasswordCredential(resource, username, password);
+        vault.Add(credential);
+    }
+
+    private static Task<CredentialAccessResponse> RetrieveAsync(string resource, string username)
+    {
         try
         {
             var vault = new PasswordVault();
-            var credential = vault.Retrieve(resource, account.Username);
+            var credential = vault.Retrieve(resource, username);
             credential.RetrievePassword();
             return Task.FromResult(new CredentialAccessResponse(CredentialAccessResult.Success, credential.Password));
         }
@@ -77,10 +99,10 @@ internal static class CredentialManager
         }
     }
 
-    private static string GetResourceName(AccountSettings account)
+    private static string GetResourceName(string prefix, string? host, string? username)
     {
-        var host = account.Server?.Trim() ?? "unknown";
-        var username = account.Username?.Trim() ?? "user";
-        return $"IMAP:{host}:{username}";
+        var safeHost = string.IsNullOrWhiteSpace(host) ? "unknown" : host.Trim();
+        var safeUser = string.IsNullOrWhiteSpace(username) ? "user" : username.Trim();
+        return $"{prefix}:{safeHost}:{safeUser}";
     }
 }
