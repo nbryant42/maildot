@@ -15,9 +15,9 @@ public sealed partial class SettingsView : UserControl
     public ObservableCollection<AccountSettings> Accounts { get; } = new();
 
     public event EventHandler? AddAccountRequested;
-    public event EventHandler<Guid>? SetActiveAccountRequested;
-    public event EventHandler<Guid>? ReenterPasswordRequested;
-    public event EventHandler<Guid>? DeleteAccountRequested;
+    public event EventHandler<int>? SetActiveAccountRequested;
+    public event EventHandler<int>? ReenterPasswordRequested;
+    public event EventHandler<int>? DeleteAccountRequested;
     public event EventHandler<PostgresSettingsSavedEventArgs>? PostgresSettingsSaved;
 
     public SettingsView()
@@ -25,7 +25,7 @@ public sealed partial class SettingsView : UserControl
         InitializeComponent();
     }
 
-    public void Initialize(IEnumerable<AccountSettings> accounts, Guid? activeAccountId, PostgresSettings? postgresSettings, string? postgresStatusMessage = null, bool isError = false)
+    public void Initialize(IEnumerable<AccountSettings> accounts, int? activeAccountId, PostgresSettings? postgresSettings, string? postgresStatusMessage = null, bool isError = false)
     {
         Accounts.Clear();
         foreach (var account in accounts)

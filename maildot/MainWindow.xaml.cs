@@ -46,12 +46,12 @@ namespace maildot
 
         private async Task EvaluateStartupAsync()
         {
-            RefreshAccounts();
-
             if (!await EnsurePostgresReadyAsync(forceShowSettings: true))
             {
                 return;
             }
+
+            RefreshAccounts();
 
             if (_accounts.Count == 0)
             {
@@ -309,17 +309,17 @@ namespace maildot
                 dialog.Hide();
                 await ShowAccountSetup(null);
             };
-            EventHandler<Guid> setActiveHandler = async (_, id) =>
+            EventHandler<int> setActiveHandler = async (_, id) =>
             {
                 dialog.Hide();
                 await SwitchActiveAccountAsync(id);
             };
-            EventHandler<Guid> reenterHandler = async (_, id) =>
+            EventHandler<int> reenterHandler = async (_, id) =>
             {
                 dialog.Hide();
                 await ReenterPasswordAsync(id);
             };
-            EventHandler<Guid> deleteHandler = async (_, id) =>
+            EventHandler<int> deleteHandler = async (_, id) =>
             {
                 dialog.Hide();
                 await DeleteAccountAsync(id);
@@ -367,7 +367,7 @@ namespace maildot
             return null;
         }
 
-        private async Task SwitchActiveAccountAsync(Guid accountId)
+        private async Task SwitchActiveAccountAsync(int accountId)
         {
             RefreshAccounts();
             var account = _accounts.FirstOrDefault(a => a.Id == accountId);
@@ -380,7 +380,7 @@ namespace maildot
             await SignInAsync(account);
         }
 
-        private async Task DeleteAccountAsync(Guid accountId)
+        private async Task DeleteAccountAsync(int accountId)
         {
             RefreshAccounts();
             var account = _accounts.FirstOrDefault(a => a.Id == accountId);
@@ -426,7 +426,7 @@ namespace maildot
             await SignInAsync(next);
         }
 
-        private async Task ReenterPasswordAsync(Guid accountId)
+        private async Task ReenterPasswordAsync(int accountId)
         {
             var account = _accounts.FirstOrDefault(a => a.Id == accountId);
             if (account == null)

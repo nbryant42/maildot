@@ -9,7 +9,7 @@ namespace maildot.Views;
 
 public sealed partial class AccountSetupView : UserControl
 {
-    private Guid _accountId = Guid.NewGuid();
+    private int _accountId;
 
     public AccountSetupView()
     {
@@ -20,7 +20,7 @@ public sealed partial class AccountSetupView : UserControl
 
     public void Initialize(AccountSettings? settings, string? statusMessage = null)
     {
-        _accountId = settings?.Id ?? Guid.NewGuid();
+        _accountId = settings?.Id ?? 0;
         AccountNameTextBox.Text = settings?.AccountName ?? string.Empty;
         ServerTextBox.Text = settings?.Server ?? string.Empty;
         PortTextBox.Text = settings is null ? "993" : settings.Port.ToString();

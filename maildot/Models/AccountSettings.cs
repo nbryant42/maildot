@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Text.Json;
 using System.Text.Json.Serialization;
+using maildot.Data;
+using maildot.Services;
+using Microsoft.EntityFrameworkCore;
+using System.IO;
 
 namespace maildot.Models;
 
@@ -12,7 +14,7 @@ namespace maildot.Models;
 /// </summary>
 public sealed class AccountSettings
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public int Id { get; set; }
     public string AccountName { get; set; } = string.Empty;
     public string Server { get; set; } = string.Empty;
     public int Port { get; set; } = 993;
@@ -27,158 +29,173 @@ public sealed class AccountSettings
         Port > 0;
 }
 
-internal sealed class AccountStoreModel
-{
-    public Guid? ActiveAccountId { get; set; }
-    public List<AccountSettings> Accounts { get; set; } = new();
-}
-
 internal static class AccountSettingsStore
 {
-    private static readonly string SettingsPath =
+    private const string ActiveAccountKey = "ActiveAccountId";
+    private static readonly string ActiveAccountPath =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "maildot",
-            "accounts.json");
-
-    private static readonly JsonSerializerOptions SerializerOptions = new()
-    {
-        WriteIndented = true
-    };
+            "active_account.txt");
 
     public static IReadOnlyList<AccountSettings> GetAllAccounts()
     {
-        var store = LoadStore();
-        NormalizeStore(store);
-        return store.Accounts
-            .OrderBy(a => a.AccountName)
+        using var db = ResolveDbContext();
+        var activeId = GetActiveAccountId();
+
+        return db.ImapAccounts
+            .AsNoTracking()
+            .OrderBy(a => a.DisplayName)
             .ThenBy(a => a.Username)
+            .Select(MapToSettings)
+            .ToList()
+            .Select(a =>
+            {
+                a.IsActive = activeId == a.Id;
+                return a;
+            })
             .ToList();
     }
 
     public static AccountSettings? GetActiveAccount()
     {
-        var store = LoadStore();
-        NormalizeStore(store);
-        if (store.ActiveAccountId is Guid id)
+        using var db = ResolveDbContext();
+        var activeId = GetActiveAccountId();
+        var query = db.ImapAccounts.AsNoTracking();
+        if (activeId.HasValue)
         {
-            return store.Accounts.FirstOrDefault(a => a.Id == id);
+            var match = query.FirstOrDefault(a => a.Id == activeId.Value);
+            if (match != null)
+            {
+                var mapped = MapToSettings(match);
+                mapped.IsActive = true;
+                return mapped;
+            }
         }
 
-        return store.Accounts.FirstOrDefault();
+        var first = query.OrderBy(a => a.DisplayName).ThenBy(a => a.Username).FirstOrDefault();
+        return first != null ? MapToSettings(first) : null;
     }
 
     public static void AddOrUpdate(AccountSettings settings, bool makeActive = true)
     {
-        var store = LoadStore();
-        NormalizeStore(store);
-        var existingIndex = store.Accounts.FindIndex(a => a.Id == settings.Id);
-        if (existingIndex >= 0)
+        using var db = ResolveDbContext();
+        ImapAccount entity;
+        if (settings.Id > 0)
         {
-            store.Accounts[existingIndex] = settings;
+            entity = db.ImapAccounts.First(a => a.Id == settings.Id);
+            Apply(settings, entity);
         }
         else
         {
-            store.Accounts.Add(settings);
+            entity = new ImapAccount();
+            Apply(settings, entity);
+            db.ImapAccounts.Add(entity);
         }
+
+        db.SaveChanges();
+        settings.Id = entity.Id;
 
         if (makeActive)
         {
-            store.ActiveAccountId = settings.Id;
-        }
-
-        NormalizeStore(store);
-        SaveStore(store);
-    }
-
-    public static void SetActiveAccount(Guid accountId)
-    {
-        var store = LoadStore();
-        if (store.Accounts.Any(a => a.Id == accountId))
-        {
-            store.ActiveAccountId = accountId;
-            NormalizeStore(store);
-            SaveStore(store);
+            SetActiveAccount(entity.Id);
         }
     }
 
-    public static void RemoveAccount(Guid accountId)
-    {
-        var store = LoadStore();
-        var removed = store.Accounts.RemoveAll(a => a.Id == accountId);
-        if (removed > 0)
-        {
-            if (store.ActiveAccountId == accountId)
-            {
-                store.ActiveAccountId = store.Accounts.FirstOrDefault()?.Id;
-            }
-
-            NormalizeStore(store);
-            SaveStore(store);
-        }
-    }
-
-    private static AccountStoreModel LoadStore()
+    public static void SetActiveAccount(int accountId)
     {
         try
         {
-            if (!File.Exists(SettingsPath))
+            var directory = Path.GetDirectoryName(ActiveAccountPath);
+            if (!string.IsNullOrEmpty(directory))
             {
-                return new AccountStoreModel();
+                Directory.CreateDirectory(directory);
             }
 
-            var json = File.ReadAllText(SettingsPath);
-            if (string.IsNullOrWhiteSpace(json))
-            {
-                return new AccountStoreModel();
-            }
+            File.WriteAllText(ActiveAccountPath, accountId.ToString());
+        }
+        catch
+        {
+            // Ignore failures; active account will be resolved on next launch.
+        }
+    }
 
-            var store = JsonSerializer.Deserialize<AccountStoreModel>(json);
-            if (store != null)
-            {
-                NormalizeStore(store);
-                return store;
-            }
+    public static void RemoveAccount(int accountId)
+    {
+        using var db = ResolveDbContext();
+        var entity = db.ImapAccounts.FirstOrDefault(a => a.Id == accountId);
+        if (entity == null)
+        {
+            return;
+        }
 
-            // Migration path from single-account file.
-            var legacy = JsonSerializer.Deserialize<AccountSettings>(json);
-            if (legacy != null)
+        db.ImapAccounts.Remove(entity);
+        db.SaveChanges();
+
+        var activeId = GetActiveAccountId();
+        if (activeId == accountId)
+        {
+            var next = db.ImapAccounts.AsNoTracking()
+                .OrderBy(a => a.DisplayName)
+                .ThenBy(a => a.Username)
+                .FirstOrDefault();
+            SetActiveAccount(next?.Id ?? 0);
+        }
+    }
+
+    private static MailDbContext ResolveDbContext()
+    {
+        var settings = PostgresSettingsStore.Load();
+        var passwordResponse = CredentialManager.RequestPostgresPasswordAsync(settings)
+            .ConfigureAwait(false)
+            .GetAwaiter()
+            .GetResult();
+
+        if (passwordResponse.Result != CredentialAccessResult.Success || string.IsNullOrWhiteSpace(passwordResponse.Password))
+        {
+            throw new InvalidOperationException("PostgreSQL credentials are missing.");
+        }
+
+        return MailDbContextFactory.CreateDbContext(settings, passwordResponse.Password);
+    }
+
+    private static AccountSettings MapToSettings(ImapAccount entity) =>
+        new()
+        {
+            Id = entity.Id,
+            AccountName = entity.DisplayName,
+            Server = entity.Server,
+            Port = entity.Port,
+            UseSsl = entity.UseSsl,
+            Username = entity.Username
+        };
+
+    private static void Apply(AccountSettings settings, ImapAccount entity)
+    {
+        entity.DisplayName = settings.AccountName;
+        entity.Server = settings.Server;
+        entity.Port = settings.Port;
+        entity.UseSsl = settings.UseSsl;
+        entity.Username = settings.Username;
+    }
+
+    private static int? GetActiveAccountId()
+    {
+        try
+        {
+            if (File.Exists(ActiveAccountPath))
             {
-                var migrated = new AccountStoreModel
+                var text = File.ReadAllText(ActiveAccountPath).Trim();
+                if (int.TryParse(text, out var parsed) && parsed > 0)
                 {
-                    Accounts = new List<AccountSettings> { legacy },
-                    ActiveAccountId = legacy.Id
-                };
-                NormalizeStore(migrated);
-                return migrated;
+                    return parsed;
+                }
             }
         }
         catch
         {
-            // Ignore to force reconfiguration.
+            // Ignore and fall back to first account.
         }
 
-        var fallback = new AccountStoreModel();
-        NormalizeStore(fallback);
-        return fallback;
-    }
-
-    private static void SaveStore(AccountStoreModel store)
-    {
-        var directory = Path.GetDirectoryName(SettingsPath);
-        if (!string.IsNullOrEmpty(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-
-        var json = JsonSerializer.Serialize(store, SerializerOptions);
-        File.WriteAllText(SettingsPath, json);
-    }
-
-    private static void NormalizeStore(AccountStoreModel store)
-    {
-        foreach (var account in store.Accounts)
-        {
-            account.IsActive = store.ActiveAccountId == account.Id;
-        }
+        return null;
     }
 }
