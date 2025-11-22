@@ -7,8 +7,10 @@ using System.Threading.Tasks;
 using MailKit;
 using MailKit.Net.Imap;
 using MailKit.Security;
+using maildot.Data;
 using maildot.Models;
 using maildot.ViewModels;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.UI.Dispatching;
 using MimeKit;
 using Windows.UI;
@@ -27,8 +29,10 @@ public sealed class ImapSyncService : IAsyncDisposable
     private readonly Dictionary<string, int> _folderNextEndIndex = new(StringComparer.OrdinalIgnoreCase);
 
     private ImapClient? _client;
+    private MailDbContext? _db;
     private AccountSettings? _settings;
     private string? _password;
+    private bool _dbReady;
 
     public ImapSyncService(MailboxViewModel viewModel, DispatcherQueue dispatcher)
     {
@@ -346,6 +350,8 @@ public sealed class ImapSyncService : IAsyncDisposable
             MessageSummaryItems.Envelope | MessageSummaryItems.UniqueId | MessageSummaryItems.InternalDate,
             _cts.Token);
 
+        await PersistMessagesAsync(folder, summaries);
+
         return summaries
             .OrderByDescending(s => s.InternalDate?.UtcDateTime ?? DateTime.MinValue)
             .Select(summary =>
@@ -381,6 +387,109 @@ public sealed class ImapSyncService : IAsyncDisposable
             .ToList();
     }
 
+    private async Task PersistMessagesAsync(IMailFolder folder, IList<IMessageSummary> summaries)
+    {
+        if (_settings == null || summaries.Count == 0)
+        {
+            return;
+        }
+
+        if (!_dbReady && !await EnsureDbAsync())
+        {
+            return;
+        }
+
+        if (_db == null)
+        {
+            return;
+        }
+
+        var folderEntity = await _db.ImapFolders
+            .FirstOrDefaultAsync(f => f.AccountId == _settings.Id && f.FullName == folder.FullName, _cts.Token);
+
+        if (folderEntity == null)
+        {
+            folderEntity = new Models.ImapFolder
+            {
+                AccountId = _settings.Id,
+                FullName = folder.FullName,
+                DisplayName = folder.Name ?? folder.FullName
+            };
+
+            _db.ImapFolders.Add(folderEntity);
+            await _db.SaveChangesAsync(_cts.Token);
+        }
+
+        var existingUids = await _db.ImapMessages
+            .Where(m => m.FolderId == folderEntity.Id)
+            .Select(m => m.ImapUid)
+            .ToHashSetAsync(_cts.Token);
+
+        foreach (var summary in summaries)
+        {
+            var uid = (long)summary.UniqueId.Id;
+            if (existingUids.Contains(uid))
+            {
+                continue;
+            }
+
+            var mailbox = summary.Envelope?.From?.OfType<MailboxAddress>().FirstOrDefault();
+            var senderName = mailbox?.Name ?? string.Empty;
+            var senderAddress = mailbox?.Address ?? string.Empty;
+
+            var messageId = summary.Envelope?.MessageId;
+            if (string.IsNullOrWhiteSpace(messageId))
+            {
+                messageId = $"uid:{uid}@{_settings.Server}";
+            }
+
+            var received = summary.InternalDate?.ToUniversalTime() ?? DateTimeOffset.UtcNow;
+
+            _db.ImapMessages.Add(new ImapMessage
+            {
+                FolderId = folderEntity.Id,
+                ImapUid = uid,
+                MessageId = messageId,
+                Subject = summary.Envelope?.Subject ?? string.Empty,
+                FromName = senderName,
+                FromAddress = senderAddress,
+                ReceivedUtc = received,
+                Hash = $"{messageId}:{uid}"
+            });
+        }
+
+        await _db.SaveChangesAsync(_cts.Token);
+    }
+
+    private async Task<bool> EnsureDbAsync()
+    {
+        if (_dbReady)
+        {
+            return true;
+        }
+
+        try
+        {
+            var pg = PostgresSettingsStore.Load();
+            var passwordResponse = await CredentialManager.RequestPostgresPasswordAsync(pg);
+            if (passwordResponse.Result != CredentialAccessResult.Success || string.IsNullOrWhiteSpace(passwordResponse.Password))
+            {
+                return false;
+            }
+
+            _db = MailDbContextFactory.CreateDbContext(pg, passwordResponse.Password);
+            _dbReady = true;
+            return true;
+        }
+        catch
+        {
+            _dbReady = false;
+            _db?.Dispose();
+            _db = null;
+            return false;
+        }
+    }
+
     private Task ReportStatusAsync(string message, bool busy) =>
         EnqueueAsync(() => _viewModel.SetStatus(message, busy));
 
@@ -413,6 +522,9 @@ public sealed class ImapSyncService : IAsyncDisposable
         _cts.Cancel();
 
         _semaphore.Dispose();
+        _db?.Dispose();
+        _db = null;
+        _dbReady = false;
         if (_client != null)
         {
             try
