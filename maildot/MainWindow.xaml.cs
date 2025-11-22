@@ -47,6 +47,12 @@ namespace maildot
         private async Task EvaluateStartupAsync()
         {
             RefreshAccounts();
+
+            if (!await EnsurePostgresReadyAsync(forceShowSettings: true))
+            {
+                return;
+            }
+
             if (_accounts.Count == 0)
             {
                 await ShowAccountSetup(null, "Please enter your IMAP server details to begin.");
@@ -105,6 +111,12 @@ namespace maildot
 
         private async Task<string?> PromptForPasswordAsync(AccountSettings account)
         {
+            var xamlRoot = GetXamlRoot();
+            if (xamlRoot == null)
+            {
+                return null;
+            }
+
             var passwordBox = new PasswordBox { PlaceholderText = "Password", Width = 300 };
             var content = new StackPanel { Spacing = 8 };
             content.Children.Add(new TextBlock
@@ -121,7 +133,7 @@ namespace maildot
                 CloseButtonText = "Cancel",
                 DefaultButton = ContentDialogButton.Primary,
                 Content = content,
-                XamlRoot = RootContent.XamlRoot
+                XamlRoot = xamlRoot
             };
 
             var result = await dialog.ShowAsync();
@@ -135,6 +147,24 @@ namespace maildot
             _ = _dashboardView!.ClearMessageContentAsync();
             _mailboxViewModel!.SetAccountSummary($"{settings.AccountName} ({settings.Username})");
             _ = StartImapSyncAsync(settings, password);
+        }
+
+        private async Task<bool> EnsurePostgresReadyAsync(bool forceShowSettings = false)
+        {
+            if (App.PostgresState == PostgresMigrationState.NotStarted)
+            {
+                App.ApplyPendingMigrations();
+            }
+
+            if (App.PostgresState == PostgresMigrationState.Success)
+            {
+                return true;
+            }
+
+            var message = BuildPostgresStatusMessage();
+            await ShowSettingsDialogAsync(message, App.PostgresState != PostgresMigrationState.Success, forceShowSettings);
+
+            return App.PostgresState == PostgresMigrationState.Success;
         }
 
         private void EnsureDashboard()
@@ -220,7 +250,11 @@ namespace maildot
 
         private async void OnSettingsRequested(object? sender, EventArgs e)
         {
-            await ShowSettingsDialogAsync();
+            var needsStatus = App.PostgresState != PostgresMigrationState.Success &&
+                              App.PostgresState != PostgresMigrationState.NotStarted;
+            await ShowSettingsDialogAsync(
+                needsStatus ? BuildPostgresStatusMessage() : null,
+                needsStatus);
         }
 
         private void OnPostgresSettingsSaved(object? sender, PostgresSettingsSavedEventArgs e)
@@ -228,50 +262,109 @@ namespace maildot
             _postgresSettings = e.Settings;
             PostgresSettingsStore.Save(e.Settings);
             CredentialManager.SavePostgresPassword(e.Settings, e.Password);
+
+            var result = App.ApplyPendingMigrations();
+            if (sender is SettingsView view)
+            {
+                view.SetPostgresStatus(BuildPostgresStatusMessage(), result != PostgresMigrationState.Success);
+            }
         }
 
-        private async Task ShowSettingsDialogAsync()
+        private async Task ShowSettingsDialogAsync(string? postgresStatusMessage = null, bool isError = false, bool forceShowWhenNoAccounts = false)
         {
-            if (_accounts.Count == 0)
+            if (_accounts.Count == 0 && !forceShowWhenNoAccounts)
             {
                 await ShowAccountSetup(null);
                 return;
             }
 
+            var xamlRoot = GetXamlRoot();
+            if (xamlRoot == null)
+            {
+                // If no XamlRoot yet, fall back to embedding settings in main content.
+                var inlineView = new SettingsView();
+                inlineView.Initialize(_accounts, _activeAccount?.Id, _postgresSettings, postgresStatusMessage, isError);
+                inlineView.AddAccountRequested += async (_, __) => await ShowAccountSetup(null);
+                inlineView.SetActiveAccountRequested += async (_, id) => await SwitchActiveAccountAsync(id);
+                inlineView.ReenterPasswordRequested += async (_, id) => await ReenterPasswordAsync(id);
+                inlineView.DeleteAccountRequested += async (_, id) => await DeleteAccountAsync(id);
+                inlineView.PostgresSettingsSaved += OnPostgresSettingsSaved;
+                RootContent.Content = inlineView;
+                return;
+            }
+
             var settingsView = new SettingsView();
-            settingsView.Initialize(_accounts, _activeAccount?.Id, _postgresSettings);
+            settingsView.Initialize(_accounts, _activeAccount?.Id, _postgresSettings, postgresStatusMessage, isError);
 
             var dialog = new ContentDialog
             {
                 Title = "Settings",
                 Content = settingsView,
                 PrimaryButtonText = "Close",
-                XamlRoot = RootContent.XamlRoot
+                XamlRoot = xamlRoot
             };
 
-            settingsView.AddAccountRequested += async (_, __) =>
+            EventHandler addAccountHandler = async (_, __) =>
             {
                 dialog.Hide();
                 await ShowAccountSetup(null);
             };
-
-            settingsView.SetActiveAccountRequested += async (_, id) =>
+            EventHandler<Guid> setActiveHandler = async (_, id) =>
             {
                 dialog.Hide();
                 await SwitchActiveAccountAsync(id);
             };
-
-            settingsView.ReenterPasswordRequested += async (_, id) =>
+            EventHandler<Guid> reenterHandler = async (_, id) =>
             {
                 dialog.Hide();
                 await ReenterPasswordAsync(id);
             };
+            EventHandler<Guid> deleteHandler = async (_, id) =>
+            {
+                dialog.Hide();
+                await DeleteAccountAsync(id);
+            };
 
+            settingsView.AddAccountRequested += addAccountHandler;
+            settingsView.SetActiveAccountRequested += setActiveHandler;
+            settingsView.ReenterPasswordRequested += reenterHandler;
+            settingsView.DeleteAccountRequested += deleteHandler;
             settingsView.PostgresSettingsSaved += OnPostgresSettingsSaved;
 
             await dialog.ShowAsync();
 
+            settingsView.AddAccountRequested -= addAccountHandler;
+            settingsView.SetActiveAccountRequested -= setActiveHandler;
+            settingsView.ReenterPasswordRequested -= reenterHandler;
+            settingsView.DeleteAccountRequested -= deleteHandler;
             settingsView.PostgresSettingsSaved -= OnPostgresSettingsSaved;
+        }
+
+        private static string BuildPostgresStatusMessage()
+        {
+            return App.PostgresState switch
+            {
+                PostgresMigrationState.Success => "PostgreSQL is ready.",
+                PostgresMigrationState.MissingSettings => "PostgreSQL settings are incomplete. Please fill in all required fields.",
+                PostgresMigrationState.MissingPassword => "PostgreSQL password not found. Please re-enter it.",
+                PostgresMigrationState.Failed => $"PostgreSQL migration failed: {App.PostgresError}",
+                _ => "PostgreSQL setup has not run yet."
+            };
+        }
+
+        private XamlRoot? GetXamlRoot()
+        {
+            if (RootContent?.XamlRoot != null)
+            {
+                return RootContent.XamlRoot;
+            }
+
+            if (Content is FrameworkElement element)
+            {
+                return element.XamlRoot;
+            }
+
+            return null;
         }
 
         private async Task SwitchActiveAccountAsync(Guid accountId)
@@ -285,6 +378,52 @@ namespace maildot
 
             AccountSettingsStore.SetActiveAccount(accountId);
             await SignInAsync(account);
+        }
+
+        private async Task DeleteAccountAsync(Guid accountId)
+        {
+            RefreshAccounts();
+            var account = _accounts.FirstOrDefault(a => a.Id == accountId);
+            if (account == null)
+            {
+                return;
+            }
+
+            var xamlRoot = GetXamlRoot();
+            if (xamlRoot == null)
+            {
+                return;
+            }
+
+            var dialog = new ContentDialog
+            {
+                Title = "Delete account?",
+                Content = $"Are you sure you want to permanently delete the account \"{account.AccountName}\"?",
+                PrimaryButtonText = "Delete",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+                XamlRoot = xamlRoot
+            };
+
+            var result = await dialog.ShowAsync();
+            if (result != ContentDialogResult.Primary)
+            {
+                return;
+            }
+
+            await CleanupImapServiceAsync();
+            AccountSettingsStore.RemoveAccount(accountId);
+            CredentialManager.RemovePassword(account);
+            RefreshAccounts();
+
+            if (_accounts.Count == 0)
+            {
+                await ShowAccountSetup(null, "Add an account to get started.");
+                return;
+            }
+
+            var next = AccountSettingsStore.GetActiveAccount() ?? _accounts.First();
+            await SignInAsync(next);
         }
 
         private async Task ReenterPasswordAsync(Guid accountId)

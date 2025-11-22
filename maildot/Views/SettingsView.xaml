@@ -28,6 +28,9 @@
                                         Click="OnSetActiveClicked" />
                                 <Button Content="Re-enter password"
                                         Click="OnReenterPasswordClicked" />
+                                <Button Content="Delete"
+                                        Click="OnDeleteAccountClicked"
+                                        Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
                             </StackPanel>
                         </StackPanel>
                     </DataTemplate>

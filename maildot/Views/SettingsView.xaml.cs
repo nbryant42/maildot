@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using maildot.Models;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 
 namespace maildot.Views;
 
@@ -16,6 +17,7 @@ public sealed partial class SettingsView : UserControl
     public event EventHandler? AddAccountRequested;
     public event EventHandler<Guid>? SetActiveAccountRequested;
     public event EventHandler<Guid>? ReenterPasswordRequested;
+    public event EventHandler<Guid>? DeleteAccountRequested;
     public event EventHandler<PostgresSettingsSavedEventArgs>? PostgresSettingsSaved;
 
     public SettingsView()
@@ -23,7 +25,7 @@ public sealed partial class SettingsView : UserControl
         InitializeComponent();
     }
 
-    public void Initialize(IEnumerable<AccountSettings> accounts, Guid? activeAccountId, PostgresSettings? postgresSettings)
+    public void Initialize(IEnumerable<AccountSettings> accounts, Guid? activeAccountId, PostgresSettings? postgresSettings, string? postgresStatusMessage = null, bool isError = false)
     {
         Accounts.Clear();
         foreach (var account in accounts)
@@ -39,7 +41,7 @@ public sealed partial class SettingsView : UserControl
         PgUsernameTextBox.Text = _postgresSettings.Username;
         PgSslCheckBox.IsChecked = _postgresSettings.UseSsl;
         PgPasswordBox.Password = string.Empty;
-        PgStatusTextBlock.Text = string.Empty;
+        SetPostgresStatus(postgresStatusMessage ?? string.Empty, isError);
 
         Bindings.Update();
     }
@@ -60,6 +62,14 @@ public sealed partial class SettingsView : UserControl
         if (sender is FrameworkElement element && element.DataContext is AccountSettings account)
         {
             ReenterPasswordRequested?.Invoke(this, account.Id);
+        }
+    }
+
+    private void OnDeleteAccountClicked(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement element && element.DataContext is AccountSettings account)
+        {
+            DeleteAccountRequested?.Invoke(this, account.Id);
         }
     }
 
@@ -115,6 +125,16 @@ public sealed partial class SettingsView : UserControl
         PgStatusTextBlock.Text = "PostgreSQL settings saved.";
 
         PostgresSettingsSaved?.Invoke(this, new PostgresSettingsSavedEventArgs(settings, password));
+    }
+
+    public void SetPostgresStatus(string message, bool isError)
+    {
+        PgStatusTextBlock.Text = message;
+        var resource = isError ? "SystemFillColorCriticalBrush" : "TextFillColorSecondaryBrush";
+        if (Application.Current.Resources.TryGetValue(resource, out var brush) && brush is Brush asBrush)
+        {
+            PgStatusTextBlock.Foreground = asBrush;
+        }
     }
 }
 

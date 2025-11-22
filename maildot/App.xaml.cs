@@ -1,50 +1,73 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Runtime.InteropServices.WindowsRuntime;
+using System;
+using maildot.Data;
+using maildot.Models;
+using maildot.Services;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Controls.Primitives;
-using Microsoft.UI.Xaml.Data;
-using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Navigation;
-using Microsoft.UI.Xaml.Shapes;
-using Windows.ApplicationModel;
-using Windows.ApplicationModel.Activation;
-using Windows.Foundation;
-using Windows.Foundation.Collections;
 
-// To learn more about WinUI, the WinUI project structure,
-// and more about our project templates, see: http://aka.ms/winui-project-info.
+namespace maildot;
 
-namespace maildot
+public enum PostgresMigrationState
 {
-    /// <summary>
-    /// Provides application-specific behavior to supplement the default Application class.
-    /// </summary>
-    public partial class App : Application
+    NotStarted,
+    MissingSettings,
+    MissingPassword,
+    Failed,
+    Success
+}
+
+public partial class App : Application
+{
+    private Window? _window;
+
+    public static PostgresMigrationState PostgresState { get; private set; } = PostgresMigrationState.NotStarted;
+    public static string? PostgresError { get; private set; }
+
+    public App()
     {
-        private Window? _window;
+        InitializeComponent();
+    }
 
-        /// <summary>
-        /// Initializes the singleton application object.  This is the first line of authored code
-        /// executed, and as such is the logical equivalent of main() or WinMain().
-        /// </summary>
-        public App()
+    protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
+    {
+        _window = new MainWindow();
+        ApplyPendingMigrations();
+        _window.Activate();
+    }
+
+    public static PostgresMigrationState ApplyPendingMigrations()
+    {
+        var settings = PostgresSettingsStore.Load();
+        if (!settings.HasCredentials)
         {
-            InitializeComponent();
+            PostgresState = PostgresMigrationState.MissingSettings;
+            PostgresError = "PostgreSQL settings are incomplete.";
+            return PostgresState;
         }
 
-        /// <summary>
-        /// Invoked when the application is launched.
-        /// </summary>
-        /// <param name="args">Details about the launch request and process.</param>
-        protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
+        var passwordResponse = CredentialManager.RequestPostgresPasswordAsync(settings)
+            .GetAwaiter()
+            .GetResult();
+        if (passwordResponse.Result != CredentialAccessResult.Success || string.IsNullOrWhiteSpace(passwordResponse.Password))
         {
-            _window = new MainWindow();
-            _window.Activate();
+            PostgresState = PostgresMigrationState.MissingPassword;
+            PostgresError = "PostgreSQL password not found. Please re-enter it in Settings.";
+            return PostgresState;
         }
+
+        try
+        {
+            using var db = MailDbContextFactory.CreateDbContext(settings, passwordResponse.Password);
+            db.Database.Migrate();
+            PostgresState = PostgresMigrationState.Success;
+            PostgresError = null;
+        }
+        catch (Exception ex)
+        {
+            PostgresState = PostgresMigrationState.Failed;
+            PostgresError = ex.Message;
+        }
+
+        return PostgresState;
     }
 }

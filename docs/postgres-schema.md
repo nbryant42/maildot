@@ -8,7 +8,7 @@ The initial schema is designed to mirror what the app already tracks locally (ac
 |-------|---------|-------------|
 | `imap_accounts` | Stores IMAP connection metadata and sync checkpoints. | `id (int generated always as identity, pk)`, `display_name`, `server`, `port`, `use_ssl`, `username`, `last_synced_at` |
 | `imap_folders` | Folder hierarchy per account. | `id (int identity, pk)`, `account_id (fk)`, `full_name`, `display_name`, `uid_validity (bigint)`, `last_uid (bigint)`, `sync_token` |
-| `imap_messages` | One row per message in a folder. | `id (int identity, pk)`, `folder_id (fk)`, `imap_uid (bigint)`, `message_id`, `subject`, `from_name`, `from_address`, `received_utc`, `hash`, `headers text[][]` |
+| `imap_messages` | One row per message in a folder. | `id (int identity, pk)`, `folder_id (fk)`, `imap_uid (bigint)`, `message_id`, `subject`, `from_name`, `from_address`, `received_utc`, `hash`, `headers jsonb` |
 | `message_bodies` | Normalized body/preview text for search. | `message_id (fk)`, `plain_text`, `html_text`, `sanitized_html`, `preview` |
 | `message_attachments` | Attachment metadata with pg_largeobject storage. | `id (int identity, pk)`, `message_id (fk)`, `file_name`, `content_type`, `size_bytes`, `hash`, `large_object_id (oid)` |
 | `message_embeddings` | pgvector column that stores one embedding per message (or per chunk). | `message_id (fk)`, `chunk_index`, `embedding vector(1024)`, `model_version`, `created_at` |
@@ -58,7 +58,7 @@ public sealed class ImapMessage
     public string FromAddress { get; set; } = string.Empty;
     public DateTimeOffset ReceivedUtc { get; set; }
     public string Hash { get; set; } = string.Empty;
-    public string[][]? Headers { get; set; }
+    public Dictionary<string, string[]>? Headers { get; set; }
 
     public ImapFolder Folder { get; set; } = default!;
     public MessageBody Body { get; set; } = default!;
@@ -92,7 +92,7 @@ public sealed class MessageEmbedding
 {
     public int MessageId { get; set; }
     public int ChunkIndex { get; set; }
-    public float[] Vector { get; set; } = Array.Empty<float>();
+    public Vector Vector { get; set; } = new();
     public string ModelVersion { get; set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; set; }
 

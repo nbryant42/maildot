@@ -65,6 +65,13 @@ internal static class CredentialManager
         vault.Add(credential);
     }
 
+    public static void RemovePassword(AccountSettings account)
+    {
+        var vault = new PasswordVault();
+        var resource = GetResourceName("IMAP", account.Server, account.Username);
+        RemoveExisting(vault, resource, account.Username);
+    }
+
     private static Task<CredentialAccessResponse> RetrieveAsync(string resource, string username)
     {
         try
