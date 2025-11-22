@@ -72,8 +72,7 @@ namespace maildot.Data.Migrations
                     FromName = table.Column<string>(type: "text", nullable: false),
                     FromAddress = table.Column<string>(type: "text", nullable: false),
                     ReceivedUtc = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    Hash = table.Column<string>(type: "text", nullable: false),
-                    Headers = table.Column<Dictionary<string, string[]>>(type: "jsonb", nullable: true)
+                    Hash = table.Column<string>(type: "text", nullable: false)
                 },
                 constraints: table =>
                 {
@@ -118,6 +117,7 @@ namespace maildot.Data.Migrations
                     PlainText = table.Column<string>(type: "text", nullable: true),
                     HtmlText = table.Column<string>(type: "text", nullable: true),
                     SanitizedHtml = table.Column<string>(type: "text", nullable: true),
+                    Headers = table.Column<Dictionary<string, string[]>>(type: "jsonb", nullable: true),
                     Preview = table.Column<string>(type: "text", nullable: false)
                 },
                 constraints: table =>

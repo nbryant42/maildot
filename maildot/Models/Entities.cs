@@ -42,7 +42,6 @@ public sealed class ImapMessage
     public string FromAddress { get; set; } = string.Empty;
     public DateTimeOffset ReceivedUtc { get; set; }
     public string Hash { get; set; } = string.Empty;
-    public Dictionary<string, string[]>? Headers { get; set; }
 
     public ImapFolder Folder { get; set; } = default!;
     public MessageBody Body { get; set; } = default!;
@@ -56,6 +55,7 @@ public sealed class MessageBody
     public string? PlainText { get; set; }
     public string? HtmlText { get; set; }
     public string? SanitizedHtml { get; set; }
+    public Dictionary<string, string[]>? Headers { get; set; }
     public string Preview { get; set; } = string.Empty;
 
     public ImapMessage Message { get; set; } = default!;

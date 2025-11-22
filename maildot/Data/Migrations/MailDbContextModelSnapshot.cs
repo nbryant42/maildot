@@ -121,9 +121,6 @@ namespace maildot.Data.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<Dictionary<string, string[]>>("Headers")
-                        .HasColumnType("jsonb");
-
                     b.Property<long>("ImapUid")
                         .HasColumnType("bigint");
 
@@ -190,6 +187,9 @@ namespace maildot.Data.Migrations
 
                     b.Property<string>("HtmlText")
                         .HasColumnType("text");
+
+                    b.Property<Dictionary<string, string[]>>("Headers")
+                        .HasColumnType("jsonb");
 
                     b.Property<string>("PlainText")
                         .HasColumnType("text");

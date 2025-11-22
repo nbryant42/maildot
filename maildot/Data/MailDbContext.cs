@@ -43,7 +43,6 @@ public sealed class MailDbContext : DbContext
         {
             entity.ToTable("imap_messages");
             entity.HasIndex(e => new { e.FolderId, e.ImapUid }).IsUnique();
-            entity.Property(e => e.Headers).HasColumnType("jsonb");
             entity.HasOne(m => m.Folder)
                   .WithMany(f => f.Messages)
                   .HasForeignKey(m => m.FolderId)
@@ -59,6 +58,7 @@ public sealed class MailDbContext : DbContext
         {
             entity.ToTable("message_bodies");
             entity.HasKey(b => b.MessageId);
+            entity.Property(b => b.Headers).HasColumnType("jsonb");
         });
 
         modelBuilder.Entity<MessageAttachment>(entity =>
