@@ -6,7 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using MailKit;
 using MailKit.Net.Imap;
-using MailKit.Security;
+using MailKit.Search;
 using maildot.Data;
 using maildot.Models;
 using maildot.ViewModels;
@@ -33,6 +33,7 @@ public sealed class ImapSyncService : IAsyncDisposable
     private AccountSettings? _settings;
     private string? _password;
     private bool _dbReady;
+    private Task? _backgroundTask;
 
     public ImapSyncService(MailboxViewModel viewModel, DispatcherQueue dispatcher)
     {
@@ -281,6 +282,8 @@ public sealed class ImapSyncService : IAsyncDisposable
                 _viewModel.SetRetryVisible(false);
             });
 
+            _backgroundTask ??= Task.Run(() => BackgroundFetchLoopAsync(_cts.Token), _cts.Token);
+
             return true;
         }
         catch (OperationCanceledException)
@@ -404,20 +407,10 @@ public sealed class ImapSyncService : IAsyncDisposable
             return;
         }
 
-        var folderEntity = await _db.ImapFolders
-            .FirstOrDefaultAsync(f => f.AccountId == _settings.Id && f.FullName == folder.FullName, _cts.Token);
-
+        var folderEntity = await EnsureFolderEntityAsync(folder, _cts.Token);
         if (folderEntity == null)
         {
-            folderEntity = new Models.ImapFolder
-            {
-                AccountId = _settings.Id,
-                FullName = folder.FullName,
-                DisplayName = folder.Name ?? folder.FullName
-            };
-
-            _db.ImapFolders.Add(folderEntity);
-            await _db.SaveChangesAsync(_cts.Token);
+            return;
         }
 
         var existingUids = await _db.ImapMessages
@@ -459,6 +452,325 @@ public sealed class ImapSyncService : IAsyncDisposable
         }
 
         await _db.SaveChangesAsync(_cts.Token);
+    }
+
+    private async Task BackgroundFetchLoopAsync(CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            try
+            {
+                if (_client == null || !_client.IsConnected)
+                {
+                    if (!await TryReconnectAsync())
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(5), token);
+                        continue;
+                    }
+                }
+
+                var folders = GetFoldersByPriority();
+                foreach (var folder in folders)
+                {
+                    if (token.IsCancellationRequested)
+                    {
+                        break;
+                    }
+
+                    await FetchMissingBodiesForFolderAsync(folder, token);
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(5), token);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                if (IsRecoverable(ex))
+                {
+                    await TryReconnectAsync();
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(5), token);
+            }
+        }
+    }
+
+    private List<IMailFolder> GetFoldersByPriority() =>
+        _folderCache.Values
+            .OrderBy(f => GetFolderPriority(f.FullName))
+            .ThenBy(f => f.FullName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    private static int GetFolderPriority(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return 1;
+        }
+
+        var upper = name.Trim().ToUpperInvariant();
+        if (upper == "INBOX")
+        {
+            return 0;
+        }
+
+        if (upper.StartsWith("DELETED", StringComparison.OrdinalIgnoreCase) ||
+            upper.StartsWith("TRASH", StringComparison.OrdinalIgnoreCase))
+        {
+            return 2;
+        }
+
+        return 1;
+    }
+
+    private async Task FetchMissingBodiesForFolderAsync(IMailFolder folder, CancellationToken token)
+    {
+        if (_settings == null)
+        {
+            return;
+        }
+
+        if (!_dbReady && !await EnsureDbAsync())
+        {
+            return;
+        }
+
+        if (_db == null)
+        {
+            return;
+        }
+
+        var folderEntity = await EnsureFolderEntityAsync(folder, token);
+        if (folderEntity == null)
+        {
+            return;
+        }
+
+        List<UniqueId> serverUids;
+        await _semaphore.WaitAsync(token);
+        try
+        {
+            if (_client == null)
+            {
+                return;
+            }
+
+            if (!folder.IsOpen)
+            {
+                await folder.OpenAsync(FolderAccess.ReadOnly, token);
+            }
+
+            serverUids = (await folder.SearchAsync(SearchQuery.All, token)).ToList();
+        }
+        finally
+        {
+            try
+            {
+                if (folder.IsOpen)
+                {
+                    await folder.CloseAsync(false, token);
+                }
+            }
+            catch
+            {
+            }
+
+            _semaphore.Release();
+        }
+
+        var knownMessages = await _db.ImapMessages
+            .Where(m => m.FolderId == folderEntity.Id)
+            .Select(m => new { m.ImapUid, m.Id })
+            .ToListAsync(token);
+
+        var knownUids = knownMessages.Select(m => m.ImapUid).ToHashSet();
+
+        var bodiesPresent = await _db.MessageBodies
+            .Where(b => knownMessages.Select(m => m.Id).Contains(b.MessageId))
+            .Select(b => b.MessageId)
+            .ToHashSetAsync(token);
+
+        var missingBodyUids = knownMessages
+            .Where(m => !bodiesPresent.Contains(m.Id))
+            .Select(m => m.ImapUid);
+
+        var missingMessages = serverUids.Select(u => (long)u.Id).Where(uid => !knownUids.Contains(uid));
+
+        var targets = missingBodyUids
+            .Concat(missingMessages)
+            .Distinct()
+            .OrderByDescending(uid => uid)
+            .ToList();
+
+        foreach (var uid in targets)
+        {
+            if (token.IsCancellationRequested)
+            {
+                break;
+            }
+
+            await FetchAndPersistBodyAsync(folder, folderEntity, uid, token);
+        }
+    }
+
+    private async Task FetchAndPersistBodyAsync(IMailFolder folder, Models.ImapFolder folderEntity, long uid, CancellationToken token)
+    {
+        MimeMessage? message = null;
+        var uniqueId = new UniqueId((uint)uid);
+
+        await _semaphore.WaitAsync(token);
+        try
+        {
+            if (_client == null)
+            {
+                return;
+            }
+
+            if (!folder.IsOpen)
+            {
+                await folder.OpenAsync(FolderAccess.ReadOnly, token);
+            }
+
+            message = await folder.GetMessageAsync(uniqueId, token);
+        }
+        catch
+        {
+        }
+        finally
+        {
+            try
+            {
+                if (folder.IsOpen)
+                {
+                    await folder.CloseAsync(false, token);
+                }
+            }
+            catch
+            {
+            }
+
+            _semaphore.Release();
+        }
+
+        if (message == null || _db == null)
+        {
+            return;
+        }
+
+        var entity = await _db.ImapMessages
+            .FirstOrDefaultAsync(m => m.FolderId == folderEntity.Id && m.ImapUid == uid, token);
+
+        if (entity == null)
+        {
+            entity = CreateImapMessage(folderEntity, message, uid);
+            _db.ImapMessages.Add(entity);
+            await _db.SaveChangesAsync(token);
+        }
+        else
+        {
+            UpdateImapMessage(entity, message);
+            await _db.SaveChangesAsync(token);
+        }
+
+        var hasBody = await _db.MessageBodies.AnyAsync(b => b.MessageId == entity.Id, token);
+        if (hasBody)
+        {
+            return;
+        }
+
+        var headers = message.Headers
+            .GroupBy(h => h.Field)
+            .ToDictionary(g => g.Key, g => g.Select(x => x.Value).ToArray());
+
+        var plain = message.TextBody;
+        var html = message.HtmlBody;
+        var sanitized = string.IsNullOrWhiteSpace(html) ? null : HtmlSanitizer.Sanitize(html).Html;
+        var previewSource = !string.IsNullOrWhiteSpace(plain) ? plain : message.Subject ?? string.Empty;
+        var preview = BuildPreview(previewSource);
+
+        _db.MessageBodies.Add(new MessageBody
+        {
+            MessageId = entity.Id,
+            PlainText = plain,
+            HtmlText = html,
+            SanitizedHtml = sanitized,
+            Headers = headers,
+            Preview = preview
+        });
+
+        await _db.SaveChangesAsync(token);
+    }
+
+    private async Task<Models.ImapFolder?> EnsureFolderEntityAsync(IMailFolder folder, CancellationToken token)
+    {
+        if (_settings == null || _db == null)
+        {
+            return null;
+        }
+
+        var folderEntity = await _db.ImapFolders
+            .FirstOrDefaultAsync(f => f.AccountId == _settings.Id && f.FullName == folder.FullName, token);
+
+        if (folderEntity != null)
+        {
+            return folderEntity;
+        }
+
+        folderEntity = new Models.ImapFolder
+        {
+            AccountId = _settings.Id,
+            FullName = folder.FullName,
+            DisplayName = folder.Name ?? folder.FullName
+        };
+
+        _db.ImapFolders.Add(folderEntity);
+        await _db.SaveChangesAsync(token);
+        return folderEntity;
+    }
+
+    private ImapMessage CreateImapMessage(Models.ImapFolder folder, MimeMessage message, long uid)
+    {
+        var sender = message.From.OfType<MailboxAddress>().FirstOrDefault();
+        var senderName = sender?.Name ?? string.Empty;
+        var senderAddress = sender?.Address ?? string.Empty;
+        var messageId = string.IsNullOrWhiteSpace(message.MessageId)
+            ? $"uid:{uid}@{_settings?.Server}"
+            : message.MessageId;
+
+        return new ImapMessage
+        {
+            FolderId = folder.Id,
+            ImapUid = uid,
+            MessageId = messageId,
+            Subject = message.Subject ?? string.Empty,
+            FromName = senderName,
+            FromAddress = senderAddress,
+            ReceivedUtc = message.Date.ToUniversalTime(),
+            Hash = $"{messageId}:{uid}"
+        };
+    }
+
+    private static void UpdateImapMessage(ImapMessage entity, MimeMessage message)
+    {
+        var sender = message.From.OfType<MailboxAddress>().FirstOrDefault();
+        entity.Subject = message.Subject ?? string.Empty;
+        entity.FromName = sender?.Name ?? string.Empty;
+        entity.FromAddress = sender?.Address ?? string.Empty;
+        entity.ReceivedUtc = message.Date.ToUniversalTime();
+    }
+
+    private static string BuildPreview(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        var trimmed = text.Replace("\r", " ").Replace("\n", " ").Trim();
+        return trimmed.Length > 240 ? trimmed[..240] : trimmed;
     }
 
     private async Task<bool> EnsureDbAsync()
@@ -520,6 +832,12 @@ public sealed class ImapSyncService : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _cts.Cancel();
+
+        if (_backgroundTask != null)
+        {
+            try { await _backgroundTask.ConfigureAwait(false); }
+            catch { }
+        }
 
         _semaphore.Dispose();
         _db?.Dispose();

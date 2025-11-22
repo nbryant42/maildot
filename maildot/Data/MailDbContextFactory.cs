@@ -27,8 +27,12 @@ public sealed class MailDbContextFactory : IDesignTimeDbContextFactory<MailDbCon
 
     private static DbContextOptionsBuilder<MailDbContext> BuildOptions(string connectionString)
     {
+        var dataSourceBuilder = new Npgsql.NpgsqlDataSourceBuilder(connectionString);
+        dataSourceBuilder.EnableDynamicJson();
+        var dataSource = dataSourceBuilder.Build();
+
         var builder = new DbContextOptionsBuilder<MailDbContext>();
-        builder.UseNpgsql(connectionString, npgsql =>
+        builder.UseNpgsql(dataSource, npgsql =>
         {
             npgsql.UseNodaTime();
             npgsql.UseVector();

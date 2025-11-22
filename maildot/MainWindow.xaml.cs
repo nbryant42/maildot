@@ -12,584 +12,583 @@ using Microsoft.UI.Xaml.Controls;
 using MimeKit;
 using Windows.System;
 
-namespace maildot
+namespace maildot;
+
+public sealed partial class MainWindow : Window
 {
-    public sealed partial class MainWindow : Window
+    private AccountSetupView? _accountSetupView;
+    private ImapDashboardView? _dashboardView;
+    private MailboxViewModel? _mailboxViewModel;
+    private ImapSyncService? _imapService;
+    private readonly List<AccountSettings> _accounts = [];
+    private AccountSettings? _activeAccount;
+    private PostgresSettings _postgresSettings = PostgresSettingsStore.Load();
+    private bool _startupInitialized;
+
+    public MainWindow()
     {
-        private AccountSetupView? _accountSetupView;
-        private ImapDashboardView? _dashboardView;
-        private MailboxViewModel? _mailboxViewModel;
-        private ImapSyncService? _imapService;
-        private readonly List<AccountSettings> _accounts = new();
-        private AccountSettings? _activeAccount;
-        private PostgresSettings _postgresSettings = PostgresSettingsStore.Load();
-        private bool _startupInitialized;
+        InitializeComponent();
+        Activated += OnWindowActivated;
+    }
 
-        public MainWindow()
+    private async void OnWindowActivated(object sender, WindowActivatedEventArgs args)
+    {
+        if (_startupInitialized)
         {
-            InitializeComponent();
-            Activated += OnWindowActivated;
+            return;
         }
 
-        private async void OnWindowActivated(object sender, WindowActivatedEventArgs args)
+        _startupInitialized = true;
+        Activated -= OnWindowActivated;
+
+        await EvaluateStartupAsync();
+    }
+
+    private async Task EvaluateStartupAsync()
+    {
+        if (!await EnsurePostgresReadyAsync(forceShowSettings: true))
         {
-            if (_startupInitialized)
-            {
-                return;
-            }
-
-            _startupInitialized = true;
-            Activated -= OnWindowActivated;
-
-            await EvaluateStartupAsync();
+            return;
         }
 
-        private async Task EvaluateStartupAsync()
+        RefreshAccounts();
+
+        if (_accounts.Count == 0)
         {
-            if (!await EnsurePostgresReadyAsync(forceShowSettings: true))
-            {
-                return;
-            }
-
-            RefreshAccounts();
-
-            if (_accounts.Count == 0)
-            {
-                await ShowAccountSetup(null, "Please enter your IMAP server details to begin.");
-                return;
-            }
-
-            var activeAccount = AccountSettingsStore.GetActiveAccount() ?? _accounts.First();
-            AccountSettingsStore.SetActiveAccount(activeAccount.Id);
-            await SignInAsync(activeAccount);
+            await ShowAccountSetup(null, "Please enter your IMAP server details to begin.");
+            return;
         }
 
-        private void RefreshAccounts()
+        var activeAccount = AccountSettingsStore.GetActiveAccount() ?? _accounts.First();
+        AccountSettingsStore.SetActiveAccount(activeAccount.Id);
+        await SignInAsync(activeAccount);
+    }
+
+    private void RefreshAccounts()
+    {
+        _accounts.Clear();
+        _accounts.AddRange(AccountSettingsStore.GetAllAccounts());
+    }
+
+    private async Task ShowAccountSetup(AccountSettings? existing, string? statusMessage = null)
+    {
+        await CleanupImapServiceAsync();
+
+        _accountSetupView ??= new AccountSetupView();
+        _accountSetupView.SettingsSaved -= OnAccountSettingsSavedAsync;
+        _accountSetupView.SettingsSaved += OnAccountSettingsSavedAsync;
+        _accountSetupView.Initialize(existing, statusMessage);
+        RootContent.Content = _accountSetupView;
+    }
+
+    private async void OnAccountSettingsSavedAsync(object? sender, AccountSetupResultEventArgs e)
+    {
+        AccountSettingsStore.AddOrUpdate(e.Settings);
+        RefreshAccounts();
+        CredentialManager.SavePassword(e.Settings, e.Password);
+        await SignInAsync(e.Settings);
+    }
+
+    private async Task SignInAsync(AccountSettings account)
+    {
+        var response = await CredentialManager.RequestPasswordAsync(account);
+        if (response.Result == CredentialAccessResult.Success && !string.IsNullOrWhiteSpace(response.Password))
         {
-            _accounts.Clear();
-            _accounts.AddRange(AccountSettingsStore.GetAllAccounts());
+            ShowDashboard(account, response.Password);
+            return;
         }
 
-        private async Task ShowAccountSetup(AccountSettings? existing, string? statusMessage = null)
+        var manualPassword = await PromptForPasswordAsync(account);
+        if (!string.IsNullOrWhiteSpace(manualPassword))
         {
-            await CleanupImapServiceAsync();
-
-            _accountSetupView ??= new AccountSetupView();
-            _accountSetupView.SettingsSaved -= OnAccountSettingsSavedAsync;
-            _accountSetupView.SettingsSaved += OnAccountSettingsSavedAsync;
-            _accountSetupView.Initialize(existing, statusMessage);
-            RootContent.Content = _accountSetupView;
+            CredentialManager.SavePassword(account, manualPassword);
+            ShowDashboard(account, manualPassword);
+            return;
         }
 
-        private async void OnAccountSettingsSavedAsync(object? sender, AccountSetupResultEventArgs e)
+        await ShowAccountSetup(account, "Password is required to connect.");
+    }
+
+    private async Task<string?> PromptForPasswordAsync(AccountSettings account)
+    {
+        var xamlRoot = GetXamlRoot();
+        if (xamlRoot == null)
         {
-            AccountSettingsStore.AddOrUpdate(e.Settings);
-            RefreshAccounts();
-            CredentialManager.SavePassword(e.Settings, e.Password);
-            await SignInAsync(e.Settings);
-        }
-
-        private async Task SignInAsync(AccountSettings account)
-        {
-            var response = await CredentialManager.RequestPasswordAsync(account);
-            if (response.Result == CredentialAccessResult.Success && !string.IsNullOrWhiteSpace(response.Password))
-            {
-                ShowDashboard(account, response.Password);
-                return;
-            }
-
-            var manualPassword = await PromptForPasswordAsync(account);
-            if (!string.IsNullOrWhiteSpace(manualPassword))
-            {
-                CredentialManager.SavePassword(account, manualPassword);
-                ShowDashboard(account, manualPassword);
-                return;
-            }
-
-            await ShowAccountSetup(account, "Password is required to connect.");
-        }
-
-        private async Task<string?> PromptForPasswordAsync(AccountSettings account)
-        {
-            var xamlRoot = GetXamlRoot();
-            if (xamlRoot == null)
-            {
-                return null;
-            }
-
-            var passwordBox = new PasswordBox { PlaceholderText = "Password", Width = 300 };
-            var content = new StackPanel { Spacing = 8 };
-            content.Children.Add(new TextBlock
-            {
-                Text = $"Enter the password for {account.AccountName ?? account.Username}.",
-                TextWrapping = TextWrapping.Wrap
-            });
-            content.Children.Add(passwordBox);
-
-            var dialog = new ContentDialog
-            {
-                Title = "Password required",
-                PrimaryButtonText = "Save",
-                CloseButtonText = "Cancel",
-                DefaultButton = ContentDialogButton.Primary,
-                Content = content,
-                XamlRoot = xamlRoot
-            };
-
-            var result = await dialog.ShowAsync();
-            return result == ContentDialogResult.Primary ? passwordBox.Password : null;
-        }
-
-        private void ShowDashboard(AccountSettings settings, string password)
-        {
-            _activeAccount = settings;
-            EnsureDashboard();
-            _ = _dashboardView!.ClearMessageContentAsync();
-            _mailboxViewModel!.SetAccountSummary($"{settings.AccountName} ({settings.Username})");
-            _ = StartImapSyncAsync(settings, password);
-        }
-
-        private async Task<bool> EnsurePostgresReadyAsync(bool forceShowSettings = false)
-        {
-            if (App.PostgresState == PostgresMigrationState.NotStarted)
-            {
-                App.ApplyPendingMigrations();
-            }
-
-            if (App.PostgresState == PostgresMigrationState.Success)
-            {
-                return true;
-            }
-
-            var message = BuildPostgresStatusMessage();
-            await ShowSettingsDialogAsync(message, App.PostgresState != PostgresMigrationState.Success, forceShowSettings);
-
-            return App.PostgresState == PostgresMigrationState.Success;
-        }
-
-        private void EnsureDashboard()
-        {
-            _mailboxViewModel ??= new MailboxViewModel();
-
-            if (_dashboardView == null)
-            {
-                _dashboardView = new ImapDashboardView();
-            }
-
-            _dashboardView.FolderSelected -= OnFolderSelected;
-            _dashboardView.FolderSelected += OnFolderSelected;
-            _dashboardView.LoadMoreRequested -= OnLoadMoreRequested;
-            _dashboardView.LoadMoreRequested += OnLoadMoreRequested;
-            _dashboardView.RetryRequested -= OnRetryRequested;
-            _dashboardView.RetryRequested += OnRetryRequested;
-            _dashboardView.SettingsRequested -= OnSettingsRequested;
-            _dashboardView.SettingsRequested += OnSettingsRequested;
-            _dashboardView.MessageSelected -= OnMessageSelected;
-            _dashboardView.MessageSelected += OnMessageSelected;
-            _dashboardView.ComposeRequested -= OnComposeRequested;
-            _dashboardView.ComposeRequested += OnComposeRequested;
-            _dashboardView.ReplyRequested -= OnReplyRequested;
-            _dashboardView.ReplyRequested += OnReplyRequested;
-            _dashboardView.ReplyAllRequested -= OnReplyAllRequested;
-            _dashboardView.ReplyAllRequested += OnReplyAllRequested;
-            _dashboardView.ForwardRequested -= OnForwardRequested;
-            _dashboardView.ForwardRequested += OnForwardRequested;
-
-            _dashboardView.BindViewModel(_mailboxViewModel);
-            RootContent.Content = _dashboardView;
-        }
-
-        private async Task StartImapSyncAsync(AccountSettings settings, string password)
-        {
-            if (_mailboxViewModel == null)
-            {
-                return;
-            }
-
-            await CleanupImapServiceAsync();
-            _imapService = new ImapSyncService(_mailboxViewModel, DispatcherQueue);
-            await _imapService.StartAsync(settings, password);
-        }
-
-        private void OnFolderSelected(object? sender, MailFolderViewModel folder)
-        {
-            if (_imapService == null)
-            {
-                return;
-            }
-
-            _dashboardView?.ClearMessageContentAsync();
-            _ = _imapService.LoadFolderAsync(folder.Id);
-        }
-
-        private void OnLoadMoreRequested(object? sender, EventArgs e)
-        {
-            if (_imapService == null || _mailboxViewModel?.SelectedFolder is not MailFolderViewModel folder)
-            {
-                return;
-            }
-
-            _ = _imapService.LoadOlderMessagesAsync(folder.Id);
-        }
-
-        private void OnRetryRequested(object? sender, EventArgs e)
-        {
-            if (_imapService != null && _mailboxViewModel?.SelectedFolder is MailFolderViewModel folder)
-            {
-                _mailboxViewModel.SetRetryVisible(false);
-                _ = _imapService.LoadFolderAsync(folder.Id);
-                return;
-            }
-
-            if (_activeAccount != null)
-            {
-                _mailboxViewModel?.SetRetryVisible(false);
-                _ = SignInAsync(_activeAccount);
-            }
-        }
-
-        private async void OnSettingsRequested(object? sender, EventArgs e)
-        {
-            var needsStatus = App.PostgresState != PostgresMigrationState.Success &&
-                              App.PostgresState != PostgresMigrationState.NotStarted;
-            await ShowSettingsDialogAsync(
-                needsStatus ? BuildPostgresStatusMessage() : null,
-                needsStatus);
-        }
-
-        private void OnPostgresSettingsSaved(object? sender, PostgresSettingsSavedEventArgs e)
-        {
-            _postgresSettings = e.Settings;
-            PostgresSettingsStore.Save(e.Settings);
-            CredentialManager.SavePostgresPassword(e.Settings, e.Password);
-
-            var result = App.ApplyPendingMigrations();
-            if (sender is SettingsView view)
-            {
-                view.SetPostgresStatus(BuildPostgresStatusMessage(), result != PostgresMigrationState.Success);
-            }
-        }
-
-        private async Task ShowSettingsDialogAsync(string? postgresStatusMessage = null, bool isError = false, bool forceShowWhenNoAccounts = false)
-        {
-            if (_accounts.Count == 0 && !forceShowWhenNoAccounts)
-            {
-                await ShowAccountSetup(null);
-                return;
-            }
-
-            var xamlRoot = GetXamlRoot();
-            if (xamlRoot == null)
-            {
-                // If no XamlRoot yet, fall back to embedding settings in main content.
-                var inlineView = new SettingsView();
-                inlineView.Initialize(_accounts, _activeAccount?.Id, _postgresSettings, postgresStatusMessage, isError);
-                inlineView.AddAccountRequested += async (_, __) => await ShowAccountSetup(null);
-                inlineView.SetActiveAccountRequested += async (_, id) => await SwitchActiveAccountAsync(id);
-                inlineView.ReenterPasswordRequested += async (_, id) => await ReenterPasswordAsync(id);
-                inlineView.DeleteAccountRequested += async (_, id) => await DeleteAccountAsync(id);
-                inlineView.PostgresSettingsSaved += OnPostgresSettingsSaved;
-                RootContent.Content = inlineView;
-                return;
-            }
-
-            var settingsView = new SettingsView();
-            settingsView.Initialize(_accounts, _activeAccount?.Id, _postgresSettings, postgresStatusMessage, isError);
-
-            var dialog = new ContentDialog
-            {
-                Title = "Settings",
-                Content = settingsView,
-                PrimaryButtonText = "Close",
-                XamlRoot = xamlRoot
-            };
-
-            EventHandler addAccountHandler = async (_, __) =>
-            {
-                dialog.Hide();
-                await ShowAccountSetup(null);
-            };
-            EventHandler<int> setActiveHandler = async (_, id) =>
-            {
-                dialog.Hide();
-                await SwitchActiveAccountAsync(id);
-            };
-            EventHandler<int> reenterHandler = async (_, id) =>
-            {
-                dialog.Hide();
-                await ReenterPasswordAsync(id);
-            };
-            EventHandler<int> deleteHandler = async (_, id) =>
-            {
-                dialog.Hide();
-                await DeleteAccountAsync(id);
-            };
-
-            settingsView.AddAccountRequested += addAccountHandler;
-            settingsView.SetActiveAccountRequested += setActiveHandler;
-            settingsView.ReenterPasswordRequested += reenterHandler;
-            settingsView.DeleteAccountRequested += deleteHandler;
-            settingsView.PostgresSettingsSaved += OnPostgresSettingsSaved;
-
-            await dialog.ShowAsync();
-
-            settingsView.AddAccountRequested -= addAccountHandler;
-            settingsView.SetActiveAccountRequested -= setActiveHandler;
-            settingsView.ReenterPasswordRequested -= reenterHandler;
-            settingsView.DeleteAccountRequested -= deleteHandler;
-            settingsView.PostgresSettingsSaved -= OnPostgresSettingsSaved;
-        }
-
-        private static string BuildPostgresStatusMessage()
-        {
-            return App.PostgresState switch
-            {
-                PostgresMigrationState.Success => "PostgreSQL is ready.",
-                PostgresMigrationState.MissingSettings => "PostgreSQL settings are incomplete. Please fill in all required fields.",
-                PostgresMigrationState.MissingPassword => "PostgreSQL password not found. Please re-enter it.",
-                PostgresMigrationState.Failed => $"PostgreSQL migration failed: {App.PostgresError}",
-                _ => "PostgreSQL setup has not run yet."
-            };
-        }
-
-        private XamlRoot? GetXamlRoot()
-        {
-            if (RootContent?.XamlRoot != null)
-            {
-                return RootContent.XamlRoot;
-            }
-
-            if (Content is FrameworkElement element)
-            {
-                return element.XamlRoot;
-            }
-
             return null;
         }
 
-        private async Task SwitchActiveAccountAsync(int accountId)
+        var passwordBox = new PasswordBox { PlaceholderText = "Password", Width = 300 };
+        var content = new StackPanel { Spacing = 8 };
+        content.Children.Add(new TextBlock
         {
-            RefreshAccounts();
-            var account = _accounts.FirstOrDefault(a => a.Id == accountId);
-            if (account == null)
-            {
-                return;
-            }
+            Text = $"Enter the password for {account.AccountName ?? account.Username}.",
+            TextWrapping = TextWrapping.Wrap
+        });
+        content.Children.Add(passwordBox);
 
-            AccountSettingsStore.SetActiveAccount(accountId);
-            await SignInAsync(account);
+        var dialog = new ContentDialog
+        {
+            Title = "Password required",
+            PrimaryButtonText = "Save",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+            Content = content,
+            XamlRoot = xamlRoot
+        };
+
+        var result = await dialog.ShowAsync();
+        return result == ContentDialogResult.Primary ? passwordBox.Password : null;
+    }
+
+    private void ShowDashboard(AccountSettings settings, string password)
+    {
+        _activeAccount = settings;
+        EnsureDashboard();
+        _ = _dashboardView!.ClearMessageContentAsync();
+        _mailboxViewModel!.SetAccountSummary($"{settings.AccountName} ({settings.Username})");
+        _ = StartImapSyncAsync(settings, password);
+    }
+
+    private async Task<bool> EnsurePostgresReadyAsync(bool forceShowSettings = false)
+    {
+        if (App.PostgresState == PostgresMigrationState.NotStarted)
+        {
+            App.ApplyPendingMigrations();
         }
 
-        private async Task DeleteAccountAsync(int accountId)
+        if (App.PostgresState == PostgresMigrationState.Success)
         {
-            RefreshAccounts();
-            var account = _accounts.FirstOrDefault(a => a.Id == accountId);
-            if (account == null)
-            {
-                return;
-            }
-
-            var xamlRoot = GetXamlRoot();
-            if (xamlRoot == null)
-            {
-                return;
-            }
-
-            var dialog = new ContentDialog
-            {
-                Title = "Delete account?",
-                Content = $"Are you sure you want to permanently delete the account \"{account.AccountName}\"?",
-                PrimaryButtonText = "Delete",
-                CloseButtonText = "Cancel",
-                DefaultButton = ContentDialogButton.Close,
-                XamlRoot = xamlRoot
-            };
-
-            var result = await dialog.ShowAsync();
-            if (result != ContentDialogResult.Primary)
-            {
-                return;
-            }
-
-            await CleanupImapServiceAsync();
-            AccountSettingsStore.RemoveAccount(accountId);
-            CredentialManager.RemovePassword(account);
-            RefreshAccounts();
-
-            if (_accounts.Count == 0)
-            {
-                await ShowAccountSetup(null, "Add an account to get started.");
-                return;
-            }
-
-            var next = AccountSettingsStore.GetActiveAccount() ?? _accounts.First();
-            await SignInAsync(next);
+            return true;
         }
 
-        private async Task ReenterPasswordAsync(int accountId)
+        var message = BuildPostgresStatusMessage();
+        await ShowSettingsDialogAsync(message, App.PostgresState != PostgresMigrationState.Success, forceShowSettings);
+
+        return App.PostgresState == PostgresMigrationState.Success;
+    }
+
+    private void EnsureDashboard()
+    {
+        _mailboxViewModel ??= new MailboxViewModel();
+
+        if (_dashboardView == null)
         {
-            var account = _accounts.FirstOrDefault(a => a.Id == accountId);
-            if (account == null)
-            {
-                return;
-            }
-
-            var password = await PromptForPasswordAsync(account);
-            if (string.IsNullOrWhiteSpace(password))
-            {
-                return;
-            }
-
-            CredentialManager.SavePassword(account, password);
-            if (_activeAccount?.Id == account.Id)
-            {
-                ShowDashboard(account, password);
-            }
+            _dashboardView = new ImapDashboardView();
         }
 
-        private async Task CleanupImapServiceAsync()
+        _dashboardView.FolderSelected -= OnFolderSelected;
+        _dashboardView.FolderSelected += OnFolderSelected;
+        _dashboardView.LoadMoreRequested -= OnLoadMoreRequested;
+        _dashboardView.LoadMoreRequested += OnLoadMoreRequested;
+        _dashboardView.RetryRequested -= OnRetryRequested;
+        _dashboardView.RetryRequested += OnRetryRequested;
+        _dashboardView.SettingsRequested -= OnSettingsRequested;
+        _dashboardView.SettingsRequested += OnSettingsRequested;
+        _dashboardView.MessageSelected -= OnMessageSelected;
+        _dashboardView.MessageSelected += OnMessageSelected;
+        _dashboardView.ComposeRequested -= OnComposeRequested;
+        _dashboardView.ComposeRequested += OnComposeRequested;
+        _dashboardView.ReplyRequested -= OnReplyRequested;
+        _dashboardView.ReplyRequested += OnReplyRequested;
+        _dashboardView.ReplyAllRequested -= OnReplyAllRequested;
+        _dashboardView.ReplyAllRequested += OnReplyAllRequested;
+        _dashboardView.ForwardRequested -= OnForwardRequested;
+        _dashboardView.ForwardRequested += OnForwardRequested;
+
+        _dashboardView.BindViewModel(_mailboxViewModel);
+        RootContent.Content = _dashboardView;
+    }
+
+    private async Task StartImapSyncAsync(AccountSettings settings, string password)
+    {
+        if (_mailboxViewModel == null)
         {
-            if (_imapService != null)
-            {
-                await _imapService.DisposeAsync();
-                _imapService = null;
-            }
+            return;
         }
 
-        private void OnMessageSelected(object? sender, EmailMessageViewModel e)
-        {
-            if (_imapService == null || _mailboxViewModel?.SelectedFolder == null)
-            {
-                return;
-            }
+        await CleanupImapServiceAsync();
+        _imapService = new ImapSyncService(_mailboxViewModel, DispatcherQueue);
+        await _imapService.StartAsync(settings, password);
+    }
 
-            _ = LoadAndDisplayMessageAsync(_mailboxViewModel.SelectedFolder.Id, e.Id);
+    private void OnFolderSelected(object? sender, MailFolderViewModel folder)
+    {
+        if (_imapService == null)
+        {
+            return;
         }
 
-        private async Task LoadAndDisplayMessageAsync(string folderId, string messageId)
-        {
-            if (_imapService == null || _dashboardView == null)
-            {
-                return;
-            }
+        _dashboardView?.ClearMessageContentAsync();
+        _ = _imapService.LoadFolderAsync(folder.Id);
+    }
 
-            var html = await _imapService.LoadMessageBodyAsync(folderId, messageId);
-            if (html != null)
-            {
-                await _dashboardView.DisplayMessageContentAsync(html);
-            }
-            else
-            {
-                await _dashboardView.ClearMessageContentAsync();
-            }
+    private void OnLoadMoreRequested(object? sender, EventArgs e)
+    {
+        if (_imapService == null || _mailboxViewModel?.SelectedFolder is not MailFolderViewModel folder)
+        {
+            return;
         }
 
-        private async void OnComposeRequested(object? sender, EventArgs e)
+        _ = _imapService.LoadOlderMessagesAsync(folder.Id);
+    }
+
+    private void OnRetryRequested(object? sender, EventArgs e)
+    {
+        if (_imapService != null && _mailboxViewModel?.SelectedFolder is MailFolderViewModel folder)
         {
-            var uri = BuildMailToUri(Array.Empty<string>(), null, null);
-            await Launcher.LaunchUriAsync(uri);
+            _mailboxViewModel.SetRetryVisible(false);
+            _ = _imapService.LoadFolderAsync(folder.Id);
+            return;
         }
 
-        private async void OnReplyRequested(object? sender, EmailMessageViewModel message) =>
-            await LaunchReplyAsync(message);
-
-        private async void OnReplyAllRequested(object? sender, EmailMessageViewModel message) =>
-            await LaunchReplyAsync(message);
-
-        private async Task LaunchReplyAsync(EmailMessageViewModel message)
+        if (_activeAccount != null)
         {
-            var to = ExtractAddress(message);
-            if (string.IsNullOrEmpty(to))
-            {
-                return;
-            }
+            _mailboxViewModel?.SetRetryVisible(false);
+            _ = SignInAsync(_activeAccount);
+        }
+    }
 
-            var body = BuildQuotedBody(message);
-            var uri = BuildMailToUri(new[] { to }, $"Re: {message.Subject}", body);
-            await Launcher.LaunchUriAsync(uri);
+    private async void OnSettingsRequested(object? sender, EventArgs e)
+    {
+        var needsStatus = App.PostgresState != PostgresMigrationState.Success &&
+                          App.PostgresState != PostgresMigrationState.NotStarted;
+        await ShowSettingsDialogAsync(
+            needsStatus ? BuildPostgresStatusMessage() : null,
+            needsStatus);
+    }
+
+    private void OnPostgresSettingsSaved(object? sender, PostgresSettingsSavedEventArgs e)
+    {
+        _postgresSettings = e.Settings;
+        PostgresSettingsStore.Save(e.Settings);
+        CredentialManager.SavePostgresPassword(e.Settings, e.Password);
+
+        var result = App.ApplyPendingMigrations();
+        if (sender is SettingsView view)
+        {
+            view.SetPostgresStatus(BuildPostgresStatusMessage(), result != PostgresMigrationState.Success);
+        }
+    }
+
+    private async Task ShowSettingsDialogAsync(string? postgresStatusMessage = null, bool isError = false, bool forceShowWhenNoAccounts = false)
+    {
+        if (_accounts.Count == 0 && !forceShowWhenNoAccounts)
+        {
+            await ShowAccountSetup(null);
+            return;
         }
 
-        private async void OnForwardRequested(object? sender, EmailMessageViewModel message)
+        var xamlRoot = GetXamlRoot();
+        if (xamlRoot == null)
         {
-            var body = $"Forwarded message:\r\nFrom: {message.Sender}\r\nSubject: {message.Subject}\r\n\r\n{message.Preview}";
-            var uri = BuildMailToUri(Array.Empty<string>(), $"Fwd: {message.Subject}", body);
-            await Launcher.LaunchUriAsync(uri);
+            // If no XamlRoot yet, fall back to embedding settings in main content.
+            var inlineView = new SettingsView();
+            inlineView.Initialize(_accounts, _activeAccount?.Id, _postgresSettings, postgresStatusMessage, isError);
+            inlineView.AddAccountRequested += async (_, __) => await ShowAccountSetup(null);
+            inlineView.SetActiveAccountRequested += async (_, id) => await SwitchActiveAccountAsync(id);
+            inlineView.ReenterPasswordRequested += async (_, id) => await ReenterPasswordAsync(id);
+            inlineView.DeleteAccountRequested += async (_, id) => await DeleteAccountAsync(id);
+            inlineView.PostgresSettingsSaved += OnPostgresSettingsSaved;
+            RootContent.Content = inlineView;
+            return;
         }
 
-        private static Uri BuildMailToUri(IEnumerable<string> recipients, string? subject, string? body)
+        var settingsView = new SettingsView();
+        settingsView.Initialize(_accounts, _activeAccount?.Id, _postgresSettings, postgresStatusMessage, isError);
+
+        var dialog = new ContentDialog
         {
-            var builder = new StringBuilder("mailto:");
-            var toList = recipients?
-                .Where(r => !string.IsNullOrWhiteSpace(r))
-                .Select(r => r.Trim())
-                .ToList() ?? new List<string>();
+            Title = "Settings",
+            Content = settingsView,
+            PrimaryButtonText = "Close",
+            XamlRoot = xamlRoot
+        };
 
-            if (toList.Count > 0)
-            {
-                builder.Append(string.Join(",", toList));
-            }
+        EventHandler addAccountHandler = async (_, __) =>
+        {
+            dialog.Hide();
+            await ShowAccountSetup(null);
+        };
+        EventHandler<int> setActiveHandler = async (_, id) =>
+        {
+            dialog.Hide();
+            await SwitchActiveAccountAsync(id);
+        };
+        EventHandler<int> reenterHandler = async (_, id) =>
+        {
+            dialog.Hide();
+            await ReenterPasswordAsync(id);
+        };
+        EventHandler<int> deleteHandler = async (_, id) =>
+        {
+            dialog.Hide();
+            await DeleteAccountAsync(id);
+        };
 
-            var parameters = new List<string>();
-            if (!string.IsNullOrWhiteSpace(subject))
-            {
-                parameters.Add($"subject={Uri.EscapeDataString(subject)}");
-            }
+        settingsView.AddAccountRequested += addAccountHandler;
+        settingsView.SetActiveAccountRequested += setActiveHandler;
+        settingsView.ReenterPasswordRequested += reenterHandler;
+        settingsView.DeleteAccountRequested += deleteHandler;
+        settingsView.PostgresSettingsSaved += OnPostgresSettingsSaved;
 
-            if (!string.IsNullOrWhiteSpace(body))
-            {
-                parameters.Add($"body={Uri.EscapeDataString(body)}");
-            }
+        await dialog.ShowAsync();
 
-            if (parameters.Count > 0)
-            {
-                builder.Append('?');
-                builder.Append(string.Join("&", parameters));
-            }
+        settingsView.AddAccountRequested -= addAccountHandler;
+        settingsView.SetActiveAccountRequested -= setActiveHandler;
+        settingsView.ReenterPasswordRequested -= reenterHandler;
+        settingsView.DeleteAccountRequested -= deleteHandler;
+        settingsView.PostgresSettingsSaved -= OnPostgresSettingsSaved;
+    }
 
-            if (Uri.TryCreate(builder.ToString(), UriKind.Absolute, out var uri))
-            {
-                return uri;
-            }
+    private static string BuildPostgresStatusMessage()
+    {
+        return App.PostgresState switch
+        {
+            PostgresMigrationState.Success => "PostgreSQL is ready.",
+            PostgresMigrationState.MissingSettings => "PostgreSQL settings are incomplete. Please fill in all required fields.",
+            PostgresMigrationState.MissingPassword => "PostgreSQL password not found. Please re-enter it.",
+            PostgresMigrationState.Failed => $"PostgreSQL migration failed: {App.PostgresError}",
+            _ => "PostgreSQL setup has not run yet."
+        };
+    }
 
-            return new Uri("mailto:");
+    private XamlRoot? GetXamlRoot()
+    {
+        if (RootContent?.XamlRoot != null)
+        {
+            return RootContent.XamlRoot;
         }
 
-        private static string? ExtractAddress(EmailMessageViewModel message)
+        if (Content is FrameworkElement element)
         {
-            var address = message.SenderAddress;
-            if (!string.IsNullOrWhiteSpace(address))
-            {
-                return address;
-            }
-
-            var display = message.Sender;
-            if (MailboxAddress.TryParse(display, out var mailbox) && !string.IsNullOrWhiteSpace(mailbox.Address))
-            {
-                return mailbox.Address;
-            }
-
-            var trimmed = display?.Trim();
-            return trimmed != null && trimmed.Contains("@", StringComparison.Ordinal) ? trimmed : null;
+            return element.XamlRoot;
         }
 
-        private static string? BuildQuotedBody(EmailMessageViewModel message)
-        {
-            if (string.IsNullOrWhiteSpace(message.Preview))
-            {
-                return null;
-            }
+        return null;
+    }
 
-            var sb = new StringBuilder();
-            sb.AppendLine();
-            sb.AppendLine();
-            sb.Append("On ");
-            sb.Append(message.Received.ToString("g"));
-            sb.Append(", ");
-            sb.Append(message.Sender);
-            sb.AppendLine(" wrote:");
-            sb.AppendLine();
-            sb.AppendLine(message.Preview);
-            return sb.ToString();
+    private async Task SwitchActiveAccountAsync(int accountId)
+    {
+        RefreshAccounts();
+        var account = _accounts.FirstOrDefault(a => a.Id == accountId);
+        if (account == null)
+        {
+            return;
         }
+
+        AccountSettingsStore.SetActiveAccount(accountId);
+        await SignInAsync(account);
+    }
+
+    private async Task DeleteAccountAsync(int accountId)
+    {
+        RefreshAccounts();
+        var account = _accounts.FirstOrDefault(a => a.Id == accountId);
+        if (account == null)
+        {
+            return;
+        }
+
+        var xamlRoot = GetXamlRoot();
+        if (xamlRoot == null)
+        {
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            Title = "Delete account?",
+            Content = $"Are you sure you want to permanently delete the account \"{account.AccountName}\"?",
+            PrimaryButtonText = "Delete",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = xamlRoot
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        await CleanupImapServiceAsync();
+        AccountSettingsStore.RemoveAccount(accountId);
+        CredentialManager.RemovePassword(account);
+        RefreshAccounts();
+
+        if (_accounts.Count == 0)
+        {
+            await ShowAccountSetup(null, "Add an account to get started.");
+            return;
+        }
+
+        var next = AccountSettingsStore.GetActiveAccount() ?? _accounts.First();
+        await SignInAsync(next);
+    }
+
+    private async Task ReenterPasswordAsync(int accountId)
+    {
+        var account = _accounts.FirstOrDefault(a => a.Id == accountId);
+        if (account == null)
+        {
+            return;
+        }
+
+        var password = await PromptForPasswordAsync(account);
+        if (string.IsNullOrWhiteSpace(password))
+        {
+            return;
+        }
+
+        CredentialManager.SavePassword(account, password);
+        if (_activeAccount?.Id == account.Id)
+        {
+            ShowDashboard(account, password);
+        }
+    }
+
+    private async Task CleanupImapServiceAsync()
+    {
+        if (_imapService != null)
+        {
+            await _imapService.DisposeAsync();
+            _imapService = null;
+        }
+    }
+
+    private void OnMessageSelected(object? sender, EmailMessageViewModel e)
+    {
+        if (_imapService == null || _mailboxViewModel?.SelectedFolder == null)
+        {
+            return;
+        }
+
+        _ = LoadAndDisplayMessageAsync(_mailboxViewModel.SelectedFolder.Id, e.Id);
+    }
+
+    private async Task LoadAndDisplayMessageAsync(string folderId, string messageId)
+    {
+        if (_imapService == null || _dashboardView == null)
+        {
+            return;
+        }
+
+        var html = await _imapService.LoadMessageBodyAsync(folderId, messageId);
+        if (html != null)
+        {
+            await _dashboardView.DisplayMessageContentAsync(html);
+        }
+        else
+        {
+            await _dashboardView.ClearMessageContentAsync();
+        }
+    }
+
+    private async void OnComposeRequested(object? sender, EventArgs e)
+    {
+        var uri = BuildMailToUri(Array.Empty<string>(), null, null);
+        await Launcher.LaunchUriAsync(uri);
+    }
+
+    private async void OnReplyRequested(object? sender, EmailMessageViewModel message) =>
+        await LaunchReplyAsync(message);
+
+    private async void OnReplyAllRequested(object? sender, EmailMessageViewModel message) =>
+        await LaunchReplyAsync(message);
+
+    private async Task LaunchReplyAsync(EmailMessageViewModel message)
+    {
+        var to = ExtractAddress(message);
+        if (string.IsNullOrEmpty(to))
+        {
+            return;
+        }
+
+        var body = BuildQuotedBody(message);
+        var uri = BuildMailToUri(new[] { to }, $"Re: {message.Subject}", body);
+        await Launcher.LaunchUriAsync(uri);
+    }
+
+    private async void OnForwardRequested(object? sender, EmailMessageViewModel message)
+    {
+        var body = $"Forwarded message:\r\nFrom: {message.Sender}\r\nSubject: {message.Subject}\r\n\r\n{message.Preview}";
+        var uri = BuildMailToUri(Array.Empty<string>(), $"Fwd: {message.Subject}", body);
+        await Launcher.LaunchUriAsync(uri);
+    }
+
+    private static Uri BuildMailToUri(IEnumerable<string> recipients, string? subject, string? body)
+    {
+        var builder = new StringBuilder("mailto:");
+        var toList = recipients?
+            .Where(r => !string.IsNullOrWhiteSpace(r))
+            .Select(r => r.Trim())
+            .ToList() ?? new List<string>();
+
+        if (toList.Count > 0)
+        {
+            builder.Append(string.Join(",", toList));
+        }
+
+        var parameters = new List<string>();
+        if (!string.IsNullOrWhiteSpace(subject))
+        {
+            parameters.Add($"subject={Uri.EscapeDataString(subject)}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(body))
+        {
+            parameters.Add($"body={Uri.EscapeDataString(body)}");
+        }
+
+        if (parameters.Count > 0)
+        {
+            builder.Append('?');
+            builder.Append(string.Join("&", parameters));
+        }
+
+        if (Uri.TryCreate(builder.ToString(), UriKind.Absolute, out var uri))
+        {
+            return uri;
+        }
+
+        return new Uri("mailto:");
+    }
+
+    private static string? ExtractAddress(EmailMessageViewModel message)
+    {
+        var address = message.SenderAddress;
+        if (!string.IsNullOrWhiteSpace(address))
+        {
+            return address;
+        }
+
+        var display = message.Sender;
+        if (MailboxAddress.TryParse(display, out var mailbox) && !string.IsNullOrWhiteSpace(mailbox.Address))
+        {
+            return mailbox.Address;
+        }
+
+        var trimmed = display?.Trim();
+        return trimmed != null && trimmed.Contains("@", StringComparison.Ordinal) ? trimmed : null;
+    }
+
+    private static string? BuildQuotedBody(EmailMessageViewModel message)
+    {
+        if (string.IsNullOrWhiteSpace(message.Preview))
+        {
+            return null;
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine();
+        sb.AppendLine();
+        sb.Append("On ");
+        sb.Append(message.Received.ToString("g"));
+        sb.Append(", ");
+        sb.Append(message.Sender);
+        sb.AppendLine(" wrote:");
+        sb.AppendLine();
+        sb.AppendLine(message.Preview);
+        return sb.ToString();
     }
 }
