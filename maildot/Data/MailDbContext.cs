@@ -33,6 +33,7 @@ public sealed class MailDbContext : DbContext
             entity.Property(e => e.Id).HasColumnName("id");
             entity.Property(e => e.UidValidity).HasColumnName("uid_validity");
             entity.Property(e => e.LastUid).HasColumnName("last_uid");
+            entity.HasIndex(f => new { f.AccountId, f.FullName }).IsUnique();
             entity.HasOne(f => f.Account)
                   .WithMany(a => a.Folders)
                   .HasForeignKey(f => f.AccountId)

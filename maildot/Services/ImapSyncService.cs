@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using MailKit;
@@ -12,8 +13,10 @@ using maildot.Models;
 using maildot.ViewModels;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.UI.Dispatching;
+using Npgsql;
 using MimeKit;
 using Windows.UI;
+using System.Diagnostics;
 
 namespace maildot.Services;
 
@@ -29,10 +32,10 @@ public sealed class ImapSyncService : IAsyncDisposable
     private readonly Dictionary<string, int> _folderNextEndIndex = new(StringComparer.OrdinalIgnoreCase);
 
     private ImapClient? _client;
-    private MailDbContext? _db;
     private AccountSettings? _settings;
     private string? _password;
-    private bool _dbReady;
+    private PostgresSettings? _pgSettings;
+    private string? _pgPassword;
     private Task? _backgroundTask;
 
     public ImapSyncService(MailboxViewModel viewModel, DispatcherQueue dispatcher)
@@ -397,61 +400,68 @@ public sealed class ImapSyncService : IAsyncDisposable
             return;
         }
 
-        if (!_dbReady && !await EnsureDbAsync())
+        var db = await CreateDbContextAsync();
+        if (db == null)
         {
             return;
         }
 
-        if (_db == null)
+        await using (db)
         {
-            return;
-        }
-
-        var folderEntity = await EnsureFolderEntityAsync(folder, _cts.Token);
-        if (folderEntity == null)
-        {
-            return;
-        }
-
-        var existingUids = await _db.ImapMessages
-            .Where(m => m.FolderId == folderEntity.Id)
-            .Select(m => m.ImapUid)
-            .ToHashSetAsync(_cts.Token);
-
-        foreach (var summary in summaries)
-        {
-            var uid = (long)summary.UniqueId.Id;
-            if (existingUids.Contains(uid))
+            var folderEntity = await EnsureFolderEntityAsync(db, folder, _cts.Token);
+            if (folderEntity == null)
             {
-                continue;
+                return;
             }
 
-            var mailbox = summary.Envelope?.From?.OfType<MailboxAddress>().FirstOrDefault();
-            var senderName = mailbox?.Name ?? string.Empty;
-            var senderAddress = mailbox?.Address ?? string.Empty;
+            var existingUids = await db.ImapMessages
+                .Where(m => m.FolderId == folderEntity.Id)
+                .Select(m => m.ImapUid)
+                .ToHashSetAsync(_cts.Token);
 
-            var messageId = summary.Envelope?.MessageId;
-            if (string.IsNullOrWhiteSpace(messageId))
+            foreach (var summary in summaries)
             {
-                messageId = $"uid:{uid}@{_settings.Server}";
+                var uid = (long)summary.UniqueId.Id;
+                if (existingUids.Contains(uid))
+                {
+                    continue;
+                }
+
+                var mailbox = summary.Envelope?.From?.OfType<MailboxAddress>().FirstOrDefault();
+                var senderName = CleanText(mailbox?.Name) ?? string.Empty;
+                var senderAddress = CleanText(mailbox?.Address) ?? string.Empty;
+
+                var messageId = summary.Envelope?.MessageId;
+                if (string.IsNullOrWhiteSpace(messageId))
+                {
+                    messageId = $"uid:{uid}@{_settings.Server}";
+                }
+                messageId = CleanText(messageId) ?? string.Empty;
+
+                var received = summary.InternalDate?.ToUniversalTime() ?? DateTimeOffset.UtcNow;
+
+                db.ImapMessages.Add(new ImapMessage
+                {
+                    FolderId = folderEntity.Id,
+                    ImapUid = uid,
+                    MessageId = messageId,
+                    Subject = CleanText(summary.Envelope?.Subject) ?? string.Empty,
+                    FromName = senderName,
+                    FromAddress = senderAddress,
+                    ReceivedUtc = received,
+                    Hash = $"{messageId}:{uid}"
+                });
             }
 
-            var received = summary.InternalDate?.ToUniversalTime() ?? DateTimeOffset.UtcNow;
-
-            _db.ImapMessages.Add(new ImapMessage
+            try
             {
-                FolderId = folderEntity.Id,
-                ImapUid = uid,
-                MessageId = messageId,
-                Subject = summary.Envelope?.Subject ?? string.Empty,
-                FromName = senderName,
-                FromAddress = senderAddress,
-                ReceivedUtc = received,
-                Hash = $"{messageId}:{uid}"
-            });
+                await db.SaveChangesAsync(_cts.Token);
+            }
+            catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+            {
+                // Another writer inserted the same message concurrently; safe to ignore.
+            }
         }
-
-        await _db.SaveChangesAsync(_cts.Token);
     }
 
     private async Task BackgroundFetchLoopAsync(CancellationToken token)
@@ -464,7 +474,7 @@ public sealed class ImapSyncService : IAsyncDisposable
                 {
                     if (!await TryReconnectAsync())
                     {
-                        await Task.Delay(TimeSpan.FromSeconds(5), token);
+                        await Task.Delay(TimeSpan.FromMinutes(1), token);
                         continue;
                     }
                 }
@@ -480,7 +490,7 @@ public sealed class ImapSyncService : IAsyncDisposable
                     await FetchMissingBodiesForFolderAsync(folder, token);
                 }
 
-                await Task.Delay(TimeSpan.FromSeconds(5), token);
+                await Task.Delay(TimeSpan.FromMinutes(1), token);
             }
             catch (OperationCanceledException)
             {
@@ -488,12 +498,13 @@ public sealed class ImapSyncService : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                if (IsRecoverable(ex))
+                if (!IsRecoverable(ex))
                 {
-                    await TryReconnectAsync();
+                    Debug.WriteLine(ex.ToString());
                 }
 
-                await Task.Delay(TimeSpan.FromSeconds(5), token);
+                await Task.Delay(TimeSpan.FromMinutes(1), token);
+                // next iteration of main loop will reconnect.
             }
         }
     }
@@ -532,21 +543,37 @@ public sealed class ImapSyncService : IAsyncDisposable
         {
             return;
         }
-
-        if (!_dbReady && !await EnsureDbAsync())
+        var db = await CreateDbContextAsync();
+        if (db == null)
         {
             return;
         }
 
-        if (_db == null)
-        {
-            return;
-        }
+        Models.ImapFolder? folderEntity;
+        List<(long ImapUid, int Id)> knownMessages;
+        HashSet<int> bodiesPresent;
 
-        var folderEntity = await EnsureFolderEntityAsync(folder, token);
-        if (folderEntity == null)
+        await using (db)
         {
-            return;
+            folderEntity = await EnsureFolderEntityAsync(db, folder, token);
+            if (folderEntity == null)
+            {
+                return;
+            }
+
+            knownMessages = (await db.ImapMessages
+                    .Where(m => m.FolderId == folderEntity.Id)
+                    .Select(m => new { m.ImapUid, m.Id })
+                    .ToListAsync(token))
+                .Select(m => (m.ImapUid, m.Id))
+                .ToList();
+
+            var messageIds = knownMessages.Select(m => m.Id).ToList();
+
+            bodiesPresent = await db.MessageBodies
+                .Where(b => messageIds.Contains(b.MessageId))
+                .Select(b => b.MessageId)
+                .ToHashSetAsync(token);
         }
 
         List<UniqueId> serverUids;
@@ -581,17 +608,7 @@ public sealed class ImapSyncService : IAsyncDisposable
             _semaphore.Release();
         }
 
-        var knownMessages = await _db.ImapMessages
-            .Where(m => m.FolderId == folderEntity.Id)
-            .Select(m => new { m.ImapUid, m.Id })
-            .ToListAsync(token);
-
         var knownUids = knownMessages.Select(m => m.ImapUid).ToHashSet();
-
-        var bodiesPresent = await _db.MessageBodies
-            .Where(b => knownMessages.Select(m => m.Id).Contains(b.MessageId))
-            .Select(b => b.MessageId)
-            .ToHashSetAsync(token);
 
         var missingBodyUids = knownMessages
             .Where(m => !bodiesPresent.Contains(m.Id))
@@ -605,6 +622,13 @@ public sealed class ImapSyncService : IAsyncDisposable
             .OrderByDescending(uid => uid)
             .ToList();
 
+        if (folderEntity == null)
+        {
+            return;
+        }
+
+        var folderId = folderEntity.Id;
+
         foreach (var uid in targets)
         {
             if (token.IsCancellationRequested)
@@ -612,11 +636,11 @@ public sealed class ImapSyncService : IAsyncDisposable
                 break;
             }
 
-            await FetchAndPersistBodyAsync(folder, folderEntity, uid, token);
+            await FetchAndPersistBodyAsync(folder, folderId, uid, token);
         }
     }
 
-    private async Task FetchAndPersistBodyAsync(IMailFolder folder, Models.ImapFolder folderEntity, long uid, CancellationToken token)
+    private async Task FetchAndPersistBodyAsync(IMailFolder folder, int folderId, long uid, CancellationToken token)
     {
         MimeMessage? message = null;
         var uniqueId = new UniqueId((uint)uid);
@@ -655,64 +679,82 @@ public sealed class ImapSyncService : IAsyncDisposable
             _semaphore.Release();
         }
 
-        if (message == null || _db == null)
+        if (message == null)
         {
             return;
         }
 
-        var entity = await _db.ImapMessages
-            .FirstOrDefaultAsync(m => m.FolderId == folderEntity.Id && m.ImapUid == uid, token);
-
-        if (entity == null)
-        {
-            entity = CreateImapMessage(folderEntity, message, uid);
-            _db.ImapMessages.Add(entity);
-            await _db.SaveChangesAsync(token);
-        }
-        else
-        {
-            UpdateImapMessage(entity, message);
-            await _db.SaveChangesAsync(token);
-        }
-
-        var hasBody = await _db.MessageBodies.AnyAsync(b => b.MessageId == entity.Id, token);
-        if (hasBody)
+        var db = await CreateDbContextAsync();
+        if (db == null)
         {
             return;
         }
 
-        var headers = message.Headers
-            .GroupBy(h => h.Field)
-            .ToDictionary(g => g.Key, g => g.Select(x => x.Value).ToArray());
-
-        var plain = message.TextBody;
-        var html = message.HtmlBody;
-        var sanitized = string.IsNullOrWhiteSpace(html) ? null : HtmlSanitizer.Sanitize(html).Html;
-        var previewSource = !string.IsNullOrWhiteSpace(plain) ? plain : message.Subject ?? string.Empty;
-        var preview = BuildPreview(previewSource);
-
-        _db.MessageBodies.Add(new MessageBody
+        await using (db)
         {
-            MessageId = entity.Id,
-            PlainText = plain,
-            HtmlText = html,
-            SanitizedHtml = sanitized,
-            Headers = headers,
-            Preview = preview
-        });
+            var entity = await UpsertImapMessageAsync(db, folderId, message, uid, token);
 
-        await _db.SaveChangesAsync(token);
+            var hasBody = await db.MessageBodies.AnyAsync(b => b.MessageId == entity.Id, token);
+            if (hasBody)
+            {
+                return;
+            }
+
+            var headers = message.Headers
+                .GroupBy(h => h.Field)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.Select(x => CleanText(x.Value) ?? string.Empty).ToArray());
+
+            var plain = CleanText(message.TextBody);
+            var html = CleanText(message.HtmlBody);
+            var sanitized = string.IsNullOrWhiteSpace(html) ? null : CleanText(HtmlSanitizer.Sanitize(html).Html);
+            var previewSource = string.IsNullOrWhiteSpace(plain) ? message.Subject ?? string.Empty : plain;
+            var preview = BuildPreview(previewSource);
+
+            MessageBody mb = new()
+            {
+                MessageId = entity.Id,
+                PlainText = plain,
+                HtmlText = html,
+                SanitizedHtml = sanitized,
+                Headers = headers,
+                Preview = preview
+            };
+            db.MessageBodies.Add(mb);
+
+            try
+            {
+                await db.SaveChangesAsync(token);
+            }
+            catch (DbUpdateException ex)
+            {
+                Debug.WriteLine(
+                    $"Exception occurred while persisting message UID {uid} in folder {folder.FullName} from " +
+                    $"{entity.FromAddress} dated {entity.ReceivedUtc:o} with subject \"{entity.Subject}\": {ex}");
+            }
+        }
     }
 
-    private async Task<Models.ImapFolder?> EnsureFolderEntityAsync(IMailFolder folder, CancellationToken token)
+    private async Task<Models.ImapFolder?> EnsureFolderEntityAsync(MailDbContext db, IMailFolder folder, CancellationToken token)
     {
-        if (_settings == null || _db == null)
+        if (_settings == null)
         {
             return null;
         }
 
-        var folderEntity = await _db.ImapFolders
-            .FirstOrDefaultAsync(f => f.AccountId == _settings.Id && f.FullName == folder.FullName, token);
+        var fullName = CleanText(folder.FullName);
+        if (string.IsNullOrWhiteSpace(fullName))
+        {
+            return null;
+        }
+
+        var displayName = CleanText(folder.Name) ?? fullName;
+        var folderEntity = await db.ImapFolders
+            .AsNoTracking()
+            .Where(f => f.AccountId == _settings.Id && f.FullName == fullName)
+            .OrderBy(f => f.Id)
+            .FirstOrDefaultAsync(token);
 
         if (folderEntity != null)
         {
@@ -722,30 +764,45 @@ public sealed class ImapSyncService : IAsyncDisposable
         folderEntity = new Models.ImapFolder
         {
             AccountId = _settings.Id,
-            FullName = folder.FullName,
-            DisplayName = folder.Name ?? folder.FullName
+            FullName = fullName,
+            DisplayName = displayName
         };
 
-        _db.ImapFolders.Add(folderEntity);
-        await _db.SaveChangesAsync(token);
+        db.ImapFolders.Add(folderEntity);
+
+        try
+        {
+            await db.SaveChangesAsync(token);
+        }
+        catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+        {
+            // Another writer created the folder concurrently; re-query and return the existing row.
+            folderEntity = await db.ImapFolders
+                .AsNoTracking()
+                .Where(f => f.AccountId == _settings.Id && f.FullName == fullName)
+                .OrderBy(f => f.Id)
+                .FirstOrDefaultAsync(token);
+        }
+
         return folderEntity;
     }
 
-    private ImapMessage CreateImapMessage(Models.ImapFolder folder, MimeMessage message, long uid)
+    private ImapMessage CreateImapMessage(int folderId, MimeMessage message, long uid)
     {
         var sender = message.From.OfType<MailboxAddress>().FirstOrDefault();
-        var senderName = sender?.Name ?? string.Empty;
-        var senderAddress = sender?.Address ?? string.Empty;
-        var messageId = string.IsNullOrWhiteSpace(message.MessageId)
+        var senderName = CleanText(sender?.Name) ?? string.Empty;
+        var senderAddress = CleanText(sender?.Address) ?? string.Empty;
+        var rawMessageId = string.IsNullOrWhiteSpace(message.MessageId)
             ? $"uid:{uid}@{_settings?.Server}"
             : message.MessageId;
+        var messageId = CleanText(rawMessageId) ?? string.Empty;
 
         return new ImapMessage
         {
-            FolderId = folder.Id,
+            FolderId = folderId,
             ImapUid = uid,
             MessageId = messageId,
-            Subject = message.Subject ?? string.Empty,
+            Subject = CleanText(message.Subject) ?? string.Empty,
             FromName = senderName,
             FromAddress = senderAddress,
             ReceivedUtc = message.Date.ToUniversalTime(),
@@ -756,49 +813,137 @@ public sealed class ImapSyncService : IAsyncDisposable
     private static void UpdateImapMessage(ImapMessage entity, MimeMessage message)
     {
         var sender = message.From.OfType<MailboxAddress>().FirstOrDefault();
-        entity.Subject = message.Subject ?? string.Empty;
-        entity.FromName = sender?.Name ?? string.Empty;
-        entity.FromAddress = sender?.Address ?? string.Empty;
+        entity.Subject = CleanText(message.Subject) ?? string.Empty;
+        entity.FromName = CleanText(sender?.Name) ?? string.Empty;
+        entity.FromAddress = CleanText(sender?.Address) ?? string.Empty;
         entity.ReceivedUtc = message.Date.ToUniversalTime();
+    }
+
+    private static bool IsUniqueViolation(DbUpdateException ex) =>
+        ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation };
+
+    private async Task<ImapMessage> UpsertImapMessageAsync(MailDbContext db, int folderId, MimeMessage message, long uid, CancellationToken token)
+    {
+        var existing = await db.ImapMessages
+            .FirstOrDefaultAsync(m => m.FolderId == folderId && m.ImapUid == uid, token);
+
+        if (existing != null)
+        {
+            UpdateImapMessage(existing, message);
+            await db.SaveChangesAsync(token);
+            return existing;
+        }
+
+        var entity = CreateImapMessage(folderId, message, uid);
+        db.ImapMessages.Add(entity);
+
+        try
+        {
+            await db.SaveChangesAsync(token);
+            return entity;
+        }
+        catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+        {
+            db.Entry(entity).State = EntityState.Detached;
+            var reloaded = await db.ImapMessages
+                .FirstAsync(m => m.FolderId == folderId && m.ImapUid == uid, token);
+            UpdateImapMessage(reloaded, message);
+            await db.SaveChangesAsync(token);
+            return reloaded;
+        }
     }
 
     private static string BuildPreview(string? text)
     {
-        if (string.IsNullOrWhiteSpace(text))
+        if (text == null)
         {
             return string.Empty;
         }
 
         var trimmed = text.Replace("\r", " ").Replace("\n", " ").Trim();
-        return trimmed.Length > 240 ? trimmed[..240] : trimmed;
+        if (trimmed.Length > 240)
+        {
+            trimmed = trimmed[..240];
+        }
+        trimmed = CleanText(trimmed);
+        return string.IsNullOrWhiteSpace(trimmed) ? string.Empty : trimmed;
     }
 
-    private async Task<bool> EnsureDbAsync()
+    private static string? CleanText(string? value)
     {
-        if (_dbReady)
+        if (string.IsNullOrEmpty(value))
         {
-            return true;
+            return value;
         }
 
-        try
+        var withoutNulls = value.Replace("\0", string.Empty);
+        return StripInvalidSurrogates(withoutNulls);
+    }
+
+    private static string StripInvalidSurrogates(string value)
+    {
+        var span = value.AsSpan();
+        var sb = new StringBuilder(span.Length);
+
+        for (var i = 0; i < span.Length; i++)
         {
-            var pg = PostgresSettingsStore.Load();
-            var passwordResponse = await CredentialManager.RequestPostgresPasswordAsync(pg);
-            if (passwordResponse.Result != CredentialAccessResult.Success || string.IsNullOrWhiteSpace(passwordResponse.Password))
+            var ch = span[i];
+            if (!char.IsSurrogate(ch))
             {
-                return false;
+                sb.Append(ch);
+                continue;
             }
 
-            _db = MailDbContextFactory.CreateDbContext(pg, passwordResponse.Password);
-            _dbReady = true;
-            return true;
+            if (char.IsHighSurrogate(ch) && i + 1 < span.Length && char.IsLowSurrogate(span[i + 1]))
+            {
+                sb.Append(ch);
+                sb.Append(span[i + 1]);
+                i++;
+                continue;
+            }
+
+            // skip lone surrogate
+        }
+
+        var cleaned = sb.ToString();
+
+        // Final safety pass: ensure string can roundtrip through UTF-8 without throwing.
+        var utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: false);
+        var bytes = utf8.GetBytes(cleaned);
+        var ret = utf8.GetString(bytes);
+        // final sanity check - this should throw if there's still anything C# doesn't like.
+        new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true).GetByteCount(ret);
+        return ret;
+    }
+
+    private async Task<MailDbContext?> CreateDbContextAsync()
+    {
+        try
+        {
+            _pgSettings ??= PostgresSettingsStore.Load();
+
+            if (_pgSettings == null)
+            {
+                return null;
+            }
+
+            if (string.IsNullOrWhiteSpace(_pgPassword))
+            {
+                var passwordResponse = await CredentialManager.RequestPostgresPasswordAsync(_pgSettings);
+                if (passwordResponse.Result != CredentialAccessResult.Success ||
+                    string.IsNullOrWhiteSpace(passwordResponse.Password))
+                {
+                    return null;
+                }
+
+                _pgPassword = passwordResponse.Password;
+            }
+
+            return MailDbContextFactory.CreateDbContext(_pgSettings, _pgPassword);
         }
         catch
         {
-            _dbReady = false;
-            _db?.Dispose();
-            _db = null;
-            return false;
+            return null;
         }
     }
 
@@ -840,9 +985,8 @@ public sealed class ImapSyncService : IAsyncDisposable
         }
 
         _semaphore.Dispose();
-        _db?.Dispose();
-        _db = null;
-        _dbReady = false;
+        _pgPassword = null;
+        _pgSettings = null;
         if (_client != null)
         {
             try
