@@ -18,7 +18,7 @@ public sealed class PostgresSettings
         !string.IsNullOrWhiteSpace(Username);
 }
 
-internal static class PostgresSettingsStore
+public static class PostgresSettingsStore
 {
     private static readonly string SettingsPath =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),

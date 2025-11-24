@@ -26,7 +26,7 @@ public sealed class CredentialAccessResponse
     public string? Password { get; }
 }
 
-internal static class CredentialManager
+public static class CredentialManager
 {
     public static void SavePassword(AccountSettings account, string password)
     {
