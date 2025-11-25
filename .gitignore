@@ -6,3 +6,7 @@ maildot.Tests/bin/
 tools/TokenStats/obj/
 tools/TokenStats/bin/
 .vs/
+test-output.log
+test.err
+test.log
+test.out

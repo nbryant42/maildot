@@ -905,15 +905,7 @@ public sealed class ImapSyncService : IAsyncDisposable
             // skip lone surrogate
         }
 
-        var cleaned = sb.ToString();
-
-        // Final safety pass: ensure string can roundtrip through UTF-8 without throwing.
-        var utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: false);
-        var bytes = utf8.GetBytes(cleaned);
-        var ret = utf8.GetString(bytes);
-        // final sanity check - this should throw if there's still anything C# doesn't like.
-        new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true).GetByteCount(ret);
-        return ret;
+        return sb.ToString();
     }
 
     private async Task<MailDbContext?> CreateDbContextAsync()
