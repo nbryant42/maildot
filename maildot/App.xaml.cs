@@ -1,9 +1,10 @@
-using System;
 using maildot.Data;
 using maildot.Models;
 using maildot.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.UI.Xaml;
+using System;
+using System.Text;
 
 namespace maildot;
 
@@ -25,10 +26,11 @@ public partial class App : Application
 
     public App()
     {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
         InitializeComponent();
     }
 
-    protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
+    protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         _window = new MainWindow();
         ApplyPendingMigrations();

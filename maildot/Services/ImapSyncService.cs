@@ -13,10 +13,12 @@ using maildot.Models;
 using maildot.ViewModels;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.UI.Dispatching;
-using Npgsql;
 using MimeKit;
 using Windows.UI;
 using System.Diagnostics;
+using Npgsql;
+using System.Globalization;
+using Float16 = Microsoft.ML.OnnxRuntime.Float16;
 
 namespace maildot.Services;
 
@@ -37,6 +39,12 @@ public sealed class ImapSyncService : IAsyncDisposable
     private PostgresSettings? _pgSettings;
     private string? _pgPassword;
     private Task? _backgroundTask;
+    private Task? _embeddingTask;
+
+    private const int EmbeddingBatchSize = 256;
+    private static readonly TimeSpan EmbeddingIdleDelay = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan EmbeddingActiveDelay = TimeSpan.FromSeconds(5);
+    private const int EmbeddingDim = 1024;
 
     public ImapSyncService(MailboxViewModel viewModel, DispatcherQueue dispatcher)
     {
@@ -286,6 +294,7 @@ public sealed class ImapSyncService : IAsyncDisposable
             });
 
             _backgroundTask ??= Task.Run(() => BackgroundFetchLoopAsync(_cts.Token), _cts.Token);
+            _embeddingTask ??= Task.Run(() => BackgroundEmbeddingLoopAsync(_cts.Token), _cts.Token);
 
             return true;
         }
@@ -428,15 +437,15 @@ public sealed class ImapSyncService : IAsyncDisposable
                 }
 
                 var mailbox = summary.Envelope?.From?.OfType<MailboxAddress>().FirstOrDefault();
-                var senderName = CleanText(mailbox?.Name) ?? string.Empty;
-                var senderAddress = CleanText(mailbox?.Address) ?? string.Empty;
+                var senderName = TextCleaner.CleanNullable(mailbox?.Name) ?? string.Empty;
+                var senderAddress = TextCleaner.CleanNullable(mailbox?.Address) ?? string.Empty;
 
                 var messageId = summary.Envelope?.MessageId;
                 if (string.IsNullOrWhiteSpace(messageId))
                 {
                     messageId = $"uid:{uid}@{_settings.Server}";
                 }
-                messageId = CleanText(messageId) ?? string.Empty;
+                messageId = TextCleaner.CleanNullable(messageId) ?? string.Empty;
 
                 var received = summary.InternalDate?.ToUniversalTime() ?? DateTimeOffset.UtcNow;
 
@@ -445,7 +454,7 @@ public sealed class ImapSyncService : IAsyncDisposable
                     FolderId = folderEntity.Id,
                     ImapUid = uid,
                     MessageId = messageId,
-                    Subject = CleanText(summary.Envelope?.Subject) ?? string.Empty,
+                    Subject = TextCleaner.CleanNullable(summary.Envelope?.Subject) ?? string.Empty,
                     FromName = senderName,
                     FromAddress = senderAddress,
                     ReceivedUtc = received,
@@ -506,6 +515,147 @@ public sealed class ImapSyncService : IAsyncDisposable
                 await Task.Delay(TimeSpan.FromMinutes(1), token);
                 // next iteration of main loop will reconnect.
             }
+        }
+    }
+
+    private async Task BackgroundEmbeddingLoopAsync(CancellationToken token)
+    {
+        QwenEmbedder? embedder = null;
+
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                var db = await CreateDbContextAsync();
+                if (db == null)
+                {
+                    await Task.Delay(EmbeddingIdleDelay, token);
+                    continue;
+                }
+
+                List<MessageBody> bodies;
+                await using (db)
+                {
+                    bodies = await db.MessageBodies
+                        .AsNoTracking()
+                        .Include(b => b.Message)
+                        .Where(b => !db.MessageEmbeddings.Any(e => e.MessageId == b.MessageId))
+                        .OrderByDescending(b => b.Message.ReceivedUtc)
+                        .Take(EmbeddingBatchSize)
+                        .ToListAsync(token);
+                }
+
+                var texts = bodies
+                    .Select(b => (b.MessageId, Text: EmbeddingTextBuilder.BuildCombinedText(b.Message, b)))
+                    .Where(t => !string.IsNullOrWhiteSpace(t.Text))
+                    .ToList();
+
+                if (texts.Count == 0)
+                {
+                    await Task.Delay(EmbeddingIdleDelay, token);
+                    continue;
+                }
+
+                embedder ??= await QwenEmbedder.Build(QwenEmbedder.ModelId);
+                var embeddings = embedder.EmbedBatch(texts.Select(t => t.Text));
+
+                if (embeddings.Length == 0)
+                {
+                    await Task.Delay(EmbeddingIdleDelay, token);
+                    continue;
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                var records = new List<EmbeddingInsert>(embeddings.Length);
+                for (int i = 0; i < embeddings.Length && i < texts.Count; i++)
+                {
+                    var row = embeddings[i];
+                    var vector = NormalizeVector(row);
+
+                    records.Add(new EmbeddingInsert(
+                        MessageId: texts[i].MessageId,
+                        ChunkIndex: 0,
+                        Vector: vector,
+                        ModelVersion: QwenEmbedder.ModelId,
+                        CreatedAt: now));
+                }
+
+                await InsertEmbeddingsAsync(records, token);
+
+                await Task.Delay(EmbeddingActiveDelay, token);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Embedding loop error: {ex}");
+        }
+        finally
+        {
+            embedder?.Dispose();
+        }
+    }
+
+    private record EmbeddingInsert(int MessageId, int ChunkIndex, float[] Vector, string ModelVersion, DateTimeOffset CreatedAt);
+
+    private static float[] NormalizeVector(Float16[] source)
+    {
+        var dim = EmbeddingDim;
+        if (source.Length != dim)
+        {
+            throw new InvalidOperationException($"Embedding dimension mismatch: expected {dim}, got {source.Length}.");
+        }
+
+        var result = new float[dim];
+        for (int i = 0; i < dim; i++) result[i] = (float)source[i];
+        return result;
+    }
+
+    private async Task InsertEmbeddingsAsync(List<EmbeddingInsert> records, CancellationToken token)
+    {
+        if (records.Count == 0)
+        {
+            return;
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return;
+        }
+
+        await using (db)
+        {
+            var conn = (NpgsqlConnection)db.Database.GetDbConnection();
+            if (conn.State != System.Data.ConnectionState.Open)
+            {
+                await conn.OpenAsync(token);
+            }
+
+            await using var tx = await conn.BeginTransactionAsync(token);
+            foreach (var rec in records)
+            {
+                var vectorLiteral = "[" +
+                    string.Join(",", rec.Vector.Select(v => v.ToString("G9", CultureInfo.InvariantCulture))) + "]";
+
+                await using var cmd = new NpgsqlCommand(
+                    "INSERT INTO message_embeddings " +
+                    "(\"MessageId\", \"ChunkIndex\", \"Vector\", \"ModelVersion\", \"CreatedAt\") " +
+                    "VALUES (@mid, @chunk, @vec::halfvec, @ver, @created) ON CONFLICT DO NOTHING",
+                    conn, tx);
+
+                cmd.Parameters.AddWithValue("mid", rec.MessageId);
+                cmd.Parameters.AddWithValue("chunk", rec.ChunkIndex);
+                cmd.Parameters.AddWithValue("ver", rec.ModelVersion ?? string.Empty);
+                cmd.Parameters.AddWithValue("created", rec.CreatedAt);
+                cmd.Parameters.AddWithValue("vec", vectorLiteral);
+
+                await cmd.ExecuteNonQueryAsync(token);
+            }
+
+            await tx.CommitAsync(token);
         }
     }
 
@@ -704,11 +854,11 @@ public sealed class ImapSyncService : IAsyncDisposable
                 .GroupBy(h => h.Field)
                 .ToDictionary(
                     g => g.Key,
-                    g => g.Select(x => CleanText(x.Value) ?? string.Empty).ToArray());
+                    g => g.Select(x => TextCleaner.CleanNullable(x.Value) ?? string.Empty).ToArray());
 
-            var plain = CleanText(message.TextBody);
-            var html = CleanText(message.HtmlBody);
-            var sanitized = string.IsNullOrWhiteSpace(html) ? null : CleanText(HtmlSanitizer.Sanitize(html).Html);
+            var plain = TextCleaner.CleanNullable(message.TextBody);
+            var html = TextCleaner.CleanNullable(message.HtmlBody);
+            var sanitized = string.IsNullOrWhiteSpace(html) ? null : TextCleaner.CleanNullable(HtmlSanitizer.Sanitize(html).Html);
             var previewSource = string.IsNullOrWhiteSpace(plain) ? message.Subject ?? string.Empty : plain;
             var preview = BuildPreview(previewSource);
 
@@ -743,13 +893,13 @@ public sealed class ImapSyncService : IAsyncDisposable
             return null;
         }
 
-        var fullName = CleanText(folder.FullName);
+        var fullName = TextCleaner.CleanNullable(folder.FullName);
         if (string.IsNullOrWhiteSpace(fullName))
         {
             return null;
         }
 
-        var displayName = CleanText(folder.Name) ?? fullName;
+        var displayName = TextCleaner.CleanNullable(folder.Name) ?? fullName;
         var folderEntity = await db.ImapFolders
             .AsNoTracking()
             .Where(f => f.AccountId == _settings.Id && f.FullName == fullName)
@@ -790,19 +940,19 @@ public sealed class ImapSyncService : IAsyncDisposable
     private ImapMessage CreateImapMessage(int folderId, MimeMessage message, long uid)
     {
         var sender = message.From.OfType<MailboxAddress>().FirstOrDefault();
-        var senderName = CleanText(sender?.Name) ?? string.Empty;
-        var senderAddress = CleanText(sender?.Address) ?? string.Empty;
+        var senderName = TextCleaner.CleanNullable(sender?.Name) ?? string.Empty;
+        var senderAddress = TextCleaner.CleanNullable(sender?.Address) ?? string.Empty;
         var rawMessageId = string.IsNullOrWhiteSpace(message.MessageId)
             ? $"uid:{uid}@{_settings?.Server}"
             : message.MessageId;
-        var messageId = CleanText(rawMessageId) ?? string.Empty;
+        var messageId = TextCleaner.CleanNullable(rawMessageId) ?? string.Empty;
 
         return new ImapMessage
         {
             FolderId = folderId,
             ImapUid = uid,
             MessageId = messageId,
-            Subject = CleanText(message.Subject) ?? string.Empty,
+            Subject = TextCleaner.CleanNullable(message.Subject) ?? string.Empty,
             FromName = senderName,
             FromAddress = senderAddress,
             ReceivedUtc = message.Date.ToUniversalTime(),
@@ -813,9 +963,9 @@ public sealed class ImapSyncService : IAsyncDisposable
     private static void UpdateImapMessage(ImapMessage entity, MimeMessage message)
     {
         var sender = message.From.OfType<MailboxAddress>().FirstOrDefault();
-        entity.Subject = CleanText(message.Subject) ?? string.Empty;
-        entity.FromName = CleanText(sender?.Name) ?? string.Empty;
-        entity.FromAddress = CleanText(sender?.Address) ?? string.Empty;
+        entity.Subject = TextCleaner.CleanNullable(message.Subject) ?? string.Empty;
+        entity.FromName = TextCleaner.CleanNullable(sender?.Name) ?? string.Empty;
+        entity.FromAddress = TextCleaner.CleanNullable(sender?.Address) ?? string.Empty;
         entity.ReceivedUtc = message.Date.ToUniversalTime();
     }
 
@@ -865,47 +1015,8 @@ public sealed class ImapSyncService : IAsyncDisposable
         {
             trimmed = trimmed[..240];
         }
-        trimmed = CleanText(trimmed);
+        trimmed = TextCleaner.CleanNullable(trimmed);
         return string.IsNullOrWhiteSpace(trimmed) ? string.Empty : trimmed;
-    }
-
-    private static string? CleanText(string? value)
-    {
-        if (string.IsNullOrEmpty(value))
-        {
-            return value;
-        }
-
-        var withoutNulls = value.Replace("\0", string.Empty);
-        return StripInvalidSurrogates(withoutNulls);
-    }
-
-    private static string StripInvalidSurrogates(string value)
-    {
-        var span = value.AsSpan();
-        var sb = new StringBuilder(span.Length);
-
-        for (var i = 0; i < span.Length; i++)
-        {
-            var ch = span[i];
-            if (!char.IsSurrogate(ch))
-            {
-                sb.Append(ch);
-                continue;
-            }
-
-            if (char.IsHighSurrogate(ch) && i + 1 < span.Length && char.IsLowSurrogate(span[i + 1]))
-            {
-                sb.Append(ch);
-                sb.Append(span[i + 1]);
-                i++;
-                continue;
-            }
-
-            // skip lone surrogate
-        }
-
-        return sb.ToString();
     }
 
     private async Task<MailDbContext?> CreateDbContextAsync()
@@ -973,6 +1084,11 @@ public sealed class ImapSyncService : IAsyncDisposable
         if (_backgroundTask != null)
         {
             try { await _backgroundTask.ConfigureAwait(false); }
+            catch { }
+        }
+        if (_embeddingTask != null)
+        {
+            try { await _embeddingTask.ConfigureAwait(false); }
             catch { }
         }
 

@@ -53,10 +53,12 @@
 		<Compile Include="..\maildot\Models\Entities.cs" Link="Entities.cs" />
 		<Compile Include="..\maildot\Models\PostgresSettings.cs" Link="PostgresSettings.cs" />
 		<Compile Include="..\maildot\Services\CredentialManager.cs" Link="CredentialManager.cs" />
-		<Compile Include="..\maildot\Services\SenderInitialsHelper.cs" Link="SenderInitialsHelper.cs" />
-		<Compile Include="..\maildot\Services\SenderColorHelper.cs" Link="SenderColorHelper.cs" />
-		<Compile Include="..\maildot\Services\HtmlSanitizer.cs" Link="HtmlSanitizer.cs" />
-		<Compile Include="..\maildot\Services\Clustering.cs" Link="Clustering.cs" />
-		<Compile Include="..\maildot\Services\Embedder.cs" Link="Embedder.cs" />
-	</ItemGroup>
+    <Compile Include="..\maildot\Services\SenderInitialsHelper.cs" Link="SenderInitialsHelper.cs" />
+    <Compile Include="..\maildot\Services\SenderColorHelper.cs" Link="SenderColorHelper.cs" />
+    <Compile Include="..\maildot\Services\HtmlSanitizer.cs" Link="HtmlSanitizer.cs" />
+    <Compile Include="..\maildot\Services\Clustering.cs" Link="Clustering.cs" />
+    <Compile Include="..\maildot\Services\QwenEmbedder.cs" Link="QwenEmbedder.cs" />
+    <Compile Include="..\maildot\Services\EmbeddingTextBuilder.cs" Link="EmbeddingTextBuilder.cs" />
+    <Compile Include="..\maildot\Services\TextCleaner.cs" Link="TextCleaner.cs" />
+  </ItemGroup>
 </Project>

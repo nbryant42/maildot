@@ -76,7 +76,7 @@ public sealed class MailDbContext : DbContext
         {
             entity.ToTable("message_embeddings");
             entity.HasKey(e => new { e.MessageId, e.ChunkIndex });
-            entity.Property(e => e.Vector).HasColumnType("vector(1024)");
+            entity.Property(e => e.Vector).HasColumnType("halfvec(1024)");
             entity.HasOne(e => e.Message)
                   .WithMany(m => m.Embeddings)
                   .HasForeignKey(e => e.MessageId)

@@ -10,7 +10,15 @@ using Tokenizers.DotNet;
 
 namespace maildot.Services;
 
-public partial class Embedder : IDisposable
+/// <summary>
+/// Embedder for the Qwen family of models using ONNX Runtime.
+/// 
+/// Unlike HuggingFace's transformers library, this embedder uses ONNX Runtime directly, so it's fairly
+/// low-level code which needs to handle tokenization, batching, padding, and pooling manually.
+/// Therefore, this class is at least somewhat specific to the Qwen embedding model architecture (assumes
+/// left-padding, output in last_hidden_state, last-token pooling, hardcodes the <|endoftext|> padding token).
+/// </summary>
+public partial class QwenEmbedder : IDisposable
 {
     private readonly InferenceSession _sess;
     private readonly Tokenizer _tok;
@@ -18,13 +26,13 @@ public partial class Embedder : IDisposable
     private readonly long _padId;
     private const int MaxTokensPerBatch = 16 * 1024; // upper bound on batch_size * seq_len to avoid OOM
 
-    const string hubName = "onnx-community/Qwen3-Embedding-0.6B-ONNX";
+    public const string ModelId = "onnx-community/Qwen3-Embedding-0.6B-ONNX";
     const string tokFile = "tokenizer.json";
 
-    private static readonly string settingsDir =
+    private static readonly string hfCacheDir =
     Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "maildot", "hf");
 
-    public static async Task<Embedder> BuildEmbedder(string modelDir, int maxLen = 2 * 1024)
+    public static async Task<QwenEmbedder> Build(string modelDir, int maxLen = 1024)
     {
         //// Create a new instance of EnvironmentCreationOptions
         //EnvironmentCreationOptions envOptions = new()
@@ -41,8 +49,8 @@ public partial class Embedder : IDisposable
         //Console.WriteLine("Ensuring and registering execution providers...");
         //await catalog.EnsureAndRegisterCertifiedAsync();
 
-        var tok = new Tokenizer(vocabPath: await HuggingFace.GetFileFromHub(hubName, tokFile, settingsDir));
-        var onnxDir = Path.Combine(settingsDir, hubName, "onnx");
+        var tok = new Tokenizer(vocabPath: await HuggingFace.GetFileFromHub(ModelId, tokFile, hfCacheDir));
+        var onnxDir = Path.Combine(hfCacheDir, ModelId, "onnx");
         Directory.CreateDirectory(onnxDir);
         var so = new SessionOptions
         {
@@ -53,15 +61,15 @@ public partial class Embedder : IDisposable
         //so.AppendExecutionProvider_CUDA();
         so.AppendExecutionProvider_DML();
         so.SetEpSelectionPolicy(ExecutionProviderDevicePolicy.MIN_OVERALL_POWER);
-        await HuggingFace.GetFileFromHub(hubName, "onnx/model_fp16.onnx_data", settingsDir);
-        var path = await HuggingFace.GetFileFromHub(hubName, "onnx/model_fp16.onnx", settingsDir);
+        await HuggingFace.GetFileFromHub(ModelId, "onnx/model_fp16.onnx_data", hfCacheDir);
+        var path = await HuggingFace.GetFileFromHub(ModelId, "onnx/model_fp16.onnx", hfCacheDir);
         var sess = new InferenceSession(path, so);
 
         // TODO <|endoftext|> seems to encode to two tokens, this may be incorrect.
         return new(sess, tok, maxLen, tok.Encode("<|endoftext|>").FirstOrDefault());
     }
 
-    private Embedder(InferenceSession sess, Tokenizer tok, int maxLen, long padId)
+    private QwenEmbedder(InferenceSession sess, Tokenizer tok, int maxLen, long padId)
     {
         _sess = sess;
         _tok = tok;
@@ -72,13 +80,18 @@ public partial class Embedder : IDisposable
     public Float16[][] EmbedBatch(IEnumerable<string> texts)
     {
         var list = texts.ToList();
-        if (list.Count == 0) return Array.Empty<Float16[]>();
+        if (list.Count == 0) return [];
 
         // Encode, keep original indices, and sort by length descending for dense packing.
         var encoded = list
             .Select((t, idx) => new { idx, tokens = _tok.Encode(t).Select(x => (long)x).ToArray() })
             .OrderByDescending(x => x.tokens.Length)
             .ToList();
+
+        if (!_sess.OutputMetadata.ContainsKey("last_hidden_state"))
+        {
+            throw new InvalidOperationException("Model output 'last_hidden_state' is missing.");
+        }
 
         var outputs = new Float16[list.Count][];
 
@@ -103,10 +116,12 @@ public partial class Embedder : IDisposable
             {
                 var encodedIds = encoded[pos + i].tokens.Take(seqLen).ToArray();
 
-                var ids = Pad(encodedIds, seqLen, _padId);
+                // Left-pad so the final token sits at the right edge; last-token pooling will use that.
+                var ids = PadLeft(encodedIds, seqLen, _padId);
                 var ms = new long[seqLen];
                 var used = Math.Min(encodedIds.Length, seqLen);
-                for (var j = 0; j < used; j++) ms[j] = 1;
+                int offset = seqLen - used;
+                for (var j = 0; j < used; j++) ms[offset + j] = 1;
 
                 Array.Copy(ids, 0, idsBatch, i * seqLen, seqLen);
                 Array.Copy(ms, 0, maskBatch, i * seqLen, seqLen);
@@ -153,70 +168,14 @@ public partial class Embedder : IDisposable
                 }
             }
 
-            using var results = _sess.Run(inputs);
+            using var results = _sess.Run(inputs, ["last_hidden_state"]);
 
             Debug.WriteLine($"Processed batch: {batchCount}x{seqLen}");
 
-            var outName = results.Select(r => r.Name).FirstOrDefault(n => n.Contains("sentence_embedding"))
-                      ?? results[results.Count - 1].Name;
+            var last = results.FirstOrDefault(r => r.Name == "last_hidden_state")
+                ?? throw new InvalidOperationException("Model output 'last_hidden_state' not found in results.");
 
-            var result = results.First(r => r.Name == outName);
-
-            // Expect shape [N, D] across float or float16 outputs.
-            Float16[][] arr;
-            switch (result.Value)
-            {
-                case float[,] mat:
-                    {
-                        int n = mat.GetLength(0), d = mat.GetLength(1);
-                        arr = new Float16[n][];
-                        for (int i = 0; i < n; i++)
-                        {
-                            var v = new float[d];
-                            for (int j = 0; j < d; j++) v[j] = mat[i, j];
-                            L2NormalizeInPlace(v);
-                            var row = new Float16[d];
-                            for (int j = 0; j < d; j++) row[j] = (Float16)v[j];
-                            arr[i] = row;
-                        }
-                        break;
-                    }
-                case DenseTensor<float> tf:
-                    {
-                        int n = tf.Dimensions[0], d = tf.Dimensions[1];
-                        arr = new Float16[n][];
-                        var span = tf.Buffer.Span;
-                        for (int i = 0; i < n; i++)
-                        {
-                            var v = new float[d];
-                            for (int j = 0; j < d; j++) v[j] = span[i * d + j];
-                            L2NormalizeInPlace(v);
-                            var row = new Float16[d];
-                            for (int j = 0; j < d; j++) row[j] = (Float16)v[j];
-                            arr[i] = row;
-                        }
-                        break;
-                    }
-                case DenseTensor<Float16> tf16:
-                    {
-                        int n = tf16.Dimensions[0], d = tf16.Dimensions[1];
-                        arr = new Float16[n][];
-                        var span = tf16.Buffer.Span;
-                        for (int i = 0; i < n; i++)
-                        {
-                            var v = new float[d];
-                            for (int j = 0; j < d; j++) v[j] = (float)span[i * d + j];
-                            L2NormalizeInPlace(v);
-                            var row = new Float16[d];
-                            for (int j = 0; j < d; j++) row[j] = (Float16)v[j];
-                            arr[i] = row;
-                        }
-                        break;
-                    }
-                default:
-                    throw new InvalidOperationException(
-                        $"Unexpected embedding output type: {result.Value?.GetType().FullName}");
-            }
+            var arr = PoolLastToken(last.Value, maskBatch, seqLen);
 
             for (int i = 0; i < arr.Length; i++)
             {
@@ -230,16 +189,63 @@ public partial class Embedder : IDisposable
         return outputs;
     }
 
-    static long[] Pad(long[] a, int len, long pad)
+    static long[] PadLeft(long[] a, int len, long pad)
     {
-        if (a.Length >= len) return [.. a.Take(len)];
-        var b = new long[len]; Array.Fill(b, pad); Array.Copy(a, b, a.Length); return b;
+        if (a.Length >= len) return [.. a.TakeLast(len)];
+        var b = new long[len]; Array.Fill(b, pad);
+        Array.Copy(a, 0, b, len - a.Length, a.Length);
+        return b;
     }
     static void L2NormalizeInPlace(float[] v)
     {
         double s = 0; foreach (var x in v) s += x * x;
         float inv = (float)(1.0 / Math.Sqrt(s + 1e-12));
         for (int i = 0; i < v.Length; i++) v[i] *= inv;
+    }
+
+    static Float16[][] PoolLastToken(object lastHidden, long[] mask, int seqLen)
+    {
+        return lastHidden switch
+        {
+            DenseTensor<float> tf => PoolFloat(tf, mask, seqLen),
+            DenseTensor<Float16> tf16 => PoolFloat(ToFloatTensor(tf16), mask, seqLen),
+            _ => throw new InvalidOperationException(
+                $"Unexpected last_hidden_state type: {lastHidden?.GetType().FullName}")
+        };
+    }
+
+    static DenseTensor<float> ToFloatTensor(DenseTensor<Float16> src)
+    {
+        var dst = new DenseTensor<float>(new float[src.Buffer.Length], src.Dimensions);
+        var srcSpan = src.Buffer.Span;
+        var dstSpan = dst.Buffer.Span;
+        for (int i = 0; i < dstSpan.Length; i++) dstSpan[i] = (float)srcSpan[i];
+        return dst;
+    }
+
+    static Float16[][] PoolFloat(DenseTensor<float> tf, long[] mask, int seqLen)
+    {
+        int n = tf.Dimensions[0], t = tf.Dimensions[1], d = tf.Dimensions[2];
+        var span = tf.Buffer.Span;
+        var outArr = new Float16[n][];
+        for (int b = 0; b < n; b++)
+        {
+            int lastIdx = -1;
+            for (int j = 0; j < seqLen; j++)
+            {
+                if (mask[b * seqLen + j] != 0) lastIdx = j;
+            }
+            if (lastIdx < 0) lastIdx = 0;
+
+            var v = new float[d];
+            int baseIdx = (b * t + lastIdx) * d;
+            for (int k = 0; k < d; k++) v[k] = span[baseIdx + k];
+            L2NormalizeInPlace(v);
+            var row = new Float16[d];
+            for (int k = 0; k < d; k++) row[k] = (Float16)v[k];
+            outArr[b] = row;
+        }
+        return outArr;
     }
 
     public void Dispose() => _sess?.Dispose();

@@ -30,13 +30,13 @@ public class ClusteringTests
         ];
 
         // 2) Embed
-        using var emb = await Embedder.BuildEmbedder("Qwen3-Embedding-0.6B-ONNX");
+        using var emb = await QwenEmbedder.Build("Qwen3-Embedding-0.6B-ONNX");
         var X16 = emb.EmbedBatch(emails); // Float16[N][D], L2-normalized
         var X = X16.Select(row => row.Select(v => (float)v).ToArray()).ToArray();
 
         // 3) Choose K by silhouette
         int bestK = 0; double bestSil = double.NegativeInfinity;
-        int kMin = 3, kMax = Math.Min(10, Math.Max(3, emails.Length / 3));
+        int kMin = 2, kMax = Math.Min(10, Math.Max(3, emails.Length / 2));
         for (int k = kMin; k <= kMax; k++)
         {
             var (lbl, _) = Clustering.KMeans(X, k, iters: 50);
@@ -100,10 +100,7 @@ public class ClusteringTests
             string body = m.Body?.PlainText ?? m.Body?.HtmlText ?? m.Body?.Preview ?? string.Empty;
             body = body.Replace('\r', ' ').Replace('\n', ' ');
             var subject = string.IsNullOrWhiteSpace(m.Subject) ? "(no subject)" : m.Subject;
-            var combined = $"{subject} {body}".Trim();
-            //const int maxChars = 4000;
-            //return combined.Length > maxChars ? combined[..maxChars] : combined;
-            return combined;
+            return $"{subject} {body}".Trim();
         }).ToList();
 
         if (texts.Count < 3)
@@ -112,19 +109,18 @@ public class ClusteringTests
             return;
         }
 
-        using var emb = await Embedder.BuildEmbedder("Qwen3-Embedding-0.6B-ONNX");
+        using var emb = await QwenEmbedder.Build("Qwen3-Embedding-0.6B-ONNX");
         var emb16 = emb.EmbedBatch(texts);
         var X = emb16.Select(row => row.Select(v => (float)v).ToArray()).ToArray();
 
-        // forcing kMax=2 for now, but leaving the code flexible. This block could be simplified out if kMax=2.
-        int kMin = 2, kMax = Math.Min(2, Math.Max(kMin, texts.Count / 3));
+        int kMin = 2, kMax = Math.Min(10, Math.Max(kMin, texts.Count / 2));
         int bestK = kMin; double bestSil = double.NegativeInfinity;
-        for (int k = kMin; k <= kMax; k++)
-        {
-            var (lbl, _) = Clustering.KMeans(X, k, iters: 50);
-            double s = Clustering.Silhouette(X, lbl);
-            if (s > bestSil) { bestSil = s; bestK = k; }
-        }
+        //for (int k = kMin; k <= kMax; k++)
+        //{
+        //    var (lbl, _) = Clustering.KMeans(X, k, iters: 50);
+        //    double s = Clustering.Silhouette(X, lbl);
+        //    if (s > bestSil) { bestSil = s; bestK = k; }
+        //}
 
         var (labels, centroids) = Clustering.KMeans(X, bestK, iters: 100);
         Debug.WriteLine($"[INBOX] Best K: {bestK}   silhouette: {bestSil:F3}");
