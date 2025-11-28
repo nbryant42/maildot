@@ -7,10 +7,13 @@ using maildot.Models;
 using maildot.Services;
 using maildot.Views;
 using maildot.ViewModels;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using MimeKit;
+using System.IO;
 using Windows.System;
+using WinRT.Interop;
 
 namespace maildot;
 
@@ -28,6 +31,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        SetWindowIcon();
         Activated += OnWindowActivated;
     }
 
@@ -147,6 +151,26 @@ public sealed partial class MainWindow : Window
         _ = _dashboardView!.ClearMessageContentAsync();
         _mailboxViewModel!.SetAccountSummary($"{settings.AccountName} ({settings.Username})");
         _ = StartImapSyncAsync(settings, password);
+    }
+
+    private void SetWindowIcon()
+    {
+        try
+        {
+            var hWnd = WindowNative.GetWindowHandle(this);
+            var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hWnd);
+            var appWindow = AppWindow.GetFromWindowId(windowId);
+            var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
+
+            if (File.Exists(iconPath))
+            {
+                appWindow.SetIcon(iconPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Failed to set window icon: {ex}");
+        }
     }
 
     private async Task<bool> EnsurePostgresReadyAsync(bool forceShowSettings = false)
