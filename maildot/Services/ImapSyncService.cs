@@ -40,6 +40,7 @@ public sealed class ImapSyncService : IAsyncDisposable
     private string? _pgPassword;
     private Task? _backgroundTask;
     private Task? _embeddingTask;
+    private QwenEmbedder? _searchEmbedder;
 
     private const int EmbeddingBatchSize = 256;
     private static readonly TimeSpan EmbeddingIdleDelay = TimeSpan.FromMinutes(1);
@@ -266,6 +267,353 @@ public sealed class ImapSyncService : IAsyncDisposable
         }
     }
 
+    public Task SearchAsync(string query, SearchMode mode) =>
+        SearchInternalAsync(query, mode);
+
+    private async Task SearchInternalAsync(string query, SearchMode mode)
+    {
+        var trimmed = TextCleaner.CleanNullable(query) ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(trimmed))
+        {
+            return;
+        }
+
+        if (_settings == null)
+        {
+            await ReportStatusAsync("Connect an account to search mail.", false);
+            return;
+        }
+
+        await ReportStatusAsync($"Searching \"{trimmed}\"...", true);
+
+        try
+        {
+            var db = await CreateDbContextAsync();
+            if (db == null)
+            {
+                await ReportStatusAsync("PostgreSQL is required for search. Check settings.", false);
+                return;
+            }
+
+            var effectiveMode = ResolveSearchMode(trimmed, mode);
+            List<SearchResult> senderResults = [];
+            List<SearchResult> vectorResults = [];
+
+            await using (db)
+            {
+                if (ShouldSearchSender(effectiveMode))
+                {
+                    senderResults = await SearchBySenderAsync(db, trimmed, _cts.Token);
+                }
+
+                if (ShouldSearchVector(effectiveMode))
+                {
+                    vectorResults = await SearchByEmbeddingAsync(db, trimmed, _cts.Token);
+                }
+            }
+
+            var merged = MergeResults(senderResults, vectorResults);
+            var status = merged.Count == 0
+                ? "No matches found."
+                : $"Showing {merged.Count} result{(merged.Count == 1 ? string.Empty : "s")}.";
+
+            await EnqueueAsync(() =>
+            {
+                _viewModel.SetMessages($"Search: {trimmed}", merged);
+                _viewModel.SetStatus(status, false);
+                _viewModel.SetLoadMoreAvailability(false);
+                _viewModel.SetRetryVisible(false);
+            });
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            await ReportStatusAsync($"Search failed: {ex.Message}", false);
+        }
+    }
+
+    private static SearchMode ResolveSearchMode(string query, SearchMode mode)
+    {
+        if (mode != SearchMode.Auto)
+        {
+            return mode;
+        }
+
+        var hasAt = query.Contains("@", StringComparison.Ordinal);
+        if (hasAt)
+        {
+            return SearchMode.Sender;
+        }
+
+        return SearchMode.Both;
+    }
+
+    private static bool ShouldSearchSender(SearchMode mode) =>
+        mode == SearchMode.Sender || mode == SearchMode.Both || mode == SearchMode.Auto;
+
+    private static bool ShouldSearchVector(SearchMode mode) =>
+        mode == SearchMode.Content || mode == SearchMode.Both || mode == SearchMode.Auto;
+
+    private async Task<List<SearchResult>> SearchBySenderAsync(MailDbContext db, string query, CancellationToken token)
+    {
+        var conn = (NpgsqlConnection)db.Database.GetDbConnection();
+        if (conn.State != System.Data.ConnectionState.Open)
+        {
+            await conn.OpenAsync(token);
+        }
+
+        var terms = ExtractSenderTerms(query);
+
+        var addressPattern = string.IsNullOrWhiteSpace(terms.Address) ? null : $"%{terms.Address}%";
+        var namePattern = string.IsNullOrWhiteSpace(terms.Name) ? null : $"%{terms.Name}%";
+
+        if (addressPattern == null && namePattern == null)
+        {
+            return [];
+        }
+
+        var sql = new StringBuilder();
+        sql.Append("SELECT m.\"Id\", m.\"ImapUid\", m.\"Subject\", m.\"FromName\", m.\"FromAddress\", m.\"ReceivedUtc\", ");
+        sql.Append("COALESCE(b.\"Preview\", ''), f.\"FullName\" ");
+        sql.Append("FROM imap_messages m ");
+        sql.Append("JOIN imap_folders f ON f.id = m.\"FolderId\" ");
+        sql.Append("LEFT JOIN message_bodies b ON b.\"MessageId\" = m.\"Id\" ");
+        sql.Append("WHERE f.\"AccountId\" = @accountId ");
+
+        var clauses = new List<string>();
+        if (addressPattern != null)
+        {
+            clauses.Add("m.\"FromAddress\" ILIKE @addressPattern");
+        }
+        if (namePattern != null)
+        {
+            clauses.Add("m.\"FromName\" ILIKE @namePattern");
+        }
+
+        if (clauses.Count > 0)
+        {
+            sql.Append("AND (");
+            sql.Append(string.Join(" OR ", clauses));
+            sql.Append(") ");
+        }
+
+        sql.Append("ORDER BY m.\"ReceivedUtc\" DESC LIMIT 50");
+
+        await using var cmd = new NpgsqlCommand(sql.ToString(), conn);
+        cmd.Parameters.AddWithValue("accountId", _settings!.Id);
+        if (addressPattern != null)
+        {
+            cmd.Parameters.AddWithValue("addressPattern", addressPattern);
+        }
+        if (namePattern != null)
+        {
+            cmd.Parameters.AddWithValue("namePattern", namePattern);
+        }
+
+        var results = new List<SearchResult>();
+        await using var reader = await cmd.ExecuteReaderAsync(token);
+        while (await reader.ReadAsync(token))
+        {
+            var subject = TextCleaner.CleanNullable(reader.GetString(2)) ?? string.Empty;
+            var fromName = TextCleaner.CleanNullable(reader.GetString(3)) ?? string.Empty;
+            var fromAddress = TextCleaner.CleanNullable(reader.GetString(4)) ?? string.Empty;
+            var preview = TextCleaner.CleanNullable(reader.IsDBNull(6) ? string.Empty : reader.GetString(6)) ?? string.Empty;
+            var folderFullName = TextCleaner.CleanNullable(reader.GetString(7)) ?? string.Empty;
+
+            results.Add(new SearchResult(
+                MessageId: reader.GetInt32(0),
+                ImapUid: reader.GetInt64(1),
+                Subject: subject,
+                FromName: fromName,
+                FromAddress: fromAddress,
+                ReceivedUtc: reader.GetFieldValue<DateTimeOffset>(5),
+                Preview: preview,
+                FolderFullName: folderFullName,
+                Score: 0,
+                Priority: 0));
+        }
+
+        return results;
+    }
+
+    private async Task<List<SearchResult>> SearchByEmbeddingAsync(MailDbContext db, string query, CancellationToken token)
+    {
+        var embedder = await EnsureSearchEmbedderAsync();
+        if (embedder == null)
+        {
+            await ReportStatusAsync("Embedding model is unavailable.", false);
+            return [];
+        }
+
+        var embedded = embedder.EmbedQuery(query);
+        if (embedded == null)
+        {
+            return [];
+        }
+
+        var vector = NormalizeVector(embedded);
+        var vectorLiteral = BuildVectorLiteral(vector);
+
+        var conn = (NpgsqlConnection)db.Database.GetDbConnection();
+        if (conn.State != System.Data.ConnectionState.Open)
+        {
+            await conn.OpenAsync(token);
+        }
+
+        await using var cmd = new NpgsqlCommand(
+            "SELECT ranked.\"MessageId\", ranked.\"ImapUid\", ranked.\"Subject\", ranked.\"FromName\", ranked.\"FromAddress\", " +
+            "ranked.\"ReceivedUtc\", ranked.\"Preview\", ranked.\"FullName\", ranked.distance " +
+            "FROM ( " +
+            "    SELECT DISTINCT ON (me.\"MessageId\") " +
+            "           me.\"MessageId\", " +
+            "           me.\"Vector\" <=> @queryVec::halfvec AS distance, " +
+            "           m.\"ImapUid\", m.\"Subject\", m.\"FromName\", m.\"FromAddress\", m.\"ReceivedUtc\", " +
+            "           COALESCE(b.\"Preview\", '') AS \"Preview\", f.\"FullName\" " +
+            "    FROM message_embeddings me " +
+            "    JOIN imap_messages m ON m.\"Id\" = me.\"MessageId\" " +
+            "    JOIN imap_folders f ON f.id = m.\"FolderId\" " +
+            "    LEFT JOIN message_bodies b ON b.\"MessageId\" = m.\"Id\" " +
+            "    WHERE f.\"AccountId\" = @accountId " +
+            "    ORDER BY me.\"MessageId\", distance " +
+            ") AS ranked " +
+            "ORDER BY ranked.distance " +
+            "LIMIT 50",
+            conn);
+
+        cmd.Parameters.AddWithValue("queryVec", vectorLiteral);
+        cmd.Parameters.AddWithValue("accountId", _settings!.Id);
+
+        var results = new List<SearchResult>();
+        await using var reader = await cmd.ExecuteReaderAsync(token);
+        while (await reader.ReadAsync(token))
+        {
+            var subject = TextCleaner.CleanNullable(reader.GetString(2)) ?? string.Empty;
+            var fromName = TextCleaner.CleanNullable(reader.GetString(3)) ?? string.Empty;
+            var fromAddress = TextCleaner.CleanNullable(reader.GetString(4)) ?? string.Empty;
+            var preview = TextCleaner.CleanNullable(reader.GetString(6)) ?? string.Empty;
+            var folderFullName = TextCleaner.CleanNullable(reader.GetString(7)) ?? string.Empty;
+            var distance = reader.IsDBNull(8) ? double.MaxValue : reader.GetDouble(8);
+
+            results.Add(new SearchResult(
+                MessageId: reader.GetInt32(0),
+                ImapUid: reader.GetInt64(1),
+                Subject: subject,
+                FromName: fromName,
+                FromAddress: fromAddress,
+                ReceivedUtc: reader.GetFieldValue<DateTimeOffset>(5),
+                Preview: preview,
+                FolderFullName: folderFullName,
+                Score: distance,
+                Priority: 1));
+        }
+
+        return results;
+    }
+
+    private List<EmailMessageViewModel> MergeResults(IEnumerable<SearchResult> senderResults, IEnumerable<SearchResult> vectorResults)
+    {
+        var combined = new Dictionary<int, SearchResult>();
+
+        void AddRange(IEnumerable<SearchResult> source)
+        {
+            foreach (var result in source)
+            {
+                if (combined.TryGetValue(result.MessageId, out var existing))
+                {
+                    if (result.Priority < existing.Priority ||
+                        (result.Priority == existing.Priority && result.Score < existing.Score))
+                    {
+                        combined[result.MessageId] = result;
+                    }
+
+                    continue;
+                }
+
+                combined[result.MessageId] = result;
+            }
+        }
+
+        AddRange(senderResults);
+        AddRange(vectorResults);
+
+        return combined.Values
+            .OrderBy(r => r.Priority)
+            .ThenBy(r => r.Score)
+            .ThenByDescending(r => r.ReceivedUtc)
+            .Take(50)
+            .Select(BuildEmailViewModel)
+            .ToList();
+    }
+
+    private EmailMessageViewModel BuildEmailViewModel(SearchResult result)
+    {
+        var color = SenderColorHelper.GetColor(result.FromName, result.FromAddress);
+        var senderColor = new Color
+        {
+            A = 255,
+            R = color.R,
+            G = color.G,
+            B = color.B
+        };
+
+        var senderDisplay = !string.IsNullOrWhiteSpace(result.FromName)
+            ? result.FromName
+            : result.FromAddress;
+
+        var preview = string.IsNullOrWhiteSpace(result.Preview) ? result.Subject : result.Preview;
+
+        return new EmailMessageViewModel
+        {
+            Id = result.ImapUid.ToString(),
+            FolderId = result.FolderFullName,
+            Subject = string.IsNullOrWhiteSpace(result.Subject) ? "(No subject)" : result.Subject,
+            Sender = string.IsNullOrWhiteSpace(senderDisplay) ? "(Unknown sender)" : senderDisplay,
+            SenderAddress = result.FromAddress ?? string.Empty,
+            SenderInitials = SenderInitialsHelper.From(result.FromName, result.FromAddress),
+            SenderColor = senderColor,
+            Preview = preview ?? string.Empty,
+            Received = result.ReceivedUtc.LocalDateTime
+        };
+    }
+
+    private async Task<QwenEmbedder?> EnsureSearchEmbedderAsync()
+    {
+        if (_searchEmbedder != null)
+        {
+            return _searchEmbedder;
+        }
+
+        try
+        {
+            _searchEmbedder = await QwenEmbedder.Build(QwenEmbedder.ModelId);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Failed to initialize search embedder: {ex}");
+            _searchEmbedder = null;
+        }
+
+        return _searchEmbedder;
+    }
+
+    private static (string Name, string Address) ExtractSenderTerms(string query)
+    {
+        var cleaned = TextCleaner.CleanNullable(query) ?? string.Empty;
+        if (MailboxAddress.TryParse(cleaned, out var mailbox))
+        {
+            var name = TextCleaner.CleanNullable(mailbox?.Name) ?? cleaned;
+            var address = TextCleaner.CleanNullable(mailbox?.Address) ?? cleaned;
+            return (name, address);
+        }
+
+        return (cleaned, cleaned);
+    }
+
+    private static string BuildVectorLiteral(float[] vector) =>
+        "[" + string.Join(",", vector.Select(v => v.ToString("G9", CultureInfo.InvariantCulture))) + "]";
+
     private async Task<bool> ConnectAsync(string statusMessage)
     {
         if (_settings == null || _password == null)
@@ -390,6 +738,7 @@ public sealed class ImapSyncService : IAsyncDisposable
                 return new EmailMessageViewModel
                 {
                     Id = summary.UniqueId.Id.ToString(),
+                    FolderId = folder.FullName,
                     Subject = summary.Envelope?.Subject ?? "(No subject)",
                     Sender = senderDisplay,
                     SenderAddress = senderAddress ?? string.Empty,
@@ -599,6 +948,17 @@ public sealed class ImapSyncService : IAsyncDisposable
     }
 
     private record EmbeddingInsert(int MessageId, int ChunkIndex, float[] Vector, string ModelVersion, DateTimeOffset CreatedAt);
+    private record SearchResult(
+        int MessageId,
+        long ImapUid,
+        string Subject,
+        string FromName,
+        string FromAddress,
+        DateTimeOffset ReceivedUtc,
+        string Preview,
+        string FolderFullName,
+        double Score,
+        int Priority);
 
     private static float[] NormalizeVector(Float16[] source)
     {
@@ -1091,6 +1451,8 @@ public sealed class ImapSyncService : IAsyncDisposable
             try { await _embeddingTask.ConfigureAwait(false); }
             catch { }
         }
+        _searchEmbedder?.Dispose();
+        _searchEmbedder = null;
 
         _semaphore.Dispose();
         _pgPassword = null;

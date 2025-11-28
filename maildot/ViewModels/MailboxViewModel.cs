@@ -232,6 +232,7 @@ public sealed class MailFolderViewModel : INotifyPropertyChanged
 public sealed class EmailMessageViewModel
 {
     public string Id { get; init; } = Guid.NewGuid().ToString();
+    public string FolderId { get; init; } = string.Empty;
     public string Subject { get; init; } = "(No subject)";
     public string Sender { get; init; } = "(Unknown sender)";
     public string SenderAddress { get; init; } = string.Empty;

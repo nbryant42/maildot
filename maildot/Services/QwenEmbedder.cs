@@ -25,6 +25,8 @@ public partial class QwenEmbedder : IDisposable
     private readonly int _maxLen;
     private readonly long _padId;
     private const int MaxTokensPerBatch = 16 * 1024; // upper bound on batch_size * seq_len to avoid OOM
+    private const string DefaultQueryInstruction = "Given a mailbox and a search query, find emails whose subject or " +
+        "body are most relevant to the topic of the query, even if they don't explicitly answer a question.";
 
     public const string ModelId = "onnx-community/Qwen3-Embedding-0.6B-ONNX";
     const string tokFile = "tokenizer.json";
@@ -188,6 +190,12 @@ public partial class QwenEmbedder : IDisposable
 
         return outputs;
     }
+
+    public Float16[]? EmbedQuery(string query) =>
+        EmbedBatch([BuildQueryPrompt(query)]).FirstOrDefault();
+
+    private static string BuildQueryPrompt(string query) =>
+        $"Instruct: {DefaultQueryInstruction}\nQuery:{query}";
 
     static long[] PadLeft(long[] a, int len, long pad)
     {

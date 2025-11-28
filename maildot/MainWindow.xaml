@@ -13,9 +13,78 @@
         <MicaBackdrop />
     </Window.SystemBackdrop>
 
-    <ContentControl x:Name="RootContent"
-                    HorizontalAlignment="Stretch"
-                    VerticalAlignment="Stretch"
-                    HorizontalContentAlignment="Stretch"
-                    VerticalContentAlignment="Stretch" />
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Border x:Name="TitleBarRoot"
+                Grid.Row="0"
+                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                MinHeight="52">
+            <Grid x:Name="TitleBarDragArea"
+                  ColumnSpacing="12"
+                  Padding="12,10,12,10"
+                  VerticalAlignment="Center">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="160" />
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Text="Mail.NET"
+                           VerticalAlignment="Center"
+                           FontWeight="SemiBold"
+                           Opacity="0.75" />
+
+                <Grid Grid.Column="1"
+                      ColumnSpacing="8"
+                      VerticalAlignment="Center">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="140" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <ComboBox x:Name="SearchModeCombo"
+                              Grid.Column="0"
+                              Width="140"
+                              SelectionChanged="OnSearchModeChanged">
+                        <ComboBoxItem Content="Auto" Tag="Auto" IsSelected="True" />
+                        <ComboBoxItem Content="Sender" Tag="Sender" />
+                        <ComboBoxItem Content="Content" Tag="Content" />
+                        <ComboBoxItem Content="Both" Tag="Both" />
+                    </ComboBox>
+
+                    <AutoSuggestBox x:Name="SearchBox"
+                                    Grid.Column="1"
+                                    PlaceholderText="Search mail"
+                                    QueryIcon="Find"
+                                    HorizontalAlignment="Stretch"
+                                    QuerySubmitted="OnSearchQuerySubmitted" />
+
+                    <Button x:Name="AdvancedSearchButton"
+                            Grid.Column="2"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            ToolTipService.ToolTip="Advanced search"
+                            Click="OnAdvancedSearchClicked">
+                        <StackPanel Orientation="Vertical" Spacing="2" VerticalAlignment="Center">
+                            <Rectangle Height="2" Width="10" Fill="{ThemeResource TextFillColorPrimaryBrush}" RadiusX="1" RadiusY="1" />
+                            <Rectangle Height="2" Width="8" Fill="{ThemeResource TextFillColorPrimaryBrush}" RadiusX="1" RadiusY="1" />
+                            <Rectangle Height="2" Width="6" Fill="{ThemeResource TextFillColorPrimaryBrush}" RadiusX="1" RadiusY="1" />
+                        </StackPanel>
+                    </Button>
+                </Grid>
+            </Grid>
+        </Border>
+
+        <ContentControl x:Name="RootContent"
+                        Grid.Row="1"
+                        HorizontalAlignment="Stretch"
+                        VerticalAlignment="Stretch"
+                        HorizontalContentAlignment="Stretch"
+                        VerticalContentAlignment="Stretch" />
+    </Grid>
 </Window>

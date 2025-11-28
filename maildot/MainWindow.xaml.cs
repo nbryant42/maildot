@@ -13,7 +13,9 @@ using Microsoft.UI.Xaml.Controls;
 using MimeKit;
 using System.IO;
 using Windows.System;
+using Windows.UI;
 using WinRT.Interop;
+using Microsoft.UI;
 
 namespace maildot;
 
@@ -27,11 +29,15 @@ public sealed partial class MainWindow : Window
     private AccountSettings? _activeAccount;
     private PostgresSettings _postgresSettings = PostgresSettingsStore.Load();
     private bool _startupInitialized;
+    private SearchMode _searchMode = SearchMode.Auto;
+    private AppWindow? _appWindow;
+    private const double TitleBarMinHeight = 52;
 
     public MainWindow()
     {
         InitializeComponent();
         SetWindowIcon();
+        InitializeTitleBar();
         Activated += OnWindowActivated;
     }
 
@@ -482,12 +488,21 @@ public sealed partial class MainWindow : Window
 
     private void OnMessageSelected(object? sender, EmailMessageViewModel e)
     {
-        if (_imapService == null || _mailboxViewModel?.SelectedFolder == null)
+        if (_imapService == null)
         {
             return;
         }
 
-        _ = LoadAndDisplayMessageAsync(_mailboxViewModel.SelectedFolder.Id, e.Id);
+        var folderId = string.IsNullOrWhiteSpace(e.FolderId)
+            ? _mailboxViewModel?.SelectedFolder?.Id
+            : e.FolderId;
+
+        if (string.IsNullOrWhiteSpace(folderId))
+        {
+            return;
+        }
+
+        _ = LoadAndDisplayMessageAsync(folderId, e.Id);
     }
 
     private async Task LoadAndDisplayMessageAsync(string folderId, string messageId)
@@ -576,6 +591,93 @@ public sealed partial class MainWindow : Window
         }
 
         return new Uri("mailto:");
+    }
+
+    private void InitializeTitleBar()
+    {
+        try
+        {
+            var hWnd = WindowNative.GetWindowHandle(this);
+            var windowId = Win32Interop.GetWindowIdFromWindow(hWnd);
+            _appWindow = AppWindow.GetFromWindowId(windowId);
+
+            if (_appWindow?.TitleBar is { } appTitleBar)
+            {
+                appTitleBar.ExtendsContentIntoTitleBar = true;
+                appTitleBar.ButtonBackgroundColor = Colors.Transparent;
+                appTitleBar.ButtonInactiveBackgroundColor = Colors.Transparent;
+                appTitleBar.ButtonForegroundColor = null;
+                appTitleBar.ButtonInactiveForegroundColor = null;
+                UpdateTitleBarMetrics(appTitleBar);
+            }
+
+            SetTitleBar(TitleBarDragArea);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Failed to initialize custom title bar: {ex}");
+        }
+    }
+
+    private void UpdateTitleBarMetrics(AppWindowTitleBar titleBar)
+    {
+        TitleBarRoot.Height = Math.Max(titleBar.Height, TitleBarMinHeight);
+        TitleBarRoot.Padding = new Thickness(titleBar.LeftInset, 0, titleBar.RightInset, 0);
+    }
+
+    private async void OnSearchQuerySubmitted(AutoSuggestBox sender, AutoSuggestBoxQuerySubmittedEventArgs args)
+    {
+        var text = args.QueryText?.Trim() ?? string.Empty;
+        await ExecuteSearchAsync(text);
+    }
+
+    private void OnSearchModeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (SearchModeCombo.SelectedItem is ComboBoxItem item &&
+            item.Tag is string tag &&
+            Enum.TryParse<SearchMode>(tag, ignoreCase: true, out var mode))
+        {
+            _searchMode = mode;
+        }
+    }
+
+    private async void OnAdvancedSearchClicked(object sender, RoutedEventArgs e)
+    {
+        var xamlRoot = GetXamlRoot();
+        if (xamlRoot == null)
+        {
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            Title = "Advanced search",
+            Content = "Advanced filters are coming soon. Use the mode dropdown to switch between sender, content, or both.",
+            CloseButtonText = "Close",
+            XamlRoot = xamlRoot
+        };
+
+        await dialog.ShowAsync();
+    }
+
+    private async Task ExecuteSearchAsync(string query)
+    {
+        if (_imapService == null || _mailboxViewModel == null)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            if (_mailboxViewModel.SelectedFolder != null)
+            {
+                await _imapService.LoadFolderAsync(_mailboxViewModel.SelectedFolder.Id);
+            }
+
+            return;
+        }
+
+        await _imapService.SearchAsync(query, _searchMode);
     }
 
     private static string? ExtractAddress(EmailMessageViewModel message)
