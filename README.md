@@ -51,6 +51,17 @@ persistence engine from process crashes.
 6. On first run, the app will prompt for PostgreSQL connection details and store them in the Windows Credential
    Vault, and create the necessary tables if they do not already exist.
 7. On subsequent runs, the app will run any Entity Framework Core migrations as needed to update the database schema.
+8. The app will archive all IMAP emails in the database and compute vector embeddings for semantic search. Right now,
+   there is not any feedback on the embedding process, but this can be monitored via
+   [SQL queries](https://dbeaver.io/download/), such as:
+   ```sql
+   SELECT COUNT(*) FROM message_bodies;
+   ```
+   ```sql
+   SELECT COUNT(*) FROM message_embeddings;
+   ```
+
+
 
 ### Tools
 - **TokenStats**: Console utility to compute tokenizer length stats over archived messages in Postgres.
