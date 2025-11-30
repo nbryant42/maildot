@@ -31,6 +31,7 @@ public sealed partial class MainWindow : Window
     private bool _startupInitialized;
     private SearchMode _searchMode = SearchMode.Auto;
     private AppWindow? _appWindow;
+    private DateTimeOffset? _searchSinceUtc = null;
     private const double TitleBarMinHeight = 52;
 
     public MainWindow()
@@ -641,6 +642,21 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private void OnSearchSinceChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (SearchSinceCombo.SelectedItem is ComboBoxItem item && item.Tag is string tag)
+        {
+            _searchSinceUtc = tag switch
+            {
+                "7d" => DateTimeOffset.UtcNow.AddDays(-7),
+                "30d" => DateTimeOffset.UtcNow.AddDays(-30),
+                "90d" => DateTimeOffset.UtcNow.AddDays(-90),
+                "365d" => DateTimeOffset.UtcNow.AddDays(-365),
+                _ => null
+            };
+        }
+    }
+
     private async void OnAdvancedSearchClicked(object sender, RoutedEventArgs e)
     {
         var xamlRoot = GetXamlRoot();
@@ -677,7 +693,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        await _imapService.SearchAsync(query, _searchMode);
+        await _imapService.SearchAsync(query, _searchMode, _searchSinceUtc);
     }
 
     private static string? ExtractAddress(EmailMessageViewModel message)

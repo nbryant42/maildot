@@ -23,7 +23,7 @@
                 Grid.Row="0"
                 Background="{ThemeResource LayerFillColorDefaultBrush}"
                 MinHeight="52">
-            <Grid x:Name="TitleBarDragArea"
+                <Grid x:Name="TitleBarDragArea"
                   ColumnSpacing="12"
                   Padding="12,10,12,10"
                   VerticalAlignment="Center">
@@ -43,6 +43,7 @@
                       VerticalAlignment="Center">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="140" />
+                        <ColumnDefinition Width="150" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
@@ -57,15 +58,26 @@
                         <ComboBoxItem Content="Both" Tag="Both" />
                     </ComboBox>
 
+                    <ComboBox x:Name="SearchSinceCombo"
+                              Grid.Column="1"
+                              Width="150"
+                              SelectionChanged="OnSearchSinceChanged">
+                        <ComboBoxItem Content="All time" Tag="all" IsSelected="True" />
+                        <ComboBoxItem Content="Last 7 days" Tag="7d" />
+                        <ComboBoxItem Content="Last 30 days" Tag="30d" />
+                        <ComboBoxItem Content="Last 90 days" Tag="90d" />
+                        <ComboBoxItem Content="Last year" Tag="365d" />
+                    </ComboBox>
+
                     <AutoSuggestBox x:Name="SearchBox"
-                                    Grid.Column="1"
+                                    Grid.Column="2"
                                     PlaceholderText="Search mail"
                                     QueryIcon="Find"
                                     HorizontalAlignment="Stretch"
                                     QuerySubmitted="OnSearchQuerySubmitted" />
 
                     <Button x:Name="AdvancedSearchButton"
-                            Grid.Column="2"
+                            Grid.Column="3"
                             Background="Transparent"
                             BorderThickness="0"
                             ToolTipService.ToolTip="Advanced search"

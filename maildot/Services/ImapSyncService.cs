@@ -267,10 +267,10 @@ public sealed class ImapSyncService : IAsyncDisposable
         }
     }
 
-    public Task SearchAsync(string query, SearchMode mode) =>
-        SearchInternalAsync(query, mode);
+    public Task SearchAsync(string query, SearchMode mode, DateTimeOffset? sinceUtc = null) =>
+        SearchInternalAsync(query, mode, sinceUtc);
 
-    private async Task SearchInternalAsync(string query, SearchMode mode)
+    private async Task SearchInternalAsync(string query, SearchMode mode, DateTimeOffset? sinceUtc)
     {
         var trimmed = TextCleaner.CleanNullable(query) ?? string.Empty;
         if (string.IsNullOrWhiteSpace(trimmed))
@@ -303,12 +303,12 @@ public sealed class ImapSyncService : IAsyncDisposable
             {
                 if (ShouldSearchSender(effectiveMode))
                 {
-                    senderResults = await SearchBySenderAsync(db, trimmed, _cts.Token);
+                    senderResults = await SearchBySenderAsync(db, trimmed, sinceUtc, _cts.Token);
                 }
 
                 if (ShouldSearchVector(effectiveMode))
                 {
-                    vectorResults = await SearchByEmbeddingAsync(db, trimmed, _cts.Token);
+                    vectorResults = await SearchByEmbeddingAsync(db, trimmed, sinceUtc, _cts.Token);
                 }
             }
 
@@ -356,7 +356,7 @@ public sealed class ImapSyncService : IAsyncDisposable
     private static bool ShouldSearchVector(SearchMode mode) =>
         mode == SearchMode.Content || mode == SearchMode.Both || mode == SearchMode.Auto;
 
-    private async Task<List<SearchResult>> SearchBySenderAsync(MailDbContext db, string query, CancellationToken token)
+    private async Task<List<SearchResult>> SearchBySenderAsync(MailDbContext db, string query, DateTimeOffset? sinceUtc, CancellationToken token)
     {
         var conn = (NpgsqlConnection)db.Database.GetDbConnection();
         if (conn.State != System.Data.ConnectionState.Open)
@@ -382,6 +382,11 @@ public sealed class ImapSyncService : IAsyncDisposable
         sql.Append("LEFT JOIN message_bodies b ON b.\"MessageId\" = m.\"Id\" ");
         sql.Append("WHERE f.\"AccountId\" = @accountId ");
 
+        if (sinceUtc.HasValue)
+        {
+            sql.Append("AND m.\"ReceivedUtc\" >= @sinceUtc ");
+        }
+
         var clauses = new List<string>();
         if (addressPattern != null)
         {
@@ -403,6 +408,10 @@ public sealed class ImapSyncService : IAsyncDisposable
 
         await using var cmd = new NpgsqlCommand(sql.ToString(), conn);
         cmd.Parameters.AddWithValue("accountId", _settings!.Id);
+        if (sinceUtc.HasValue)
+        {
+            cmd.Parameters.AddWithValue("sinceUtc", sinceUtc.Value);
+        }
         if (addressPattern != null)
         {
             cmd.Parameters.AddWithValue("addressPattern", addressPattern);
@@ -438,7 +447,7 @@ public sealed class ImapSyncService : IAsyncDisposable
         return results;
     }
 
-    private async Task<List<SearchResult>> SearchByEmbeddingAsync(MailDbContext db, string query, CancellationToken token)
+    private async Task<List<SearchResult>> SearchByEmbeddingAsync(MailDbContext db, string query, DateTimeOffset? sinceUtc, CancellationToken token)
     {
         var embedder = await EnsureSearchEmbedderAsync();
         if (embedder == null)
@@ -462,28 +471,38 @@ public sealed class ImapSyncService : IAsyncDisposable
             await conn.OpenAsync(token);
         }
 
-        await using var cmd = new NpgsqlCommand(
-            "SELECT ranked.\"MessageId\", ranked.\"ImapUid\", ranked.\"Subject\", ranked.\"FromName\", ranked.\"FromAddress\", " +
-            "ranked.\"ReceivedUtc\", ranked.\"Preview\", ranked.\"FullName\", ranked.distance " +
-            "FROM ( " +
-            "    SELECT DISTINCT ON (me.\"MessageId\") " +
-            "           me.\"MessageId\", " +
-            "           me.\"Vector\" <=> @queryVec::halfvec AS distance, " +
-            "           m.\"ImapUid\", m.\"Subject\", m.\"FromName\", m.\"FromAddress\", m.\"ReceivedUtc\", " +
-            "           COALESCE(b.\"Preview\", '') AS \"Preview\", f.\"FullName\" " +
-            "    FROM message_embeddings me " +
-            "    JOIN imap_messages m ON m.\"Id\" = me.\"MessageId\" " +
-            "    JOIN imap_folders f ON f.id = m.\"FolderId\" " +
-            "    LEFT JOIN message_bodies b ON b.\"MessageId\" = m.\"Id\" " +
-            "    WHERE f.\"AccountId\" = @accountId " +
-            "    ORDER BY me.\"MessageId\", distance " +
-            ") AS ranked " +
-            "ORDER BY ranked.distance " +
-            "LIMIT 50",
-            conn);
+        // TODO this could probably use some optimization.
+        var vectorSql = new StringBuilder();
+        vectorSql.Append("SELECT ranked.\"MessageId\", ranked.\"ImapUid\", ranked.\"Subject\", ranked.\"FromName\", ranked.\"FromAddress\", ");
+        vectorSql.Append("ranked.\"ReceivedUtc\", ranked.\"Preview\", ranked.\"FullName\", ranked.distance ");
+        vectorSql.Append("FROM ( ");
+        vectorSql.Append("    SELECT DISTINCT ON (me.\"MessageId\") ");
+        vectorSql.Append("           me.\"MessageId\", ");
+        vectorSql.Append("           me.\"Vector\" <=> @queryVec::halfvec AS distance, ");
+        vectorSql.Append("           m.\"ImapUid\", m.\"Subject\", m.\"FromName\", m.\"FromAddress\", m.\"ReceivedUtc\", ");
+        vectorSql.Append("           COALESCE(b.\"Preview\", '') AS \"Preview\", f.\"FullName\" ");
+        vectorSql.Append("    FROM message_embeddings me ");
+        vectorSql.Append("    JOIN imap_messages m ON m.\"Id\" = me.\"MessageId\" ");
+        vectorSql.Append("    JOIN imap_folders f ON f.id = m.\"FolderId\" ");
+        vectorSql.Append("    LEFT JOIN message_bodies b ON b.\"MessageId\" = m.\"Id\" ");
+        vectorSql.Append("    WHERE f.\"AccountId\" = @accountId ");
+        if (sinceUtc.HasValue)
+        {
+            vectorSql.Append("AND m.\"ReceivedUtc\" >= @sinceUtc ");
+        }
+        vectorSql.Append("    ORDER BY me.\"MessageId\", distance ");
+        vectorSql.Append(") AS ranked ");
+        vectorSql.Append("ORDER BY ranked.distance ");
+        vectorSql.Append("LIMIT 50");
+
+        await using var cmd = new NpgsqlCommand(vectorSql.ToString(), conn);
 
         cmd.Parameters.AddWithValue("queryVec", vectorLiteral);
         cmd.Parameters.AddWithValue("accountId", _settings!.Id);
+        if (sinceUtc.HasValue)
+        {
+            cmd.Parameters.AddWithValue("sinceUtc", sinceUtc.Value);
+        }
 
         var results = new List<SearchResult>();
         await using var reader = await cmd.ExecuteReaderAsync(token);

@@ -28,13 +28,13 @@ persistence engine from process crashes.
 	
 ## Hardware requirements
 
-- Windows 10 Version 1809, x64 (Build 17763 or higher)
+- Windows 10 Version 2004, x64 (Build 19041 or higher)
 - DirectX 12 capable GPU (for local AI inference)
 - Vector embeddings use the [Qwen3-Embedding-0.6B-ONNX](https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX)
   model. The integration was developed and tested on an NVIDIA GeForce RTX 4070. It's currently tuned for 12 GB VRAM and
-  32GB of system RAM, and will most likely fail with an OOM on smaller GPUs. Tuning for lower VRAM GPUs is possible, but
-  will require VRAM size detection to drive adjustments to the `MaxTokensPerBatch` constant in `QwenEmbedder.cs`. Let me
-  know what values work for your GPU if you try this!
+  32GB of system RAM, and processing a large batch of emails will most likely fail with an OOM on smaller GPUs. Tuning
+  for lower VRAM GPUs is possible, but will require VRAM size detection to drive adjustments to the `MaxTokensPerBatch`
+  constant in `QwenEmbedder.cs`. Let me know what values work for your GPU if you try this!
 
 ## Local Development
 
