@@ -59,6 +59,8 @@ public partial class QwenEmbedder : IDisposable
             OptimizedModelFilePath = Path.Combine(onnxDir, "model_fp16.optimized.ort"),
             GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
         };
+        //TODO: the way this is supposed to work is that ONNX Runtime picks the best available EP for each node type.
+        //but in practice, it seems to pick CPU over DML even when DML is clearly better.
         //so.AppendExecutionProvider_CPU();
         //so.AppendExecutionProvider_CUDA();
         so.AppendExecutionProvider_DML();

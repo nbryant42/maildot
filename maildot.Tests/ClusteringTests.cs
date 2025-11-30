@@ -61,7 +61,7 @@ public class ClusteringTests
         }
     }
 
-    [Fact]
+    [Fact(Skip = "Local dependencies, slow, intended more for experimentation.")]
     public async Task TestClusteringWithInboxSample()
     {
         var settings = PostgresSettingsStore.Load();
