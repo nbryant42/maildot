@@ -11,16 +11,21 @@ namespace maildot.ViewModels;
 public sealed class MailboxViewModel : INotifyPropertyChanged
 {
     private MailFolderViewModel? _selectedFolder;
+    private string? _lastSelectedFolderId;
     private string _statusMessage = "Loading folders…";
     private bool _isBusy;
     private string _currentFolderTitle = "Mailbox";
     private string _accountSummary = "Connected to IMAP";
+    private string _searchTerm = string.Empty;
+    private bool _isSearchActive;
+    private SearchNavItemViewModel? _selectedSearchItem;
     private bool _canLoadMore;
     private bool _isRetryVisible;
     private EmailMessageViewModel? _selectedMessage;
 
     public ObservableCollection<MailFolderViewModel> Folders { get; } = new();
     public ObservableCollection<EmailMessageViewModel> Messages { get; } = new();
+    public ObservableCollection<SearchNavItemViewModel> SearchItems { get; } = new();
 
     public MailFolderViewModel? SelectedFolder
     {
@@ -30,7 +35,52 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
             if (_selectedFolder != value)
             {
                 _selectedFolder = value;
+                if (value != null)
+                {
+                    _lastSelectedFolderId = value.Id;
+                }
                 OnPropertyChanged(nameof(SelectedFolder));
+            }
+        }
+    }
+
+    public string? LastSelectedFolderId => _lastSelectedFolderId;
+
+    public string SearchTerm
+    {
+        get => _searchTerm;
+        private set
+        {
+            if (_searchTerm != value)
+            {
+                _searchTerm = value;
+                OnPropertyChanged(nameof(SearchTerm));
+            }
+        }
+    }
+
+    public bool IsSearchActive
+    {
+        get => _isSearchActive;
+        private set
+        {
+            if (_isSearchActive != value)
+            {
+                _isSearchActive = value;
+                OnPropertyChanged(nameof(IsSearchActive));
+            }
+        }
+    }
+
+    public SearchNavItemViewModel? SelectedSearchItem
+    {
+        get => _selectedSearchItem;
+        set
+        {
+            if (_selectedSearchItem != value)
+            {
+                _selectedSearchItem = value;
+                OnPropertyChanged(nameof(SelectedSearchItem));
             }
         }
     }
@@ -104,7 +154,7 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
 
     public void SetFolders(IEnumerable<MailFolderViewModel> folders)
     {
-        var selectedId = SelectedFolder?.Id;
+        var selectedId = SelectedFolder?.Id ?? _lastSelectedFolderId;
         Folders.Clear();
 
         foreach (var folder in folders)
@@ -112,7 +162,18 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
             Folders.Add(folder);
         }
 
-        SelectedFolder = Folders.FirstOrDefault(f => f.Id == selectedId) ?? Folders.FirstOrDefault();
+        if (IsSearchActive)
+        {
+            return;
+        }
+
+        var target = Folders.FirstOrDefault(f => f.Id == selectedId);
+        if (!IsSearchActive)
+        {
+            target ??= Folders.FirstOrDefault();
+        }
+
+        SelectedFolder = target;
     }
 
     public void SetMessages(string folderTitle, IEnumerable<EmailMessageViewModel> messages)
@@ -184,6 +245,43 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
         IsRetryVisible = isVisible;
     }
 
+    public void EnterSearchMode(string term)
+    {
+        SearchTerm = term;
+        IsSearchActive = true;
+        SearchItems.Clear();
+        var searchVm = new SearchNavItemViewModel(term);
+        SearchItems.Add(searchVm);
+        SelectedSearchItem = searchVm;
+        if (_selectedFolder != null)
+        {
+            _selectedFolder = null;
+            OnPropertyChanged(nameof(SelectedFolder));
+        }
+    }
+
+    public void ExitSearchMode()
+    {
+        if (!IsSearchActive)
+        {
+            return;
+        }
+
+        IsSearchActive = false;
+        SearchTerm = string.Empty;
+        SearchItems.Clear();
+        SelectedSearchItem = null;
+
+        if (_selectedFolder == null)
+        {
+            var target = Folders.FirstOrDefault(f => f.Id == _lastSelectedFolderId) ?? Folders.FirstOrDefault();
+            if (target != null)
+            {
+                SelectedFolder = target;
+            }
+        }
+    }
+
     public void UpdateFolderCounts(string folderId, int unreadCount)
     {
         var folder = Folders.FirstOrDefault(f => f.Id == folderId);
@@ -245,4 +343,15 @@ public sealed class EmailMessageViewModel
     public string ReceivedDisplay => Received == default
         ? string.Empty
         : Received.ToString("g");
+}
+
+public sealed class SearchNavItemViewModel
+{
+    public SearchNavItemViewModel(string term)
+    {
+        Term = term;
+    }
+
+    public string Term { get; }
+    public string DisplayName => Term;
 }

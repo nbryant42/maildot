@@ -7,7 +7,12 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:viewModels="using:maildot.ViewModels"
     xmlns:controls="using:Microsoft.UI.Xaml.Controls"
+    xmlns:conv="using:maildot.Converters"
     mc:Ignorable="d" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+
+    <UserControl.Resources>
+        <conv:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter" />
+    </UserControl.Resources>
 
     <Grid MinWidth="1050"
           MinHeight="600"
@@ -20,6 +25,24 @@
         </Grid.ColumnDefinitions>
 
         <StackPanel Grid.Column="0" Padding="16">
+            <StackPanel Visibility="{Binding IsSearchActive, Converter={StaticResource BoolToVisibilityConverter}}"
+                        Spacing="8"
+                        Margin="0,0,0,12">
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <TextBlock Text="Search Results" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                    <Button Content="x" Click="OnClearSearchClicked" VerticalAlignment="Center"/>
+                </StackPanel>
+                <ListView ItemsSource="{Binding SearchItems}"
+                          SelectedItem="{Binding SelectedSearchItem, Mode=TwoWay}">
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="viewModels:SearchNavItemViewModel">
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Stretch" Spacing="8">
+                                <TextBlock Text="{x:Bind DisplayName}" Width="150" TextTrimming="CharacterEllipsis" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </StackPanel>
             <TextBlock Text="Folders" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,12" />
             <ListView x:Name="FoldersList"
                         ItemsSource="{Binding Folders}"

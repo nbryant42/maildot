@@ -27,6 +27,7 @@ public sealed partial class ImapDashboardView : UserControl
     public event EventHandler<EmailMessageViewModel>? ReplyRequested;
     public event EventHandler<EmailMessageViewModel>? ReplyAllRequested;
     public event EventHandler<EmailMessageViewModel>? ForwardRequested;
+    public event EventHandler? ClearSearchRequested;
 
     public void BindViewModel(MailboxViewModel viewModel)
     {
@@ -55,6 +56,11 @@ public sealed partial class ImapDashboardView : UserControl
     private void OnComposeClicked(object sender, RoutedEventArgs e)
     {
         ComposeRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void OnClearSearchClicked(object sender, RoutedEventArgs e)
+    {
+        ClearSearchRequested?.Invoke(this, EventArgs.Empty);
     }
 
     private void OnReplyClicked(object sender, RoutedEventArgs e)

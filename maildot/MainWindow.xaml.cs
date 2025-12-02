@@ -217,6 +217,8 @@ public sealed partial class MainWindow : Window
         _dashboardView.SettingsRequested += OnSettingsRequested;
         _dashboardView.MessageSelected -= OnMessageSelected;
         _dashboardView.MessageSelected += OnMessageSelected;
+        _dashboardView.ClearSearchRequested -= OnClearSearchRequested;
+        _dashboardView.ClearSearchRequested += OnClearSearchRequested;
         _dashboardView.ComposeRequested -= OnComposeRequested;
         _dashboardView.ComposeRequested += OnComposeRequested;
         _dashboardView.ReplyRequested -= OnReplyRequested;
@@ -249,6 +251,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        _mailboxViewModel?.ExitSearchMode();
         _dashboardView?.ClearMessageContentAsync();
         _ = _imapService.LoadFolderAsync(folder.Id);
     }
@@ -685,6 +688,7 @@ public sealed partial class MainWindow : Window
 
         if (string.IsNullOrWhiteSpace(query))
         {
+            _mailboxViewModel.ExitSearchMode();
             if (_mailboxViewModel.SelectedFolder != null)
             {
                 await _imapService.LoadFolderAsync(_mailboxViewModel.SelectedFolder.Id);
@@ -694,6 +698,16 @@ public sealed partial class MainWindow : Window
         }
 
         await _imapService.SearchAsync(query, _searchMode, _searchSinceUtc);
+    }
+
+    private async void OnClearSearchRequested(object? sender, EventArgs e)
+    {
+        if (_mailboxViewModel == null)
+        {
+            return;
+        }
+
+        _mailboxViewModel.ExitSearchMode();
     }
 
     private static string? ExtractAddress(EmailMessageViewModel message)

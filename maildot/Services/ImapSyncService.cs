@@ -319,6 +319,7 @@ public sealed class ImapSyncService : IAsyncDisposable
 
             await EnqueueAsync(() =>
             {
+                _viewModel.EnterSearchMode(trimmed);
                 _viewModel.SetMessages($"Search: {trimmed}", merged);
                 _viewModel.SetStatus(status, false);
                 _viewModel.SetLoadMoreAvailability(false);
@@ -642,7 +643,10 @@ public sealed class ImapSyncService : IAsyncDisposable
 
         try
         {
-            await ReportStatusAsync(statusMessage, true);
+            if (!_viewModel.IsSearchActive)
+            {
+                await ReportStatusAsync(statusMessage, true);
+            }
 
             _client?.Dispose();
             _client = new ImapClient();
@@ -652,7 +656,11 @@ public sealed class ImapSyncService : IAsyncDisposable
             _folderCache.Clear();
             _folderNextEndIndex.Clear();
 
-            await ReportStatusAsync("Loading folders…", true);
+            if (!_viewModel.IsSearchActive)
+            {
+                await ReportStatusAsync("Loading folders…", true);
+            }
+
             var folders = await LoadFoldersAsync(_cts.Token);
             await EnqueueAsync(() =>
             {
