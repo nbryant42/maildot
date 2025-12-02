@@ -58,6 +58,8 @@ public sealed class ImapSyncService : IAsyncDisposable
         _settings = settings;
         _password = password;
 
+        _ = EnsureSearchEmbedderAsync();
+
         if (!await ConnectAsync("Connecting to IMAP…"))
         {
             return;
