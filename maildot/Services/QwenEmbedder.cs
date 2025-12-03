@@ -24,7 +24,12 @@ public partial class QwenEmbedder : IDisposable
     private readonly Tokenizer _tok;
     private readonly int _maxLen;
     private readonly long _padId;
-    private const int MaxTokensPerBatch = 16 * 1024; // upper bound on batch_size * seq_len to avoid OOM
+
+    // upper bound on batch_size * seq_len to both avoid OOM and prevent allocations from spilling into shared memory.
+    // note there is some room for debate about the optimal value here; in theory, bigger batches improve GPU
+    // utilization, but reducing batch size to 16K does not appear to cost much performance on a Geforce RTX 4070.
+    private const int MaxTokensPerBatch = 20 * 1024;
+
     private const string DefaultQueryInstruction = "Given a mailbox and a search query, find emails whose subject or " +
         "body are most relevant to the topic of the query, even if they don't explicitly answer a question.";
 
@@ -36,20 +41,40 @@ public partial class QwenEmbedder : IDisposable
 
     public static async Task<QwenEmbedder> Build(string modelDir, int maxLen = 1024)
     {
-        //// Create a new instance of EnvironmentCreationOptions
-        //EnvironmentCreationOptions envOptions = new()
-        //{
-        //    logId = "maildot",
-        //    logLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_ERROR
-        //};
+        // disabled; none of the auto-downloadable providers are working for me as of WinAppSDK 2.0.0-experimental3.
+#if false
+        // Create a new instance of EnvironmentCreationOptions
+        EnvironmentCreationOptions envOptions = new()
+        {
+            logId = "maildot",
+            logLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_ERROR
+        };
 
-        //// Pass the options by reference to CreateInstanceWithOptions
-        //OrtEnv ortEnv = OrtEnv.CreateInstanceWithOptions(ref envOptions);
+        // Pass the options by reference to CreateInstanceWithOptions
+        OrtEnv ortEnv = OrtEnv.CreateInstanceWithOptions(ref envOptions);
 
         // Use Windows ML to download and register Execution Providers
-        //var catalog = Microsoft.Windows.AI.MachineLearning.ExecutionProviderCatalog.GetDefault();
-        //Console.WriteLine("Ensuring and registering execution providers...");
-        //await catalog.EnsureAndRegisterCertifiedAsync();
+        var catalog = ExecutionProviderCatalog.GetDefault();
+        Debug.WriteLine("Ensuring and registering execution providers...");
+
+        foreach (var p in catalog.FindAllProviders())
+        {
+            Debug.WriteLine($"Found EP: {p.Name}, ReadyState: {p.ReadyState}");
+
+            if (!p.Name.Equals("OpenVINOExecutionProvider")) // crashes on registration on my machine
+            {
+                // Download it
+                var result = await p.EnsureReadyAsync();
+
+                // If download succeeded
+                if (result != null && result.Status == ExecutionProviderReadyResultState.Success)
+                {
+                    // Register it
+                    p.TryRegister();
+                }
+            }
+        }
+#endif
 
         var tok = new Tokenizer(vocabPath: await HuggingFace.GetFileFromHub(ModelId, tokFile, hfCacheDir));
         var onnxDir = Path.Combine(hfCacheDir, ModelId, "onnx");
@@ -59,12 +84,29 @@ public partial class QwenEmbedder : IDisposable
             OptimizedModelFilePath = Path.Combine(onnxDir, "model_fp16.optimized.ort"),
             GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
         };
-        //TODO: the way this is supposed to work is that ONNX Runtime picks the best available EP for each node type.
-        //but in practice, it seems to pick CPU over DML even when DML is clearly better.
-        //so.AppendExecutionProvider_CPU();
-        //so.AppendExecutionProvider_CUDA();
-        so.AppendExecutionProvider_DML();
-        so.SetEpSelectionPolicy(ExecutionProviderDevicePolicy.MIN_OVERALL_POWER);
+
+        // Disabled; none of the auto-downloadable providers are working for me as of WinAppSDK 2.0.0-experimental3.
+        // NvTensorRTRTXExecutionProvider, if appended here, causes a StackOverflowException on `new InferenceSession`.
+        // This can be worked around by running the `new InferenceSession` in a `new Thread` with 8MB stack size, but
+        // it still runs out of memory downstream, during the compilation phase, allocating at least 128GB of memory.
+        // Might be related to the fact that it prints many errors about unsupported op types; the logs themselves
+        // consume memory?
+#if false
+        foreach (var dev in ortEnv.GetEpDevices())
+        {
+            Debug.WriteLine($"Dev: {dev.EpName}");
+            if (dev.EpName.Equals("NvTensorRTRTXExecutionProvider"))
+            {
+                so.AppendExecutionProvider(ortEnv, [dev], new Dictionary<string, string>());
+            }
+        }
+#endif
+
+        // Must register DML before CPU. Use both; ONNX Runtime will use CPU for certain node types if deemed optimal.
+        try { so.AppendExecutionProvider_DML(); } catch (OnnxRuntimeException e) { Debug.WriteLine(e); }
+        so.AppendExecutionProvider_CPU();
+        so.SetEpSelectionPolicy(ExecutionProviderDevicePolicy.MAX_PERFORMANCE);
+
         await HuggingFace.GetFileFromHub(ModelId, "onnx/model_fp16.onnx_data", hfCacheDir);
         var path = await HuggingFace.GetFileFromHub(ModelId, "onnx/model_fp16.onnx", hfCacheDir);
         var sess = new InferenceSession(path, so);
