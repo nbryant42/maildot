@@ -1,14 +1,35 @@
-using maildot.Services;
-using System.Diagnostics;
-using maildot.Models;
 using maildot.Data;
+using maildot.Models;
+using maildot.Services;
 using Microsoft.EntityFrameworkCore;
-using System.Linq;
+using Microsoft.Windows.ApplicationModel.DynamicDependency;
+using System.Diagnostics;
 
 namespace maildot.Tests;
 
-public class ClusteringTests
+// need to use WinAppSDK Bootstrap for ONNX Runtime
+public class Fixture : IDisposable
 {
+    public Fixture()
+    {
+        Bootstrap.Initialize(0x00010008);
+    }
+
+    public void Dispose()
+    {
+        Bootstrap.Shutdown();
+    }
+}
+
+public class ClusteringTests : IClassFixture<Fixture>
+{
+    private readonly Fixture _fixture;
+
+    public ClusteringTests(Fixture fixture)
+    {
+        _fixture = fixture;
+    }
+
     [Fact]
     public async Task TestClustering()
     {
