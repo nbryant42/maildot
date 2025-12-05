@@ -148,12 +148,8 @@ public partial class QwenEmbedder : IDisposable
             int longest = encoded[pos].tokens.Length;
             int seqLen = Math.Min(_maxLen, Math.Max(1, longest));
 
-            int maxBatch = (int)Math.Max(1, MaxTokensPerBatch / (long)seqLen);
+            int maxBatch = Math.Max(1, MaxTokensPerBatch / seqLen);
             int batchCount = Math.Min(maxBatch, remaining);
-
-            // Recompute seqLen for this slice
-            seqLen = Math.Min(_maxLen, Math.Max(1, encoded.Skip(pos).Take(batchCount).Max(e => e.tokens.Length)));
-            batchCount = (int)Math.Max(1, Math.Min(batchCount, MaxTokensPerBatch / (long)seqLen));
 
             var idsBatch = new long[batchCount * seqLen];
             var maskBatch = new long[batchCount * seqLen];
@@ -174,8 +170,10 @@ public partial class QwenEmbedder : IDisposable
             }
 
             var inputs = new List<NamedOnnxValue> {
-                NamedOnnxValue.CreateFromTensor("input_ids",     new DenseTensor<long>(idsBatch,  [batchCount, seqLen])),
-                NamedOnnxValue.CreateFromTensor("attention_mask",new DenseTensor<long>(maskBatch, [batchCount, seqLen])),
+                NamedOnnxValue.CreateFromTensor("input_ids",
+                    new DenseTensor<long>(idsBatch,  [batchCount, seqLen])),
+                NamedOnnxValue.CreateFromTensor("attention_mask",
+                    new DenseTensor<long>(maskBatch, [batchCount, seqLen])),
             };
 
             if (_sess.InputMetadata.TryGetValue("position_ids", out var _))

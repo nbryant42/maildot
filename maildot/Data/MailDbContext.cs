@@ -44,6 +44,7 @@ public sealed class MailDbContext : DbContext
         {
             entity.ToTable("imap_messages");
             entity.HasIndex(e => new { e.FolderId, e.ImapUid }).IsUnique();
+            entity.HasIndex(e => e.ReceivedUtc);
             entity.HasOne(m => m.Folder)
                   .WithMany(f => f.Messages)
                   .HasForeignKey(m => m.FolderId)

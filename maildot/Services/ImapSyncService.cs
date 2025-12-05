@@ -474,14 +474,15 @@ public sealed class ImapSyncService : IAsyncDisposable
             await conn.OpenAsync(token);
         }
 
-        // TODO this could probably use some optimization.
+        // This doesn't look like it will benefit from an index as written, due to the ORDER BY in the subquery,
+        // but for now it's performing adequately.
         var vectorSql = new StringBuilder();
         vectorSql.Append("SELECT ranked.\"MessageId\", ranked.\"ImapUid\", ranked.\"Subject\", ranked.\"FromName\", ranked.\"FromAddress\", ");
-        vectorSql.Append("ranked.\"ReceivedUtc\", ranked.\"Preview\", ranked.\"FullName\", ranked.distance ");
+        vectorSql.Append("ranked.\"ReceivedUtc\", ranked.\"Preview\", ranked.\"FullName\", ranked.negative_inner_product ");
         vectorSql.Append("FROM ( ");
         vectorSql.Append("    SELECT DISTINCT ON (me.\"MessageId\") ");
         vectorSql.Append("           me.\"MessageId\", ");
-        vectorSql.Append("           me.\"Vector\" <=> @queryVec::halfvec AS distance, ");
+        vectorSql.Append("           me.\"Vector\" <#> @queryVec::halfvec AS negative_inner_product, ");
         vectorSql.Append("           m.\"ImapUid\", m.\"Subject\", m.\"FromName\", m.\"FromAddress\", m.\"ReceivedUtc\", ");
         vectorSql.Append("           COALESCE(b.\"Preview\", '') AS \"Preview\", f.\"FullName\" ");
         vectorSql.Append("    FROM message_embeddings me ");
@@ -493,9 +494,9 @@ public sealed class ImapSyncService : IAsyncDisposable
         {
             vectorSql.Append("AND m.\"ReceivedUtc\" >= @sinceUtc ");
         }
-        vectorSql.Append("    ORDER BY me.\"MessageId\", distance ");
+        vectorSql.Append("    ORDER BY me.\"MessageId\", negative_inner_product ");
         vectorSql.Append(") AS ranked ");
-        vectorSql.Append("ORDER BY ranked.distance ");
+        vectorSql.Append("ORDER BY ranked.negative_inner_product ");
         vectorSql.Append("LIMIT 50");
 
         await using var cmd = new NpgsqlCommand(vectorSql.ToString(), conn);
@@ -516,7 +517,7 @@ public sealed class ImapSyncService : IAsyncDisposable
             var fromAddress = TextCleaner.CleanNullable(reader.GetString(4)) ?? string.Empty;
             var preview = TextCleaner.CleanNullable(reader.GetString(6)) ?? string.Empty;
             var folderFullName = TextCleaner.CleanNullable(reader.GetString(7)) ?? string.Empty;
-            var distance = reader.IsDBNull(8) ? double.MaxValue : reader.GetDouble(8);
+            var negativeInnerProduct = reader.IsDBNull(8) ? double.MaxValue : reader.GetDouble(8);
 
             results.Add(new SearchResult(
                 MessageId: reader.GetInt32(0),
@@ -527,7 +528,7 @@ public sealed class ImapSyncService : IAsyncDisposable
                 ReceivedUtc: reader.GetFieldValue<DateTimeOffset>(5),
                 Preview: preview,
                 FolderFullName: folderFullName,
-                Score: distance,
+                Score: negativeInnerProduct,
                 Priority: 1));
         }
 
