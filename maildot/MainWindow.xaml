@@ -54,8 +54,9 @@
                               SelectionChanged="OnSearchModeChanged">
                         <ComboBoxItem Content="Auto" Tag="Auto" IsSelected="True" />
                         <ComboBoxItem Content="Sender" Tag="Sender" />
+                        <ComboBoxItem Content="Subject" Tag="Subject" />
                         <ComboBoxItem Content="Content" Tag="Content" />
-                        <ComboBoxItem Content="Both" Tag="Both" />
+                        <ComboBoxItem Content="All" Tag="All" />
                     </ComboBox>
 
                     <ComboBox x:Name="SearchSinceCombo"

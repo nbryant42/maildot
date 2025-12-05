@@ -298,11 +298,17 @@ public sealed class ImapSyncService : IAsyncDisposable
             }
 
             var effectiveMode = ResolveSearchMode(trimmed, mode);
+            List<SearchResult> subjectResults = [];
             List<SearchResult> senderResults = [];
             List<SearchResult> vectorResults = [];
 
             await using (db)
             {
+                if (ShouldSearchSubject(effectiveMode))
+                {
+                    subjectResults = await SearchBySubjectAsync(db, trimmed, sinceUtc, _cts.Token);
+                }
+
                 if (ShouldSearchSender(effectiveMode))
                 {
                     senderResults = await SearchBySenderAsync(db, trimmed, sinceUtc, _cts.Token);
@@ -314,7 +320,7 @@ public sealed class ImapSyncService : IAsyncDisposable
                 }
             }
 
-            var merged = MergeResults(senderResults, vectorResults);
+            var merged = MergeResults(subjectResults, senderResults, vectorResults);
             var status = merged.Count == 0
                 ? "No matches found."
                 : $"Showing {merged.Count} result{(merged.Count == 1 ? string.Empty : "s")}.";
@@ -350,14 +356,78 @@ public sealed class ImapSyncService : IAsyncDisposable
             return SearchMode.Sender;
         }
 
-        return SearchMode.Both;
+        return SearchMode.All;
     }
 
+    private static bool ShouldSearchSubject(SearchMode mode) =>
+        mode == SearchMode.Subject || mode == SearchMode.All || mode == SearchMode.Auto;
+
     private static bool ShouldSearchSender(SearchMode mode) =>
-        mode == SearchMode.Sender || mode == SearchMode.Both || mode == SearchMode.Auto;
+        mode == SearchMode.Sender || mode == SearchMode.All || mode == SearchMode.Auto;
 
     private static bool ShouldSearchVector(SearchMode mode) =>
-        mode == SearchMode.Content || mode == SearchMode.Both || mode == SearchMode.Auto;
+        mode == SearchMode.Content || mode == SearchMode.All || mode == SearchMode.Auto;
+
+    private const int SubjectPriority = 0;
+    private const int SenderPriority = 1;
+    private const int VectorPriority = 2;
+
+    private async Task<List<SearchResult>> SearchBySubjectAsync(MailDbContext db, string query, DateTimeOffset? sinceUtc, CancellationToken token)
+    {
+        var conn = (NpgsqlConnection)db.Database.GetDbConnection();
+        if (conn.State != System.Data.ConnectionState.Open)
+        {
+            await conn.OpenAsync(token);
+        }
+
+        var subjectPattern = $"%{query}%";
+        var sql = new StringBuilder();
+        sql.Append("SELECT m.\"Id\", m.\"ImapUid\", m.\"Subject\", m.\"FromName\", m.\"FromAddress\", m.\"ReceivedUtc\", ");
+        sql.Append("COALESCE(b.\"Preview\", ''), f.\"FullName\" ");
+        sql.Append("FROM imap_messages m ");
+        sql.Append("JOIN imap_folders f ON f.id = m.\"FolderId\" ");
+        sql.Append("LEFT JOIN message_bodies b ON b.\"MessageId\" = m.\"Id\" ");
+        sql.Append("WHERE f.\"AccountId\" = @accountId ");
+        sql.Append("AND m.\"Subject\" ILIKE @subjectPattern ");
+        if (sinceUtc.HasValue)
+        {
+            sql.Append("AND m.\"ReceivedUtc\" >= @sinceUtc ");
+        }
+        sql.Append("ORDER BY m.\"ReceivedUtc\" DESC LIMIT 50");
+
+        await using var cmd = new NpgsqlCommand(sql.ToString(), conn);
+        cmd.Parameters.AddWithValue("accountId", _settings!.Id);
+        cmd.Parameters.AddWithValue("subjectPattern", subjectPattern);
+        if (sinceUtc.HasValue)
+        {
+            cmd.Parameters.AddWithValue("sinceUtc", sinceUtc.Value);
+        }
+
+        var results = new List<SearchResult>();
+        await using var reader = await cmd.ExecuteReaderAsync(token);
+        while (await reader.ReadAsync(token))
+        {
+            var subject = TextCleaner.CleanNullable(reader.GetString(2)) ?? string.Empty;
+            var fromName = TextCleaner.CleanNullable(reader.GetString(3)) ?? string.Empty;
+            var fromAddress = TextCleaner.CleanNullable(reader.GetString(4)) ?? string.Empty;
+            var preview = TextCleaner.CleanNullable(reader.IsDBNull(6) ? string.Empty : reader.GetString(6)) ?? string.Empty;
+            var folderFullName = TextCleaner.CleanNullable(reader.GetString(7)) ?? string.Empty;
+
+            results.Add(new SearchResult(
+                MessageId: reader.GetInt32(0),
+                ImapUid: reader.GetInt64(1),
+                Subject: subject,
+                FromName: fromName,
+                FromAddress: fromAddress,
+                ReceivedUtc: reader.GetFieldValue<DateTimeOffset>(5),
+                Preview: preview,
+                FolderFullName: folderFullName,
+                Score: 0,
+                Priority: SubjectPriority));
+        }
+
+        return results;
+    }
 
     private async Task<List<SearchResult>> SearchBySenderAsync(MailDbContext db, string query, DateTimeOffset? sinceUtc, CancellationToken token)
     {
@@ -444,7 +514,7 @@ public sealed class ImapSyncService : IAsyncDisposable
                 Preview: preview,
                 FolderFullName: folderFullName,
                 Score: 0,
-                Priority: 0));
+                Priority: SenderPriority));
         }
 
         return results;
@@ -529,13 +599,13 @@ public sealed class ImapSyncService : IAsyncDisposable
                 Preview: preview,
                 FolderFullName: folderFullName,
                 Score: negativeInnerProduct,
-                Priority: 1));
+                Priority: VectorPriority));
         }
 
         return results;
     }
 
-    private List<EmailMessageViewModel> MergeResults(IEnumerable<SearchResult> senderResults, IEnumerable<SearchResult> vectorResults)
+    private List<EmailMessageViewModel> MergeResults(params IEnumerable<SearchResult>[] resultSets)
     {
         var combined = new Dictionary<int, SearchResult>();
 
@@ -558,8 +628,10 @@ public sealed class ImapSyncService : IAsyncDisposable
             }
         }
 
-        AddRange(senderResults);
-        AddRange(vectorResults);
+        foreach (var results in resultSets)
+        {
+            AddRange(results);
+        }
 
         return combined.Values
             .OrderBy(r => r.Priority)

@@ -28,10 +28,37 @@
             <StackPanel Visibility="{Binding IsSearchActive, Converter={StaticResource BoolToVisibilityConverter}}"
                         Spacing="8"
                         Margin="0,0,0,12">
-                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                    <TextBlock Text="Search Results" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center"/>
-                    <Button Content="x" Click="OnClearSearchClicked" VerticalAlignment="Center"/>
-                </StackPanel>
+                <Grid ColumnSpacing="8" VerticalAlignment="Center">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>    <!-- label -->
+                        <ColumnDefinition Width="*"/>       <!-- spacer -->
+                        <ColumnDefinition Width="Auto"/>    <!-- X button -->
+                    </Grid.ColumnDefinitions>
+                    
+                    <TextBlock Grid.Column="0" Text="Search Results" FontSize="18" FontWeight="SemiBold"
+                               VerticalAlignment="Center"/>
+                    <Button Grid.Column="2"
+                            Click="OnClearSearchClicked"
+                            VerticalAlignment="Center"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            ToolTipService.ToolTip="Clear search"
+                            Margin="0,0,8,0">
+                        <Button.Resources>
+                            <SolidColorBrush x:Key="ButtonBackground" Color="Transparent" />
+                            <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="Transparent" />
+                            <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="Transparent" />
+                            <SolidColorBrush x:Key="ButtonBackgroundDisabled" Color="Transparent" />
+                            <SolidColorBrush x:Key="ButtonBorderBrush" Color="Transparent" />
+                            <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent" />
+                            <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent" />
+                            <SolidColorBrush x:Key="ButtonBorderBrushDisabled" Color="Transparent" />
+                        </Button.Resources>
+                        <Path Data="M3 3 L13 13 M13 3 L3 13"
+                              Stroke="{ThemeResource TextFillColorSecondaryBrush}"
+                              StrokeThickness="1.5"/>
+                    </Button>
+                </Grid>
                 <ListView ItemsSource="{Binding SearchItems}"
                           SelectedItem="{Binding SelectedSearchItem, Mode=TwoWay}">
                     <ListView.ItemTemplate>
