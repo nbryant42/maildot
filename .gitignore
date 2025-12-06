@@ -3,8 +3,8 @@ maildot/obj/
 maildot/bin/
 maildot.Tests/obj/
 maildot.Tests/bin/
-tools/TokenStats/obj/
-tools/TokenStats/bin/
+tools/*/obj/
+tools/*/bin/
 .vs/
 test-output.log
 test.err

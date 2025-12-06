@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -18,6 +19,7 @@ using Windows.UI;
 using System.Diagnostics;
 using Npgsql;
 using System.Globalization;
+using System.Security.Cryptography;
 using Float16 = Microsoft.ML.OnnxRuntime.Float16;
 
 namespace maildot.Services;
@@ -1050,6 +1052,7 @@ public sealed class ImapSyncService : IAsyncDisposable
     }
 
     private record EmbeddingInsert(int MessageId, int ChunkIndex, float[] Vector, string ModelVersion, DateTimeOffset CreatedAt);
+    private record AttachmentInsert(string FileName, string ContentType, string? Disposition, long SizeBytes, string Hash, uint LargeObjectId);
     private record SearchResult(
         int MessageId,
         long ImapUid,
@@ -1119,6 +1122,125 @@ public sealed class ImapSyncService : IAsyncDisposable
 
             await tx.CommitAsync(token);
         }
+    }
+
+    private async Task<List<AttachmentInsert>> DownloadAttachmentsAsync(NpgsqlConnection conn, MimeMessage message, CancellationToken token)
+    {
+        var parts = message.BodyParts
+            .Where(p => p is MimePart mp && mp.IsAttachment || p is MessagePart)
+            .ToList();
+
+        if (parts.Count == 0)
+        {
+            return [];
+        }
+
+        var manager = new NpgsqlLargeObjectManager(conn);
+        var results = new List<AttachmentInsert>(parts.Count);
+
+        foreach (var part in parts)
+        {
+            var saved = await SaveAttachmentAsync(manager, part, token);
+            if (saved != null)
+            {
+                results.Add(saved);
+            }
+        }
+
+        return results;
+    }
+
+    private async Task<AttachmentInsert?> SaveAttachmentAsync(NpgsqlLargeObjectManager manager, MimeEntity entity, CancellationToken token)
+    {
+        var fileName = GetAttachmentFileName(entity);
+        var contentType = TextCleaner.CleanNullable(entity.ContentType?.MimeType) ?? "application/octet-stream";
+        var disposition = entity.Headers?
+            .FirstOrDefault(h => h != null && string.Equals(h.Field, "Content-Disposition", StringComparison.OrdinalIgnoreCase))
+            ?.Value;
+
+        Stream? contentStream = null;
+        try
+        {
+            switch (entity)
+            {
+                case MimePart mimePart when mimePart.Content != null:
+                    contentStream = mimePart.Content.Open();
+                    break;
+                case MessagePart messagePart when messagePart.Message != null:
+                    var buffer = new MemoryStream();
+                    await messagePart.Message.WriteToAsync(buffer, token);
+                    buffer.Position = 0;
+                    contentStream = buffer;
+                    break;
+                default:
+                    return null;
+            }
+
+            if (contentStream == null)
+            {
+                return null;
+            }
+
+            var oid = await manager.CreateAsync(0u, token);
+            await using var loStream = await manager.OpenReadWriteAsync(oid, token);
+
+            using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            var rented = ArrayPool<byte>.Shared.Rent(81920);
+            long totalBytes = 0;
+
+            try
+            {
+                int read;
+                while ((read = await contentStream.ReadAsync(rented.AsMemory(0, rented.Length), token)) > 0)
+                {
+                    await loStream.WriteAsync(rented.AsMemory(0, read), token);
+                    sha.AppendData(rented, 0, read);
+                    totalBytes += read;
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(rented);
+            }
+
+            var hash = Convert.ToHexString(sha.GetHashAndReset());
+
+            return new AttachmentInsert(
+                FileName: fileName,
+                ContentType: contentType,
+                Disposition: disposition,
+                SizeBytes: totalBytes,
+                Hash: hash,
+                LargeObjectId: oid);
+        }
+        finally
+        {
+            if (contentStream is IAsyncDisposable asyncDisposable)
+            {
+                await asyncDisposable.DisposeAsync();
+            }
+            else
+            {
+                contentStream?.Dispose();
+            }
+        }
+    }
+
+    private static string GetAttachmentFileName(MimeEntity entity)
+    {
+        var dispositionName = TextCleaner.CleanNullable(entity.ContentDisposition?.FileName);
+        if (!string.IsNullOrWhiteSpace(dispositionName))
+        {
+            return dispositionName!;
+        }
+
+        var typeName = TextCleaner.CleanNullable(entity.ContentType?.Name);
+        if (!string.IsNullOrWhiteSpace(typeName))
+        {
+            return typeName!;
+        }
+
+        return "attachment";
     }
 
     private List<IMailFolder> GetFoldersByPriority() =>
@@ -1307,37 +1429,68 @@ public sealed class ImapSyncService : IAsyncDisposable
             var entity = await UpsertImapMessageAsync(db, folderId, message, uid, token);
 
             var hasBody = await db.MessageBodies.AnyAsync(b => b.MessageId == entity.Id, token);
-            if (hasBody)
+            var hasAttachments = await db.MessageAttachments.AnyAsync(a => a.MessageId == entity.Id, token);
+            var needsWork = !hasBody || !hasAttachments;
+            if (!needsWork)
             {
                 return;
             }
 
-            var headers = message.Headers
-                .GroupBy(h => h.Field)
-                .ToDictionary(
-                    g => g.Key,
-                    g => g.Select(x => TextCleaner.CleanNullable(x.Value) ?? string.Empty).ToArray());
+            await db.Database.OpenConnectionAsync(token);
+            await using var tx = await db.Database.BeginTransactionAsync(token);
 
-            var plain = TextCleaner.CleanNullable(message.TextBody);
-            var html = TextCleaner.CleanNullable(message.HtmlBody);
-            var sanitized = string.IsNullOrWhiteSpace(html) ? null : TextCleaner.CleanNullable(HtmlSanitizer.Sanitize(html).Html);
-            var previewSource = string.IsNullOrWhiteSpace(plain) ? message.Subject ?? string.Empty : plain;
-            var preview = BuildPreview(previewSource);
-
-            MessageBody mb = new()
+            if (!hasBody)
             {
-                MessageId = entity.Id,
-                PlainText = plain,
-                HtmlText = html,
-                SanitizedHtml = sanitized,
-                Headers = headers,
-                Preview = preview
-            };
-            db.MessageBodies.Add(mb);
+                var headers = message.Headers
+                    .GroupBy(h => h.Field)
+                    .ToDictionary(
+                        g => g.Key,
+                        g => g.Select(x => TextCleaner.CleanNullable(x.Value) ?? string.Empty).ToArray());
+
+                var plain = TextCleaner.CleanNullable(message.TextBody);
+                var html = TextCleaner.CleanNullable(message.HtmlBody);
+                var sanitized = string.IsNullOrWhiteSpace(html) ? null : TextCleaner.CleanNullable(HtmlSanitizer.Sanitize(html).Html);
+                var previewSource = string.IsNullOrWhiteSpace(plain) ? message.Subject ?? string.Empty : plain;
+                var preview = BuildPreview(previewSource);
+
+                MessageBody mb = new()
+                {
+                    MessageId = entity.Id,
+                    PlainText = plain,
+                    HtmlText = html,
+                    SanitizedHtml = sanitized,
+                    Headers = headers,
+                    Preview = preview
+                };
+                db.MessageBodies.Add(mb);
+            }
+
+            if (!hasAttachments)
+            {
+                var conn = (NpgsqlConnection)db.Database.GetDbConnection();
+                var attachments = await DownloadAttachmentsAsync(conn, message, token);
+                if (attachments.Count > 0)
+                {
+                    foreach (var attachment in attachments)
+                    {
+                        db.MessageAttachments.Add(new MessageAttachment
+                        {
+                            MessageId = entity.Id,
+                            FileName = attachment.FileName,
+                            ContentType = attachment.ContentType,
+                            Disposition = attachment.Disposition,
+                            SizeBytes = attachment.SizeBytes,
+                            Hash = attachment.Hash,
+                            LargeObjectId = attachment.LargeObjectId
+                        });
+                    }
+                }
+            }
 
             try
             {
                 await db.SaveChangesAsync(token);
+                await tx.CommitAsync(token);
             }
             catch (DbUpdateException ex)
             {

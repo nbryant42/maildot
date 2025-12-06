@@ -70,3 +70,8 @@ persistence engine from process crashes.
 	`%LocalAppData%\maildot\hf\`.
   - Requires PostgreSQL credentials in the vault; reads all `message_bodies`, tokenizes subject+body, and prints
 	min/mean/median/max/stddev token counts.
+- **ImapBackfill**: Console utility to re-download bodies and/or attachments from the IMAP server when local copies look
+  incomplete.
+  - Run: `dotnet run --project tools/ImapBackfill/ImapBackfill.csproj -p:Platform=x64 [--bodies] [--attachments]`
+  - Flags are optional; omitting both refreshes bodies and attachments. Requires IMAP + PostgreSQL credentials to be set
+	in the Windows credential vault.
