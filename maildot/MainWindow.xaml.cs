@@ -16,6 +16,7 @@ using Windows.System;
 using Windows.UI;
 using WinRT.Interop;
 using Microsoft.UI;
+using System.Net;
 
 namespace maildot;
 
@@ -156,6 +157,7 @@ public sealed partial class MainWindow : Window
         _activeAccount = settings;
         EnsureDashboard();
         _ = _dashboardView!.ClearMessageContentAsync();
+        _ = _dashboardView.ClearAttachmentsAsync();
         _mailboxViewModel!.SetAccountSummary($"{settings.AccountName} ({settings.Username})");
         _ = StartImapSyncAsync(settings, password);
     }
@@ -253,6 +255,7 @@ public sealed partial class MainWindow : Window
 
         _mailboxViewModel?.ExitSearchMode();
         _dashboardView?.ClearMessageContentAsync();
+        _dashboardView?.ClearAttachmentsAsync();
         _ = _imapService.LoadFolderAsync(folder.Id);
     }
 
@@ -516,7 +519,20 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        var html = await _imapService.LoadMessageBodyAsync(folderId, messageId);
+        var bodyTask = _imapService.LoadMessageBodyAsync(folderId, messageId);
+        var attachmentsTask = _imapService.LoadImageAttachmentsAsync(folderId, messageId);
+
+        var html = await bodyTask;
+        List<ImapSyncService.AttachmentContent> attachments = [];
+        try
+        {
+            attachments = await attachmentsTask;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Attachment load failed: {ex}");
+        }
+
         if (html != null)
         {
             await _dashboardView.DisplayMessageContentAsync(html);
@@ -524,6 +540,16 @@ public sealed partial class MainWindow : Window
         else
         {
             await _dashboardView.ClearMessageContentAsync();
+        }
+
+        if (attachments.Count > 0)
+        {
+            var attachmentsHtml = BuildAttachmentsHtml(attachments);
+            await _dashboardView.DisplayAttachmentsAsync(attachmentsHtml);
+        }
+        else
+        {
+            await _dashboardView.ClearAttachmentsAsync();
         }
     }
 
@@ -745,6 +771,49 @@ public sealed partial class MainWindow : Window
         sb.AppendLine(" wrote:");
         sb.AppendLine();
         sb.AppendLine(message.Preview);
+        return sb.ToString();
+    }
+
+    private static string BuildAttachmentsHtml(IEnumerable<ImapSyncService.AttachmentContent> attachments)
+    {
+        var sb = new StringBuilder();
+        sb.Append("""
+<html><head><style>
+body{font-family:'Segoe UI',sans-serif;background:#f7f7f7;color:#1a1a1a;margin:0;padding:12px;}
+.item{margin-bottom:18px;padding:12px;background:#fff;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,0.08);}
+.meta{font-size:12px;color:#555;margin-bottom:8px;word-break:break-all;}
+img{max-width:100%;height:auto;border-radius:6px;display:block;}
+</style></head><body>
+""");
+
+        foreach (var att in attachments)
+        {
+            var fileName = WebUtility.HtmlEncode(att.FileName ?? "attachment");
+            var disposition = WebUtility.HtmlEncode(att.Disposition ?? string.Empty);
+            var size = att.SizeBytes > 0 ? $"{att.SizeBytes:N0} bytes" : string.Empty;
+            var metaParts = new[]
+            {
+                fileName,
+                att.ContentType,
+                string.IsNullOrWhiteSpace(disposition) ? null : $"Disposition: {disposition}",
+                size
+            }.Where(p => !string.IsNullOrWhiteSpace(p));
+
+            sb.Append("<div class=\"item\">");
+            sb.Append("<div class=\"meta\">");
+            sb.Append(string.Join(" · ", metaParts));
+            sb.Append("</div>");
+            sb.Append("<img src=\"data:");
+            sb.Append(att.ContentType);
+            sb.Append(";base64,");
+            sb.Append(att.Base64Data);
+            sb.Append("\" alt=\"");
+            sb.Append(fileName);
+            sb.Append("\" />");
+            sb.Append("</div>");
+        }
+
+        sb.Append("</body></html>");
         return sb.ToString();
     }
 }

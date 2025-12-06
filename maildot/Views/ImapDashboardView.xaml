@@ -165,10 +165,43 @@
             </Border>
         </Grid>
 
-        <Grid Grid.Column="2" Padding="24">
-            <controls:WebView2 x:Name="MessageWebView"
-                               HorizontalAlignment="Stretch"
-                               VerticalAlignment="Stretch" />
+        <Grid Grid.Column="2" Padding="24" RowSpacing="12">
+            <Grid.RowDefinitions>
+                <RowDefinition x:Name="MessageHeaderRow" Height="Auto" />
+                <RowDefinition x:Name="MessageContentRow" Height="*" />
+                <RowDefinition x:Name="AttachmentsHeaderRow" Height="0" />
+                <RowDefinition x:Name="AttachmentsContentRow" Height="0" />
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0"
+                       Text="Message"
+                       FontSize="18"
+                       FontWeight="SemiBold"
+                       Margin="0,0,0,4" />
+            <Border Grid.Row="1" Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="8" Padding="0">
+                <controls:WebView2 x:Name="MessageWebView"
+                                   HorizontalAlignment="Stretch"
+                                   VerticalAlignment="Stretch" />
+            </Border>
+
+            <TextBlock x:Name="AttachmentsHeader"
+                       Grid.Row="2"
+                       Text="Attachments"
+                       FontSize="18"
+                       FontWeight="SemiBold"
+                       Margin="0,8,0,4"
+                       Visibility="Collapsed" />
+            <Border x:Name="AttachmentsContainer"
+                    Grid.Row="3"
+                    Background="{ThemeResource LayerFillColorDefaultBrush}"
+                    CornerRadius="8"
+                    Padding="0"
+                    MinHeight="200"
+                    Visibility="Collapsed">
+                <controls:WebView2 x:Name="AttachmentsWebView"
+                                   HorizontalAlignment="Stretch"
+                                   VerticalAlignment="Stretch" />
+            </Border>
         </Grid>
     </Grid>
 </UserControl>

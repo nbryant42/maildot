@@ -12,6 +12,7 @@ public sealed partial class ImapDashboardView : UserControl
 {
     private ScrollViewer? _messagesScrollViewer;
     private bool _hasRequestedMore;
+    private bool _attachmentsInitialized;
 
     public ImapDashboardView()
     {
@@ -168,6 +169,26 @@ public sealed partial class ImapDashboardView : UserControl
         MessageWebView.NavigateToString("<html><body></body></html>");
     }
 
+    public async Task DisplayAttachmentsAsync(string html)
+    {
+        await EnsureAttachmentsWebViewAsync();
+        AttachmentsHeader.Visibility = Visibility.Visible;
+        AttachmentsContainer.Visibility = Visibility.Visible;
+        AttachmentsHeaderRow.Height = new GridLength(1, GridUnitType.Auto);
+        AttachmentsContentRow.Height = new GridLength(1, GridUnitType.Star);
+        AttachmentsWebView.NavigateToString(string.IsNullOrWhiteSpace(html) ? "<html><body></body></html>" : html);
+    }
+
+    public async Task ClearAttachmentsAsync()
+    {
+        await EnsureAttachmentsWebViewAsync();
+        AttachmentsWebView.NavigateToString("<html><body></body></html>");
+        AttachmentsHeader.Visibility = Visibility.Collapsed;
+        AttachmentsContainer.Visibility = Visibility.Collapsed;
+        AttachmentsHeaderRow.Height = new GridLength(0);
+        AttachmentsContentRow.Height = new GridLength(0);
+    }
+
     private async Task EnsureWebViewAsync()
     {
         if (MessageWebView.CoreWebView2 != null)
@@ -177,6 +198,22 @@ public sealed partial class ImapDashboardView : UserControl
 
         await MessageWebView.EnsureCoreWebView2Async();
         var settings = MessageWebView.CoreWebView2!.Settings;
+        settings.IsScriptEnabled = false;
+        settings.AreDefaultScriptDialogsEnabled = false;
+        settings.AreDefaultContextMenusEnabled = false;
+        settings.AreDevToolsEnabled = false;
+    }
+
+    private async Task EnsureAttachmentsWebViewAsync()
+    {
+        if (_attachmentsInitialized && AttachmentsWebView.CoreWebView2 != null)
+        {
+            return;
+        }
+
+        await AttachmentsWebView.EnsureCoreWebView2Async();
+        _attachmentsInitialized = true;
+        var settings = AttachmentsWebView.CoreWebView2!.Settings;
         settings.IsScriptEnabled = false;
         settings.AreDefaultScriptDialogsEnabled = false;
         settings.AreDefaultContextMenusEnabled = false;

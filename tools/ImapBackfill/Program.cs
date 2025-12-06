@@ -11,7 +11,7 @@ using Npgsql;
 
 namespace ImapBackfill;
 
-internal sealed record BackfillOptions(bool ProcessBodies, bool ProcessAttachments);
+internal sealed record BackfillOptions(bool ProcessBodies, bool ProcessAttachments, long? TargetUid);
 
 internal static class Program
 {
@@ -65,6 +65,21 @@ internal static class Program
     {
         var processBodies = args.Any(a => string.Equals(a, "--bodies", StringComparison.OrdinalIgnoreCase));
         var processAttachments = args.Any(a => string.Equals(a, "--attachments", StringComparison.OrdinalIgnoreCase));
+        long? targetUid = null;
+
+        for (int i = 0; i < args.Length; i++)
+        {
+            var arg = args[i];
+            if (string.Equals(arg, "--id", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(arg, "--uid", StringComparison.OrdinalIgnoreCase))
+            {
+                var next = i + 1 < args.Length ? args[i + 1] : null;
+                if (long.TryParse(next, out var parsed) && parsed > 0)
+                {
+                    targetUid = parsed;
+                }
+            }
+        }
 
         if (!processBodies && !processAttachments)
         {
@@ -72,7 +87,7 @@ internal static class Program
             processAttachments = true;
         }
 
-        return new BackfillOptions(processBodies, processAttachments);
+        return new BackfillOptions(processBodies, processAttachments, targetUid);
     }
 
     private static async Task ProcessAccountAsync(MailDbContext db, AccountSettings account, string password, BackfillOptions options)
@@ -137,6 +152,7 @@ internal static class Program
         var targets = messages
             .Where(m => NeedsRefresh(m, options))
             .Select(m => new { m.ImapUid, m.Id })
+            .Where(m => !options.TargetUid.HasValue || m.ImapUid == options.TargetUid.Value)
             .OrderByDescending(m => m.ImapUid)
             .ToList();
 
@@ -392,7 +408,7 @@ internal static class Program
         CancellationToken token)
     {
         var parts = message.BodyParts
-            .Where(p => p is MimePart mp && mp.IsAttachment || p is MessagePart)
+            .Where(IsAttachmentCandidate)
             .ToList();
 
         if (parts.Count == 0)
@@ -511,6 +527,30 @@ internal static class Program
         }
 
         return "attachment";
+    }
+
+    private static bool IsAttachmentCandidate(MimeEntity entity)
+    {
+        if (entity is MimePart part)
+        {
+            if (part.ContentType?.IsMimeType("text", "plain") == true ||
+                part.ContentType?.IsMimeType("text", "html") == true)
+            {
+                return false;
+            }
+
+            if (part.ContentDisposition != null || part.IsAttachment)
+            {
+                return true;
+            }
+        }
+
+        if (entity is MessagePart)
+        {
+            return true;
+        }
+
+        return false;
     }
 
     private static bool IsUniqueViolation(DbUpdateException ex) =>

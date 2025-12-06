@@ -1053,6 +1053,7 @@ public sealed class ImapSyncService : IAsyncDisposable
 
     private record EmbeddingInsert(int MessageId, int ChunkIndex, float[] Vector, string ModelVersion, DateTimeOffset CreatedAt);
     private record AttachmentInsert(string FileName, string ContentType, string? Disposition, long SizeBytes, string Hash, uint LargeObjectId);
+    public record AttachmentContent(string FileName, string ContentType, string? Disposition, string Base64Data, long SizeBytes);
     private record SearchResult(
         int MessageId,
         long ImapUid,
@@ -1127,7 +1128,7 @@ public sealed class ImapSyncService : IAsyncDisposable
     private async Task<List<AttachmentInsert>> DownloadAttachmentsAsync(NpgsqlConnection conn, MimeMessage message, CancellationToken token)
     {
         var parts = message.BodyParts
-            .Where(p => p is MimePart mp && mp.IsAttachment || p is MessagePart)
+            .Where(IsAttachmentCandidate)
             .ToList();
 
         if (parts.Count == 0)
@@ -1241,6 +1242,30 @@ public sealed class ImapSyncService : IAsyncDisposable
         }
 
         return "attachment";
+    }
+
+    private static bool IsAttachmentCandidate(MimeEntity entity)
+    {
+        if (entity is MimePart part)
+        {
+            if (part.ContentType?.IsMimeType("text", "plain") == true ||
+                part.ContentType?.IsMimeType("text", "html") == true)
+            {
+                return false;
+            }
+
+            if (part.ContentDisposition != null || part.IsAttachment)
+            {
+                return true;
+            }
+        }
+
+        if (entity is MessagePart)
+        {
+            return true;
+        }
+
+        return false;
     }
 
     private List<IMailFolder> GetFoldersByPriority() =>
@@ -1736,6 +1761,103 @@ public sealed class ImapSyncService : IAsyncDisposable
 
     public Task<string?> LoadMessageBodyAsync(string folderId, string messageId) =>
         LoadMessageBodyInternalAsync(folderId, messageId, true);
+
+    public async Task<List<AttachmentContent>> LoadImageAttachmentsAsync(string folderId, string messageId)
+    {
+        var token = _cts.Token;
+        if (_settings == null)
+        {
+            return [];
+        }
+
+        if (!long.TryParse(messageId, out var uid))
+        {
+            return [];
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return [];
+        }
+
+        await using (db)
+        {
+            var folderEntity = await db.ImapFolders
+                .AsNoTracking()
+                .Where(f => f.AccountId == _settings.Id && f.FullName == folderId)
+                .FirstOrDefaultAsync(token);
+
+            if (folderEntity == null)
+            {
+                return [];
+            }
+
+            var messageEntity = await db.ImapMessages
+                .AsNoTracking()
+                .Where(m => m.FolderId == folderEntity.Id && m.ImapUid == uid)
+                .FirstOrDefaultAsync(token);
+
+            if (messageEntity == null)
+            {
+                return [];
+            }
+
+            var attachments = await db.MessageAttachments
+                .AsNoTracking()
+                .Where(a => a.MessageId == messageEntity.Id)
+                .ToListAsync(token);
+
+            attachments = attachments
+                .Where(a => !string.IsNullOrWhiteSpace(a.ContentType) &&
+                            a.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (attachments.Count == 0)
+            {
+                return [];
+            }
+
+            var conn = (NpgsqlConnection)db.Database.GetDbConnection();
+            if (conn.State != System.Data.ConnectionState.Open)
+            {
+                await conn.OpenAsync(token);
+            }
+
+            await using var tx = await conn.BeginTransactionAsync(token);
+            var manager = new NpgsqlLargeObjectManager(conn);
+            var results = new List<AttachmentContent>(attachments.Count);
+
+            foreach (var attachment in attachments)
+            {
+                if (attachment.LargeObjectId == 0)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    await using var stream = await manager.OpenReadAsync(attachment.LargeObjectId, token);
+                    using var ms = new MemoryStream();
+                    await stream.CopyToAsync(ms, token);
+                    var base64 = Convert.ToBase64String(ms.ToArray());
+                    results.Add(new AttachmentContent(
+                        FileName: attachment.FileName,
+                        ContentType: attachment.ContentType,
+                        Disposition: attachment.Disposition,
+                        Base64Data: base64,
+                        SizeBytes: attachment.SizeBytes));
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Failed to read attachment {attachment.FileName} ({attachment.LargeObjectId}): {ex}");
+                }
+            }
+
+            await tx.CommitAsync(token);
+            return results;
+        }
+    }
 
     private async Task<string?> LoadMessageBodyInternalAsync(string folderId, string messageId, bool allowReconnect)
     {
