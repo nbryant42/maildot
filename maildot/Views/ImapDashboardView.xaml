@@ -30,14 +30,13 @@
                         Margin="0,0,0,12">
                 <Grid ColumnSpacing="8" VerticalAlignment="Center">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>    <!-- label -->
-                        <ColumnDefinition Width="*"/>       <!-- spacer -->
+                        <ColumnDefinition Width="*"/>       <!-- label -->
                         <ColumnDefinition Width="Auto"/>    <!-- X button -->
                     </Grid.ColumnDefinitions>
                     
                     <TextBlock Grid.Column="0" Text="Search Results" FontSize="18" FontWeight="SemiBold"
                                VerticalAlignment="Center"/>
-                    <Button Grid.Column="2"
+                    <Button Grid.Column="1"
                             Click="OnClearSearchClicked"
                             VerticalAlignment="Center"
                             Background="Transparent"
@@ -165,7 +164,7 @@
             </Border>
         </Grid>
 
-        <Grid Grid.Column="2" Padding="24" RowSpacing="12">
+        <Grid Grid.Column="2" Padding="24">
             <Grid.RowDefinitions>
                 <RowDefinition x:Name="MessageHeaderRow" Height="Auto" />
                 <RowDefinition x:Name="MessageContentRow" Height="*" />
@@ -173,11 +172,37 @@
                 <RowDefinition x:Name="AttachmentsContentRow" Height="0" />
             </Grid.RowDefinitions>
 
-            <TextBlock Grid.Row="0"
-                       Text="Message"
-                       FontSize="18"
-                       FontWeight="SemiBold"
-                       Margin="0,0,0,4" />
+            <Grid Grid.Row="0" Margin="0,0,0,4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>       <!-- headers -->
+                    <ColumnDefinition Width="Auto"/>    <!-- date -->
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" Orientation="Vertical" Spacing="2">
+                    <TextBlock Text="{Binding SelectedMessage.Subject}"
+                               FontSize="18"
+                               FontWeight="SemiBold"
+                               TextWrapping="WrapWholeWords" />
+                    <TextBlock Text="{Binding SelectedMessage.ToDisplay}"
+                               FontSize="16"
+                               TextWrapping="Wrap"
+                               Visibility="{Binding SelectedMessage.HasTo, Converter={StaticResource BoolToVisibilityConverter}}" />
+                    <TextBlock Text="{Binding SelectedMessage.FromDisplay}"
+                               FontSize="16"
+                               TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding SelectedMessage.CcDisplay}"
+                               FontSize="16"
+                               TextWrapping="Wrap"
+                               Visibility="{Binding SelectedMessage.HasCc, Converter={StaticResource BoolToVisibilityConverter}}" />
+                    <TextBlock Text="{Binding SelectedMessage.BccDisplay}"
+                               FontSize="16"
+                               TextWrapping="Wrap"
+                               Visibility="{Binding SelectedMessage.HasBcc, Converter={StaticResource BoolToVisibilityConverter}}" />
+                </StackPanel>
+                <TextBlock Grid.Column="1"
+                           Text="{Binding SelectedMessage.ReceivedDisplay}"
+                           FontSize="16"
+                           HorizontalAlignment="Right" />
+            </Grid>
             <Border Grid.Row="1" Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="8" Padding="0">
                 <controls:WebView2 x:Name="MessageWebView"
                                    HorizontalAlignment="Stretch"

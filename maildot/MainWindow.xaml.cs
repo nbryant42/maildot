@@ -522,7 +522,7 @@ public sealed partial class MainWindow : Window
         var bodyTask = _imapService.LoadMessageBodyAsync(folderId, messageId);
         var attachmentsTask = _imapService.LoadImageAttachmentsAsync(folderId, messageId);
 
-        var html = await bodyTask;
+        var body = await bodyTask;
         List<ImapSyncService.AttachmentContent> attachments = [];
         try
         {
@@ -533,9 +533,14 @@ public sealed partial class MainWindow : Window
             System.Diagnostics.Debug.WriteLine($"Attachment load failed: {ex}");
         }
 
-        if (html != null)
+        if (body?.Headers != null)
         {
-            await _dashboardView.DisplayMessageContentAsync(html);
+            ApplyMessageHeaders(messageId, body.Headers);
+        }
+
+        if (body != null)
+        {
+            await _dashboardView.DisplayMessageContentAsync(body.Html);
         }
         else
         {
@@ -551,6 +556,29 @@ public sealed partial class MainWindow : Window
         {
             await _dashboardView.ClearAttachmentsAsync();
         }
+    }
+
+    private void ApplyMessageHeaders(string messageId, ImapSyncService.MessageHeaderInfo headers)
+    {
+        if (_mailboxViewModel?.SelectedMessage is not EmailMessageViewModel selected ||
+            !string.Equals(selected.Id, messageId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(headers.From))
+        {
+            selected.Sender = headers.From;
+        }
+
+        if (!string.IsNullOrWhiteSpace(headers.FromAddress))
+        {
+            selected.SenderAddress = headers.FromAddress;
+        }
+
+        selected.To = headers.To;
+        selected.Cc = headers.Cc;
+        selected.Bcc = headers.Bcc;
     }
 
     private async void OnComposeRequested(object? sender, EventArgs e)

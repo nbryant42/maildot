@@ -671,8 +671,74 @@ public sealed class ImapSyncService : IAsyncDisposable
             SenderInitials = SenderInitialsHelper.From(result.FromName, result.FromAddress),
             SenderColor = senderColor,
             Preview = preview ?? string.Empty,
-            Received = result.ReceivedUtc.LocalDateTime
+            Received = result.ReceivedUtc.LocalDateTime,
+            To = string.Empty,
+            Cc = null,
+            Bcc = null
         };
+    }
+
+    private static string FormatMailbox(MailboxAddress? mailbox)
+    {
+        if (mailbox == null)
+        {
+            return string.Empty;
+        }
+
+        var name = TextCleaner.CleanNullable(mailbox.Name) ?? string.Empty;
+        var address = TextCleaner.CleanNullable(mailbox.Address) ?? string.Empty;
+
+        if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(address))
+        {
+            return $"{name} <{address}>";
+        }
+
+        return string.IsNullOrWhiteSpace(address) ? name : address;
+    }
+
+    private static IEnumerable<MailboxAddress> FlattenAddresses(InternetAddressList? addresses)
+    {
+        if (addresses == null)
+        {
+            yield break;
+        }
+
+        foreach (var address in addresses)
+        {
+            if (address is MailboxAddress mailbox)
+            {
+                yield return mailbox;
+            }
+            else if (address is GroupAddress group && group.Members != null)
+            {
+                foreach (var member in group.Members.OfType<MailboxAddress>())
+                {
+                    yield return member;
+                }
+            }
+        }
+    }
+
+    private static string FormatAddressList(InternetAddressList? addresses)
+    {
+        var formatted = FlattenAddresses(addresses)
+            .Select(FormatMailbox)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .ToList();
+
+        return formatted.Count == 0 ? string.Empty : string.Join(", ", formatted);
+    }
+
+    private static MessageHeaderInfo BuildHeaderInfo(MimeMessage message)
+    {
+        var sender = message.From.OfType<MailboxAddress>().FirstOrDefault();
+
+        return new MessageHeaderInfo(
+            From: FormatMailbox(sender),
+            FromAddress: TextCleaner.CleanNullable(sender?.Address) ?? string.Empty,
+            To: FormatAddressList(message.To),
+            Cc: FormatAddressList(message.Cc),
+            Bcc: FormatAddressList(message.Bcc));
     }
 
     private async Task<QwenEmbedder?> EnsureSearchEmbedderAsync()
@@ -839,6 +905,10 @@ public sealed class ImapSyncService : IAsyncDisposable
                     B = colorComponents.B
                 };
 
+                var toList = FormatAddressList(summary.Envelope?.To);
+                var ccList = FormatAddressList(summary.Envelope?.Cc);
+                var bccList = FormatAddressList(summary.Envelope?.Bcc);
+
                 return new EmailMessageViewModel
                 {
                     Id = summary.UniqueId.Id.ToString(),
@@ -849,7 +919,10 @@ public sealed class ImapSyncService : IAsyncDisposable
                     SenderInitials = SenderInitialsHelper.From(senderName, senderAddress),
                     SenderColor = messageColor,
                     Preview = summary.Envelope?.Subject ?? string.Empty,
-                    Received = summary.InternalDate?.DateTime ?? DateTime.UtcNow
+                    Received = summary.InternalDate?.DateTime ?? DateTime.UtcNow,
+                    To = toList,
+                    Cc = string.IsNullOrWhiteSpace(ccList) ? null : ccList,
+                    Bcc = string.IsNullOrWhiteSpace(bccList) ? null : bccList
                 };
             })
             .ToList();
@@ -1054,6 +1127,8 @@ public sealed class ImapSyncService : IAsyncDisposable
     private record EmbeddingInsert(int MessageId, int ChunkIndex, float[] Vector, string ModelVersion, DateTimeOffset CreatedAt);
     private record AttachmentInsert(string FileName, string ContentType, string? Disposition, long SizeBytes, string Hash, uint LargeObjectId);
     public record AttachmentContent(string FileName, string ContentType, string? Disposition, string Base64Data, long SizeBytes);
+    public record MessageHeaderInfo(string From, string FromAddress, string To, string? Cc, string? Bcc);
+    public record MessageBodyResult(string Html, MessageHeaderInfo Headers);
     private record SearchResult(
         int MessageId,
         long ImapUid,
@@ -1759,7 +1834,7 @@ public sealed class ImapSyncService : IAsyncDisposable
         _cts.Dispose();
     }
 
-    public Task<string?> LoadMessageBodyAsync(string folderId, string messageId) =>
+    public Task<MessageBodyResult?> LoadMessageBodyAsync(string folderId, string messageId) =>
         LoadMessageBodyInternalAsync(folderId, messageId, true);
 
     public async Task<List<AttachmentContent>> LoadImageAttachmentsAsync(string folderId, string messageId)
@@ -1859,7 +1934,7 @@ public sealed class ImapSyncService : IAsyncDisposable
         }
     }
 
-    private async Task<string?> LoadMessageBodyInternalAsync(string folderId, string messageId, bool allowReconnect)
+    private async Task<MessageBodyResult?> LoadMessageBodyInternalAsync(string folderId, string messageId, bool allowReconnect)
     {
         if (string.IsNullOrEmpty(folderId) || string.IsNullOrEmpty(messageId))
         {
@@ -1899,6 +1974,7 @@ public sealed class ImapSyncService : IAsyncDisposable
 
                 var html = message.HtmlBody;
                 var plain = message.TextBody;
+                var headers = BuildHeaderInfo(message);
 
                 string htmlToRender;
                 if (!string.IsNullOrWhiteSpace(html))
@@ -1914,7 +1990,7 @@ public sealed class ImapSyncService : IAsyncDisposable
                     htmlToRender = "<html><body></body></html>";
                 }
 
-                return htmlToRender;
+                return new MessageBodyResult(htmlToRender, headers);
             }
             catch (Exception ex)
             {

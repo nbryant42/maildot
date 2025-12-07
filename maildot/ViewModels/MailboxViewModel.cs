@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using Microsoft.UI.Xaml;
 using Windows.UI;
 
@@ -327,22 +328,133 @@ public sealed class MailFolderViewModel : INotifyPropertyChanged
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 }
 
-public sealed class EmailMessageViewModel
+public sealed class EmailMessageViewModel : INotifyPropertyChanged
 {
-    public string Id { get; init; } = Guid.NewGuid().ToString();
-    public string FolderId { get; init; } = string.Empty;
-    public string Subject { get; init; } = "(No subject)";
-    public string Sender { get; init; } = "(Unknown sender)";
-    public string SenderAddress { get; init; } = string.Empty;
-    public string SenderInitials { get; init; } = string.Empty;
-    public Color SenderColor { get; init; }
-    public string Preview { get; init; } = string.Empty;
-    public DateTime Received { get; init; }
+    private string _id = Guid.NewGuid().ToString();
+    private string _folderId = string.Empty;
+    private string _subject = "(No subject)";
+    private string _sender = "(Unknown sender)";
+    private string _senderAddress = string.Empty;
+    private string _senderInitials = string.Empty;
+    private Color _senderColor;
+    private string _preview = string.Empty;
+    private DateTime _received;
+    private string _to = string.Empty;
+    private string? _cc;
+    private string? _bcc;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    public string Id
+    {
+        get => _id;
+        set => SetProperty(ref _id, value ?? string.Empty);
+    }
+
+    public string FolderId
+    {
+        get => _folderId;
+        set => SetProperty(ref _folderId, value ?? string.Empty);
+    }
+
+    public string Subject
+    {
+        get => _subject;
+        set => SetProperty(ref _subject, value ?? string.Empty);
+    }
+
+    public string Sender
+    {
+        get => _sender;
+        set => SetProperty(ref _sender, value ?? string.Empty, nameof(Sender), nameof(FromDisplay));
+    }
+
+    public string SenderAddress
+    {
+        get => _senderAddress;
+        set => SetProperty(ref _senderAddress, value ?? string.Empty, nameof(SenderAddress), nameof(FromDisplay));
+    }
+
+    public string SenderInitials
+    {
+        get => _senderInitials;
+        set => SetProperty(ref _senderInitials, value ?? string.Empty);
+    }
+
+    public Color SenderColor
+    {
+        get => _senderColor;
+        set => SetProperty(ref _senderColor, value);
+    }
+
+    public string Preview
+    {
+        get => _preview;
+        set => SetProperty(ref _preview, value ?? string.Empty);
+    }
+
+    public DateTime Received
+    {
+        get => _received;
+        set => SetProperty(ref _received, value, nameof(Received), nameof(ReceivedDisplay));
+    }
+
+    public string To
+    {
+        get => _to;
+        set => SetProperty(ref _to, value?.Trim() ?? string.Empty, nameof(To), nameof(ToDisplay), nameof(HasTo));
+    }
+
+    public string? Cc
+    {
+        get => _cc;
+        set => SetProperty(ref _cc, string.IsNullOrWhiteSpace(value) ? null : value.Trim(), nameof(Cc), nameof(CcDisplay), nameof(HasCc));
+    }
+
+    public string? Bcc
+    {
+        get => _bcc;
+        set => SetProperty(ref _bcc, string.IsNullOrWhiteSpace(value) ? null : value.Trim(), nameof(Bcc), nameof(BccDisplay), nameof(HasBcc));
+    }
+
     public string MessageId => Id;
 
-    public string ReceivedDisplay => Received == default
+    public string ReceivedDisplay => _received == default
         ? string.Empty
-        : Received.ToString("g");
+        : _received.ToString("g");
+
+    public string FromDisplay => string.IsNullOrWhiteSpace(Sender) ? string.Empty : $"From: {Sender}";
+    public string ToDisplay => string.IsNullOrWhiteSpace(To) ? string.Empty : $"To: {To}";
+    public string CcDisplay => string.IsNullOrWhiteSpace(Cc) ? string.Empty : $"Cc: {Cc}";
+    public string BccDisplay => string.IsNullOrWhiteSpace(Bcc) ? string.Empty : $"Bcc: {Bcc}";
+
+    public bool HasTo => !string.IsNullOrWhiteSpace(To);
+    public bool HasCc => !string.IsNullOrWhiteSpace(Cc);
+    public bool HasBcc => !string.IsNullOrWhiteSpace(Bcc);
+
+    private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+
+    private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string? propertyName = null, params string[] dependentProperties)
+    {
+        if (EqualityComparer<T>.Default.Equals(field, value))
+        {
+            return false;
+        }
+
+        field = value;
+        OnPropertyChanged(propertyName);
+
+        if (dependentProperties != null)
+        {
+            foreach (var name in dependentProperties)
+            {
+                OnPropertyChanged(name);
+            }
+        }
+
+        return true;
+    }
 }
 
 public sealed class SearchNavItemViewModel
