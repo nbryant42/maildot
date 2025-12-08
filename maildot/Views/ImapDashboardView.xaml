@@ -203,11 +203,10 @@
                            FontSize="16"
                            HorizontalAlignment="Right" />
             </Grid>
-            <Border Grid.Row="1" Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="8" Padding="0">
-                <controls:WebView2 x:Name="MessageWebView"
-                                   HorizontalAlignment="Stretch"
-                                   VerticalAlignment="Stretch" />
-            </Border>
+
+            <controls:WebView2 x:Name="MessageWebView" Grid.Row="1"
+                               HorizontalAlignment="Stretch"
+                               VerticalAlignment="Stretch" />
 
             <TextBlock x:Name="AttachmentsHeader"
                        Grid.Row="2"
@@ -216,17 +215,12 @@
                        FontWeight="SemiBold"
                        Margin="0,8,0,4"
                        Visibility="Collapsed" />
-            <Border x:Name="AttachmentsContainer"
-                    Grid.Row="3"
-                    Background="{ThemeResource LayerFillColorDefaultBrush}"
-                    CornerRadius="8"
-                    Padding="0"
-                    MinHeight="200"
-                    Visibility="Collapsed">
-                <controls:WebView2 x:Name="AttachmentsWebView"
-                                   HorizontalAlignment="Stretch"
-                                   VerticalAlignment="Stretch" />
-            </Border>
+            
+            <controls:WebView2 x:Name="AttachmentsWebView"
+                                Grid.Row="3"
+                                HorizontalAlignment="Stretch"
+                                VerticalAlignment="Stretch"
+                                Visibility="Collapsed"/>
         </Grid>
     </Grid>
 </UserControl>

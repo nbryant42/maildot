@@ -173,7 +173,7 @@ public sealed partial class ImapDashboardView : UserControl
     {
         await EnsureAttachmentsWebViewAsync();
         AttachmentsHeader.Visibility = Visibility.Visible;
-        AttachmentsContainer.Visibility = Visibility.Visible;
+        AttachmentsWebView.Visibility = Visibility.Visible;
         AttachmentsHeaderRow.Height = new GridLength(1, GridUnitType.Auto);
         AttachmentsContentRow.Height = new GridLength(1, GridUnitType.Star);
         AttachmentsWebView.NavigateToString(string.IsNullOrWhiteSpace(html) ? "<html><body></body></html>" : html);
@@ -184,7 +184,7 @@ public sealed partial class ImapDashboardView : UserControl
         await EnsureAttachmentsWebViewAsync();
         AttachmentsWebView.NavigateToString("<html><body></body></html>");
         AttachmentsHeader.Visibility = Visibility.Collapsed;
-        AttachmentsContainer.Visibility = Visibility.Collapsed;
+        AttachmentsWebView.Visibility = Visibility.Collapsed;
         AttachmentsHeaderRow.Height = new GridLength(0);
         AttachmentsContentRow.Height = new GridLength(0);
     }
