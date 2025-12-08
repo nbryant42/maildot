@@ -24,12 +24,12 @@ using Float16 = Microsoft.ML.OnnxRuntime.Float16;
 
 namespace maildot.Services;
 
-public sealed class ImapSyncService : IAsyncDisposable
+public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue dispatcher) : IAsyncDisposable
 {
     private const int PageSize = 40;
 
-    private readonly MailboxViewModel _viewModel;
-    private readonly DispatcherQueue _dispatcher;
+    private readonly MailboxViewModel _viewModel = viewModel;
+    private readonly DispatcherQueue _dispatcher = dispatcher;
     private readonly CancellationTokenSource _cts = new();
     private readonly SemaphoreSlim _semaphore = new(1, 1);
     private readonly Dictionary<string, IMailFolder> _folderCache = new(StringComparer.OrdinalIgnoreCase);
@@ -49,18 +49,10 @@ public sealed class ImapSyncService : IAsyncDisposable
     private static readonly TimeSpan EmbeddingActiveDelay = TimeSpan.FromSeconds(5);
     private const int EmbeddingDim = 1024;
 
-    public ImapSyncService(MailboxViewModel viewModel, DispatcherQueue dispatcher)
-    {
-        _viewModel = viewModel;
-        _dispatcher = dispatcher;
-    }
-
     public async Task StartAsync(AccountSettings settings, string password)
     {
         _settings = settings;
         _password = password;
-
-        _ = EnsureSearchEmbedderAsync();
 
         if (!await ConnectAsync("Connecting to IMAP…"))
         {
