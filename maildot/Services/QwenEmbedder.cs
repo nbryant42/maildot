@@ -76,14 +76,10 @@ public partial class QwenEmbedder : IDisposable
         }
 #endif
 
-        var tok = new Tokenizer(vocabPath: await HuggingFace.GetFileFromHub(ModelId, tokFile, hfCacheDir));
+        var tok = new Tokenizer(vocabPath: await HuggingFace.GetFileFromHub(ModelId, tokFile, hfCacheDir, false));
         var onnxDir = Path.Combine(hfCacheDir, ModelId, "onnx");
         Directory.CreateDirectory(onnxDir);
-        var so = new SessionOptions
-        {
-            OptimizedModelFilePath = Path.Combine(onnxDir, "model_fp16.optimized.ort"),
-            GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
-        };
+        var so = new SessionOptions();
 
         // Disabled; none of the auto-downloadable providers are working for me as of WinAppSDK 2.0.0-experimental3.
         // NvTensorRTRTXExecutionProvider, if appended here, causes a StackOverflowException on `new InferenceSession`.
@@ -107,8 +103,8 @@ public partial class QwenEmbedder : IDisposable
         so.AppendExecutionProvider_CPU();
         so.SetEpSelectionPolicy(ExecutionProviderDevicePolicy.MAX_PERFORMANCE);
 
-        await HuggingFace.GetFileFromHub(ModelId, "onnx/model_fp16.onnx_data", hfCacheDir);
-        var path = await HuggingFace.GetFileFromHub(ModelId, "onnx/model_fp16.onnx", hfCacheDir);
+        await HuggingFace.GetFileFromHub(ModelId, "onnx/model_fp16.onnx_data", hfCacheDir, false);
+        var path = await HuggingFace.GetFileFromHub(ModelId, "onnx/model_fp16.onnx", hfCacheDir, false);
         var sess = new InferenceSession(path, so);
 
         // TODO <|endoftext|> seems to encode to two tokens, this may be incorrect.

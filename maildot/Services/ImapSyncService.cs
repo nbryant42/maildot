@@ -1046,8 +1046,6 @@ public sealed class ImapSyncService : IAsyncDisposable
 
     private async Task BackgroundEmbeddingLoopAsync(CancellationToken token)
     {
-        QwenEmbedder? embedder = null;
-
         try
         {
             while (!token.IsCancellationRequested)
@@ -1082,7 +1080,15 @@ public sealed class ImapSyncService : IAsyncDisposable
                     continue;
                 }
 
-                embedder ??= await QwenEmbedder.Build(QwenEmbedder.ModelId);
+                var embedder = await EnsureSearchEmbedderAsync();
+
+                if (embedder == null)
+                {
+                    await ReportStatusAsync("Embedding model is unavailable.", false);
+                    await Task.Delay(EmbeddingIdleDelay, token);
+                    continue;
+                }
+
                 var embeddings = embedder.EmbedBatch(texts.Select(t => t.Text));
 
                 if (embeddings.Length == 0)
@@ -1117,10 +1123,6 @@ public sealed class ImapSyncService : IAsyncDisposable
         catch (Exception ex)
         {
             Debug.WriteLine($"Embedding loop error: {ex}");
-        }
-        finally
-        {
-            embedder?.Dispose();
         }
     }
 
