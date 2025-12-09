@@ -54,14 +54,27 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         _settings = settings;
         _password = password;
 
-        if (!await ConnectAsync("Connecting to IMAP…"))
+        if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), _cts.Token))
         {
+            Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
             return;
+        }
+
+        try
+        {
+            if (!await ConnectAsync("Connecting to IMAP…"))
+            {
+                return;
+            }
+        }
+        finally
+        {
+            _semaphore.Release();
         }
 
         if (_viewModel.SelectedFolder is { } initialFolder)
         {
-            await LoadFolderAsync(initialFolder.Id);
+            await LoadFolderAsync(initialFolder.Id); //reacquires semaphore
         }
     }
 
@@ -77,9 +90,16 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         IMailFolder? folder = null;
         string folderDisplay = folderId;
         Exception? failure = null;
-        var shouldRetry = false;
+        var reconnected = false;
 
-        await _semaphore.WaitAsync(_cts.Token);
+        if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), _cts.Token))
+        {
+            Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
+            await ReportStatusAsync($"Unable to load messages: semaphore timeout", false);
+            await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
+            return;
+        }
+
         try
         {
             if (_client == null)
@@ -89,6 +109,12 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
             if (!_folderCache.TryGetValue(folderId, out folder))
             {
+                if (allowReconnect && await TryReconnectAsync())
+                {
+                    reconnected = true;
+                    return;
+                }
+
                 throw new InvalidOperationException("Folder could not be found on the server.");
             }
 
@@ -135,7 +161,12 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         catch (Exception ex)
         {
             failure = ex;
-            shouldRetry = allowReconnect && IsRecoverable(ex);
+
+            // do this before releasing the semaphore
+            if (allowReconnect && IsRecoverable(ex) && await TryReconnectAsync())
+            {
+                reconnected = true;
+            }
         }
         finally
         {
@@ -153,7 +184,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             _semaphore.Release();
         }
 
-        if (shouldRetry && await TryReconnectAsync())
+        // do this after releasing the semaphore
+        if (reconnected)
         {
             await LoadFolderInternalAsync(folderId, false);
             return;
@@ -177,9 +209,27 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
         IMailFolder? folder = null;
         Exception? failure = null;
-        var shouldRetry = false;
+        var reconnected = false;
 
-        await _semaphore.WaitAsync(_cts.Token);
+        bool locked;
+
+        try
+        {
+            locked = await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), _cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        if (!locked)
+        {
+            Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
+            await ReportStatusAsync($"Unable to load earlier messages: semaphore timeout", false);
+            await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
+            return;
+        }
+
         try
         {
             if (_client == null)
@@ -189,6 +239,12 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
             if (!_folderCache.TryGetValue(folderId, out folder))
             {
+                if (allowReconnect && await TryReconnectAsync())
+                {
+                    reconnected = true;
+                    return;
+                }
+
                 throw new InvalidOperationException("Folder could not be found on the server.");
             }
 
@@ -232,7 +288,12 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         catch (Exception ex)
         {
             failure = ex;
-            shouldRetry = allowReconnect && IsRecoverable(ex);
+
+            // do this before releasing the semaphore
+            if (allowReconnect && IsRecoverable(ex) && await TryReconnectAsync())
+            {
+                reconnected = true;
+            }
         }
         finally
         {
@@ -250,7 +311,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             _semaphore.Release();
         }
 
-        if (shouldRetry && await TryReconnectAsync())
+        // do this after releasing the semaphore
+        if (reconnected)
         {
             await LoadOlderMessagesInternalAsync(folderId, false);
             return;
@@ -771,6 +833,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
     private async Task<bool> ConnectAsync(string statusMessage)
     {
+        Debug.Assert(_semaphore.CurrentCount == 0, "Semaphore should be held when calling ConnectAsync");
+
         if (_settings == null || _password == null)
         {
             return false;
@@ -783,13 +847,14 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 await ReportStatusAsync(statusMessage, true);
             }
 
+            // clear _folderCache first so that exceptions can't leave us in an inconsistent state.
+            _folderCache.Clear();
+            _folderNextEndIndex.Clear();
+
             _client?.Dispose();
             _client = new ImapClient();
             await _client.ConnectAsync(_settings.Server, _settings.Port, _settings.UseSsl, _cts.Token);
             await _client.AuthenticateAsync(_settings.Username, _password, _cts.Token);
-
-            _folderCache.Clear();
-            _folderNextEndIndex.Clear();
 
             if (!_viewModel.IsSearchActive)
             {
@@ -993,17 +1058,38 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
     private async Task BackgroundFetchLoopAsync(CancellationToken token)
     {
+        var delay = TimeSpan.Zero;
+
         while (!token.IsCancellationRequested)
         {
+            if (delay > TimeSpan.Zero)
+            {
+                await Task.Delay(delay, token);
+            }
+
             try
             {
-                if (_client == null || !_client.IsConnected)
+                if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
                 {
-                    if (!await TryReconnectAsync())
+                    Debug.WriteLine("Semaphore timeout in background fetch loop: " + Environment.StackTrace);
+                    delay = TimeSpan.FromMinutes(1);
+                    continue;
+                }
+
+                try
+                {
+                    if (_client == null || !_client.IsConnected)
                     {
-                        await Task.Delay(TimeSpan.FromMinutes(1), token);
-                        continue;
+                        if (!await TryReconnectAsync())
+                        {
+                            delay = TimeSpan.FromMinutes(1);
+                            continue;
+                        }
                     }
+                }
+                finally
+                {
+                    _semaphore.Release();
                 }
 
                 var folders = GetFoldersByPriority();
@@ -1014,10 +1100,10 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                         break;
                     }
 
-                    await FetchMissingBodiesForFolderAsync(folder, token);
+                    await FetchMissingBodiesForFolderAsync(folder, token); //reacquires semaphore repeatedly
                 }
 
-                await Task.Delay(TimeSpan.FromMinutes(1), token);
+                delay = TimeSpan.FromMinutes(1);
             }
             catch (OperationCanceledException)
             {
@@ -1030,7 +1116,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     Debug.WriteLine(ex.ToString());
                 }
 
-                await Task.Delay(TimeSpan.FromMinutes(1), token);
+                delay = TimeSpan.FromMinutes(1);
                 // next iteration of main loop will reconnect.
             }
         }
@@ -1405,7 +1491,13 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         }
 
         List<UniqueId> serverUids;
-        await _semaphore.WaitAsync(token);
+
+        if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
+        {
+            Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
+            return;
+        }
+
         try
         {
             if (_client == null)
@@ -1418,7 +1510,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 await folder.OpenAsync(FolderAccess.ReadOnly, token);
             }
 
-            serverUids = (await folder.SearchAsync(SearchQuery.All, token)).ToList();
+            serverUids = [.. (await folder.SearchAsync(SearchQuery.All, token))];
         }
         finally
         {
@@ -1473,7 +1565,12 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         MimeMessage? message = null;
         var uniqueId = new UniqueId((uint)uid);
 
-        await _semaphore.WaitAsync(token);
+        if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
+        {
+            Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
+            return;
+        }
+
         try
         {
             if (_client == null)
@@ -2053,7 +2150,28 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             IMailFolder? folder = null;
             var missingFromServer = false;
             string? missingReason = null;
-            await _semaphore.WaitAsync(_cts.Token);
+
+            bool locked;
+
+            try
+            {
+                locked = await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), _cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                await ReportStatusAsync($"Unable to load message: operation cancelled", false);
+                await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
+                return null;
+            }
+
+            if (!locked)
+            {
+                Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
+                await ReportStatusAsync($"Unable to load message: semaphore timeout", false);
+                await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
+                return null;
+            }
+
             try
             {
                 if (_client == null)
@@ -2063,6 +2181,12 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
                 if (!_folderCache.TryGetValue(folderId, out folder))
                 {
+                    if (canRetry && await TryReconnectAsync())
+                    {
+                        canRetry = false;
+                        continue;
+                    }
+
                     return null;
                 }
 
