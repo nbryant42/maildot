@@ -1928,6 +1928,117 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         }
     }
 
+    private async Task<MessageBodyResult?> LoadMessageBodyFromDatabaseAsync(string folderId, string messageId, CancellationToken token)
+    {
+        if (_settings == null || !long.TryParse(messageId, out var uid))
+        {
+            return null;
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return null;
+        }
+
+        await using (db)
+        {
+            var folderEntity = await db.ImapFolders
+                .AsNoTracking()
+                .Where(f => f.AccountId == _settings.Id && f.FullName == folderId)
+                .FirstOrDefaultAsync(token);
+
+            if (folderEntity == null)
+            {
+                return null;
+            }
+
+            var message = await db.ImapMessages
+                .AsNoTracking()
+                .Include(m => m.Body)
+                .Where(m => m.FolderId == folderEntity.Id && m.ImapUid == uid)
+                .FirstOrDefaultAsync(token);
+
+            if (message?.Body == null)
+            {
+                return null;
+            }
+
+            var html = BuildFallbackHtml(message.Body);
+            var headers = BuildHeaderInfo(message, message.Body);
+
+            return new MessageBodyResult(html, headers);
+        }
+    }
+
+    private static string BuildFallbackHtml(MessageBody body)
+    {
+        if (!string.IsNullOrWhiteSpace(body.SanitizedHtml))
+        {
+            return body.SanitizedHtml;
+        }
+
+        if (!string.IsNullOrWhiteSpace(body.HtmlText))
+        {
+            return HtmlSanitizer.Sanitize(body.HtmlText).Html;
+        }
+
+        if (!string.IsNullOrWhiteSpace(body.PlainText))
+        {
+            return $"<html><body><pre>{System.Net.WebUtility.HtmlEncode(body.PlainText)}</pre></body></html>";
+        }
+
+        return "<html><body></body></html>";
+    }
+
+    private static MessageHeaderInfo BuildHeaderInfo(ImapMessage message, MessageBody body)
+    {
+        var fromName = TextCleaner.CleanNullable(message.FromName);
+        var fromAddress = TextCleaner.CleanNullable(message.FromAddress);
+        var from = !string.IsNullOrWhiteSpace(fromName) && !string.IsNullOrWhiteSpace(fromAddress)
+            ? $"{fromName} <{fromAddress}>"
+            : fromName ?? fromAddress ?? string.Empty;
+
+        var to = JoinHeaderAddresses(body.Headers, "To") ?? string.Empty;
+        var cc = JoinHeaderAddresses(body.Headers, "Cc");
+        var bcc = JoinHeaderAddresses(body.Headers, "Bcc");
+
+        return new MessageHeaderInfo(
+            From: from,
+            FromAddress: fromAddress ?? string.Empty,
+            To: to,
+            Cc: cc,
+            Bcc: bcc);
+    }
+
+    private static string? JoinHeaderAddresses(Dictionary<string, string[]>? headers, string name)
+    {
+        if (headers == null)
+        {
+            return null;
+        }
+
+        foreach (var kvp in headers)
+        {
+            if (string.IsNullOrWhiteSpace(kvp.Key) || !kvp.Key.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var values = kvp.Value?
+                .Select(TextCleaner.CleanNullable)
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .ToArray();
+
+            if (values != null && values.Length > 0)
+            {
+                return string.Join(", ", values);
+            }
+        }
+
+        return null;
+    }
+
     private async Task<MessageBodyResult?> LoadMessageBodyInternalAsync(string folderId, string messageId, bool allowReconnect)
     {
         if (string.IsNullOrEmpty(folderId) || string.IsNullOrEmpty(messageId))
@@ -1940,6 +2051,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         while (true)
         {
             IMailFolder? folder = null;
+            var missingFromServer = false;
+            string? missingReason = null;
             await _semaphore.WaitAsync(_cts.Token);
             try
             {
@@ -1986,6 +2099,11 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
                 return new MessageBodyResult(htmlToRender, headers);
             }
+            catch (MessageNotFoundException ex)
+            {
+                missingFromServer = true;
+                missingReason = ex.Message;
+            }
             catch (Exception ex)
             {
                 if (canRetry && IsRecoverable(ex) && await TryReconnectAsync())
@@ -1993,6 +2111,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     canRetry = false;
                     continue;
                 }
+
+                Debug.WriteLine(ex);
 
                 await ReportStatusAsync($"Unable to load message: {ex.Message}", false);
                 await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
@@ -2012,6 +2132,21 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 }
 
                 _semaphore.Release();
+            }
+
+            if (missingFromServer)
+            {
+                var cached = await LoadMessageBodyFromDatabaseAsync(folderId, messageId, _cts.Token);
+                if (cached != null)
+                {
+                    await ReportStatusAsync("Showing saved copy from PostgreSQL.", false);
+                    await EnqueueAsync(() => _viewModel.SetRetryVisible(false));
+                    return cached;
+                }
+
+                await ReportStatusAsync($"Unable to load message: {missingReason}", false);
+                await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
+                return null;
             }
         }
     }
