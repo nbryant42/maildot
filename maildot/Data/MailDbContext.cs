@@ -16,6 +16,8 @@ public sealed class MailDbContext : DbContext
     public DbSet<MessageBody> MessageBodies => Set<MessageBody>();
     public DbSet<MessageAttachment> MessageAttachments => Set<MessageAttachment>();
     public DbSet<MessageEmbedding> MessageEmbeddings => Set<MessageEmbedding>();
+    public DbSet<Label> Labels => Set<Label>();
+    public DbSet<MessageLabel> MessageLabels => Set<MessageLabel>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -81,6 +83,41 @@ public sealed class MailDbContext : DbContext
             entity.HasOne(e => e.Message)
                   .WithMany(m => m.Embeddings)
                   .HasForeignKey(e => e.MessageId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<Label>(entity =>
+        {
+            entity.ToTable("labels");
+            entity.Property(e => e.ParentLabelId).HasColumnName("parent_label_id");
+            entity.HasIndex(e => new { e.AccountId, e.ParentLabelId, e.Name }).IsUnique();
+
+            entity.HasOne(l => l.Account)
+                  .WithMany(a => a.Labels)
+                  .HasForeignKey(l => l.AccountId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(l => l.ParentLabel)
+                  .WithMany(l => l.Children)
+                  .HasForeignKey(l => l.ParentLabelId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<MessageLabel>(entity =>
+        {
+            entity.ToTable("message_labels");
+            entity.HasKey(e => new { e.LabelId, e.MessageId });
+            entity.HasIndex(e => e.MessageId);
+            entity.HasIndex(e => e.LabelId);
+
+            entity.HasOne(ml => ml.Label)
+                  .WithMany(l => l.MessageLabels)
+                  .HasForeignKey(ml => ml.LabelId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(ml => ml.Message)
+                  .WithMany(m => m.LabelLinks)
+                  .HasForeignKey(ml => ml.MessageId)
                   .OnDelete(DeleteBehavior.Cascade);
         });
     }

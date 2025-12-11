@@ -15,6 +15,7 @@ public sealed class ImapAccount
     public DateTimeOffset? LastSyncedAt { get; set; }
 
     public ICollection<ImapFolder> Folders { get; set; } = new List<ImapFolder>();
+    public ICollection<Label> Labels { get; set; } = new List<Label>();
 }
 
 public sealed class ImapFolder
@@ -47,6 +48,7 @@ public sealed class ImapMessage
     public MessageBody Body { get; set; } = default!;
     public ICollection<MessageAttachment> Attachments { get; set; } = new List<MessageAttachment>();
     public ICollection<MessageEmbedding> Embeddings { get; set; } = new List<MessageEmbedding>();
+    public ICollection<MessageLabel> LabelLinks { get; set; } = new List<MessageLabel>();
 }
 
 public sealed class MessageBody
@@ -83,5 +85,27 @@ public sealed class MessageEmbedding
     public string ModelVersion { get; set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; set; }
 
+    public ImapMessage Message { get; set; } = default!;
+}
+
+public sealed class Label
+{
+    public int Id { get; set; }
+    public int AccountId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public int? ParentLabelId { get; set; }
+
+    public ImapAccount Account { get; set; } = default!;
+    public Label? ParentLabel { get; set; }
+    public ICollection<Label> Children { get; set; } = new List<Label>();
+    public ICollection<MessageLabel> MessageLabels { get; set; } = new List<MessageLabel>();
+}
+
+public sealed class MessageLabel
+{
+    public int LabelId { get; set; }
+    public int MessageId { get; set; }
+
+    public Label Label { get; set; } = default!;
     public ImapMessage Message { get; set; } = default!;
 }

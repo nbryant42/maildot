@@ -5,6 +5,8 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Input;
+using Windows.ApplicationModel.DataTransfer;
 
 namespace maildot.Views;
 
@@ -13,6 +15,8 @@ public sealed partial class ImapDashboardView : UserControl
     private ScrollViewer? _messagesScrollViewer;
     private bool _hasRequestedMore;
     private bool _attachmentsInitialized;
+
+    public TreeView LabelsTreeControl => LabelsTree;
 
     public ImapDashboardView()
     {
@@ -29,6 +33,10 @@ public sealed partial class ImapDashboardView : UserControl
     public event EventHandler<EmailMessageViewModel>? ReplyAllRequested;
     public event EventHandler<EmailMessageViewModel>? ForwardRequested;
     public event EventHandler? ClearSearchRequested;
+    public event EventHandler? RootLabelAddRequested;
+    public event EventHandler<int>? ChildLabelAddRequested;
+    public event EventHandler<LabelDropRequest>? LabelDropRequested;
+    public event EventHandler<LabelViewModel>? LabelSelected;
 
     public void BindViewModel(MailboxViewModel viewModel)
     {
@@ -108,6 +116,18 @@ public sealed partial class ImapDashboardView : UserControl
         {
             MessageSelected?.Invoke(this, message);
         }
+    }
+
+    private void OnMessagesDragItemsStarting(object sender, DragItemsStartingEventArgs e)
+    {
+        if (e.Items.Count == 0 || e.Items[0] is not EmailMessageViewModel message)
+        {
+            return;
+        }
+
+        e.Data.SetText(message.Id);
+        e.Data.Properties["FolderId"] = message.FolderId;
+        e.Data.RequestedOperation = DataPackageOperation.Copy;
     }
 
     private void OnMessagesScrollViewerViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
@@ -219,4 +239,67 @@ public sealed partial class ImapDashboardView : UserControl
         settings.AreDefaultContextMenusEnabled = false;
         settings.AreDevToolsEnabled = false;
     }
+
+    private void OnAddRootLabelClicked(object _, RoutedEventArgs e) =>
+        RootLabelAddRequested?.Invoke(this, EventArgs.Empty);
+
+    private void OnAddChildLabelClicked(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button button && button.Tag is int id)
+        {
+            ChildLabelAddRequested?.Invoke(this, id);
+        }
+    }
+
+    private void OnLabelDragEnter(object sender, DragEventArgs e) => SetLabelDragOperation(e);
+
+    private void OnLabelDragOver(object sender, DragEventArgs e) => SetLabelDragOperation(e);
+
+    private void OnLabelDragLeave(object sender, DragEventArgs e)
+    {
+    }
+
+    private async void OnLabelDrop(object sender, DragEventArgs e)
+    {
+        if (sender is not FrameworkElement element || element.DataContext is not LabelViewModel label)
+        {
+            return;
+        }
+
+        if (!e.DataView.Contains(StandardDataFormats.Text))
+        {
+            e.AcceptedOperation = DataPackageOperation.None;
+            return;
+        }
+
+        var text = await e.DataView.GetTextAsync();
+        var folderId = e.DataView.Properties.TryGetValue("FolderId", out var folder)
+            ? folder as string
+            : null;
+
+        LabelDropRequested?.Invoke(this, new LabelDropRequest(label.Id, text, folderId));
+        e.AcceptedOperation = DataPackageOperation.Copy;
+    }
+
+    private void OnLabelInvoked(TreeView sender, TreeViewItemInvokedEventArgs args)
+    {
+        if (args.InvokedItem is LabelViewModel label)
+        {
+            LabelSelected?.Invoke(this, label);
+        }
+    }
+
+    private static void SetLabelDragOperation(DragEventArgs e)
+    {
+        if (e.DataView.Contains(StandardDataFormats.Text))
+        {
+            e.AcceptedOperation = DataPackageOperation.Copy;
+        }
+        else
+        {
+            e.AcceptedOperation = DataPackageOperation.None;
+        }
+    }
 }
+
+public sealed record LabelDropRequest(int LabelId, string? MessageId, string? FolderId);

@@ -868,6 +868,9 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 _viewModel.SetRetryVisible(false);
             });
 
+            var labels = await LoadLabelsAsync(_cts.Token);
+            await EnqueueAsync(() => _viewModel.SetLabels(labels));
+
             _backgroundTask ??= Task.Run(() => BackgroundFetchLoopAsync(_cts.Token), _cts.Token);
             _embeddingTask ??= Task.Run(() => BackgroundEmbeddingLoopAsync(_cts.Token), _cts.Token);
 
@@ -932,6 +935,31 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         }
 
         return folders;
+    }
+
+    private async Task<List<LabelViewModel>> LoadLabelsAsync(CancellationToken token)
+    {
+        if (_settings == null)
+        {
+            return [];
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return [];
+        }
+
+        await using (db)
+        {
+            var entities = await db.Labels
+                .AsNoTracking()
+                .Where(l => l.AccountId == _settings.Id)
+                .OrderBy(l => l.Name)
+                .ToListAsync(token);
+
+            return BuildLabelTree(entities);
+        }
     }
 
     private async Task<List<EmailMessageViewModel>> FetchMessagesAsync(IMailFolder folder, int startIndex, int endIndex)
@@ -1825,6 +1853,57 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         return string.IsNullOrWhiteSpace(trimmed) ? string.Empty : trimmed;
     }
 
+    private static List<LabelViewModel> BuildLabelTree(IEnumerable<Label> labels)
+    {
+        var map = labels.ToDictionary(l => l.Id, l => new LabelViewModel(l.Id, l.Name, l.ParentLabelId));
+        var roots = new List<LabelViewModel>();
+
+        foreach (var label in labels)
+        {
+            if (label.ParentLabelId != null && map.TryGetValue(label.ParentLabelId.Value, out var parent))
+            {
+                parent.Children.Add(map[label.Id]);
+            }
+            else
+            {
+                roots.Add(map[label.Id]);
+            }
+        }
+
+        return roots;
+    }
+
+    private static EmailMessageViewModel CreateEmailViewModel(ImapMessage message, Models.ImapFolder folder, MessageBody? body)
+    {
+        var displaySender = !string.IsNullOrWhiteSpace(message.FromName)
+            ? message.FromName
+            : string.IsNullOrWhiteSpace(message.FromAddress) ? "(Unknown sender)" : message.FromAddress;
+
+        var colorComponents = SenderColorHelper.GetColor(message.FromName, message.FromAddress);
+        var messageColor = new Color
+        {
+            A = 255,
+            R = colorComponents.R,
+            G = colorComponents.G,
+            B = colorComponents.B
+        };
+
+        var previewSource = body?.Preview ?? message.Subject;
+
+        return new EmailMessageViewModel
+        {
+            Id = message.ImapUid.ToString(),
+            FolderId = folder.FullName,
+            Subject = message.Subject,
+            Sender = displaySender,
+            SenderAddress = message.FromAddress ?? string.Empty,
+            SenderInitials = SenderInitialsHelper.From(message.FromName, message.FromAddress),
+            SenderColor = messageColor,
+            Preview = BuildPreview(previewSource),
+            Received = message.ReceivedUtc.UtcDateTime
+        };
+    }
+
     private async Task<MailDbContext?> CreateDbContextAsync()
     {
         try
@@ -2022,6 +2101,203 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
             await tx.CommitAsync(token);
             return results;
+        }
+    }
+
+    public async Task LoadLabelMessagesAsync(int labelId)
+    {
+        var token = _cts.Token;
+        if (_settings == null)
+        {
+            return;
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return;
+        }
+
+        await using (db)
+        {
+            var label = await db.Labels
+                .AsNoTracking()
+                .FirstOrDefaultAsync(l => l.Id == labelId && l.AccountId == _settings.Id, token);
+
+            if (label == null)
+            {
+                await ReportStatusAsync("Label not found.", false);
+                return;
+            }
+
+            await ReportStatusAsync($"Loading {label.Name}…", true);
+
+            List<EmailMessageViewModel> items;
+
+            try
+            {
+                var results = await (
+                    from ml in db.MessageLabels.AsNoTracking()
+                    where ml.LabelId == labelId
+                    join m in db.ImapMessages.AsNoTracking() on ml.MessageId equals m.Id
+                    join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
+                    where f.AccountId == _settings.Id
+                    join b in db.MessageBodies.AsNoTracking() on m.Id equals b.MessageId into bodies
+                    from b in bodies.DefaultIfEmpty()
+                    orderby m.ReceivedUtc descending
+                    select new { Message = m, Folder = f, Body = b }
+                ).ToListAsync(token);
+
+                items = results.Select(r => CreateEmailViewModel(r.Message, r.Folder, r.Body)).ToList();
+            }
+            catch (Exception ex)
+            {
+                await ReportStatusAsync($"Unable to load label: {ex.Message}", false);
+                await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
+                return;
+            }
+
+            await EnqueueAsync(() =>
+            {
+                _viewModel.SetMessages($"Label: {label.Name}", items);
+                _viewModel.SetStatus("Mailbox is up to date.", false);
+                _viewModel.SetLoadMoreAvailability(false);
+                _viewModel.SetRetryVisible(false);
+            });
+        }
+    }
+
+    public async Task<LabelViewModel?> CreateLabelAsync(string name, int? parentLabelId)
+    {
+        var token = _cts.Token;
+        if (_settings == null)
+        {
+            return null;
+        }
+
+        var cleaned = TextCleaner.CleanNullable(name)?.Trim();
+        if (string.IsNullOrWhiteSpace(cleaned))
+        {
+            return null;
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return null;
+        }
+
+        await using (db)
+        {
+            var entity = new Label
+            {
+                AccountId = _settings.Id,
+                Name = cleaned,
+                ParentLabelId = parentLabelId
+            };
+
+            db.Labels.Add(entity);
+
+            try
+            {
+                await db.SaveChangesAsync(token);
+            }
+            catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+            {
+                entity = await db.Labels
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(l =>
+                        l.AccountId == _settings.Id &&
+                        l.ParentLabelId == parentLabelId &&
+                        l.Name == cleaned, token);
+
+                if (entity == null)
+                {
+                    throw;
+                }
+            }
+
+            var vm = new LabelViewModel(entity.Id, entity.Name, entity.ParentLabelId);
+            await EnqueueAsync(() => _viewModel.AddLabel(vm, parentLabelId));
+            await ReportStatusAsync($"Created label \"{entity.Name}\"", false);
+            return vm;
+        }
+    }
+
+    public async Task<bool> AssignLabelToMessageAsync(int labelId, string folderId, string messageId)
+    {
+        var token = _cts.Token;
+        if (_settings == null || string.IsNullOrWhiteSpace(folderId) || string.IsNullOrWhiteSpace(messageId))
+        {
+            return false;
+        }
+
+        if (!long.TryParse(messageId, out var uid))
+        {
+            return false;
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return false;
+        }
+
+        await using (db)
+        {
+            var label = await db.Labels
+                .AsNoTracking()
+                .FirstOrDefaultAsync(l => l.Id == labelId && l.AccountId == _settings.Id, token);
+
+            if (label == null)
+            {
+                return false;
+            }
+
+            var folderEntity = await db.ImapFolders
+                .AsNoTracking()
+                .FirstOrDefaultAsync(f => f.AccountId == _settings.Id && f.FullName == folderId, token);
+
+            if (folderEntity == null)
+            {
+                return false;
+            }
+
+            var message = await db.ImapMessages
+                .AsNoTracking()
+                .FirstOrDefaultAsync(m => m.FolderId == folderEntity.Id && m.ImapUid == uid, token);
+
+            if (message == null)
+            {
+                return false;
+            }
+
+            var exists = await db.MessageLabels
+                .AnyAsync(ml => ml.LabelId == labelId && ml.MessageId == message.Id, token);
+
+            if (exists)
+            {
+                await ReportStatusAsync($"Message already has label \"{label.Name}\"", false);
+                return true;
+            }
+
+            db.MessageLabels.Add(new MessageLabel
+            {
+                LabelId = labelId,
+                MessageId = message.Id
+            });
+
+            try
+            {
+                await db.SaveChangesAsync(token);
+            }
+            catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+            {
+                return true;
+            }
+
+            await ReportStatusAsync($"Applied label \"{label.Name}\"", false);
+            return true;
         }
     }
 

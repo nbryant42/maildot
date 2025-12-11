@@ -229,6 +229,14 @@ public sealed partial class MainWindow : Window
         _dashboardView.ReplyAllRequested += OnReplyAllRequested;
         _dashboardView.ForwardRequested -= OnForwardRequested;
         _dashboardView.ForwardRequested += OnForwardRequested;
+        _dashboardView.RootLabelAddRequested -= OnRootLabelAddRequested;
+        _dashboardView.RootLabelAddRequested += OnRootLabelAddRequested;
+        _dashboardView.ChildLabelAddRequested -= OnChildLabelAddRequested;
+        _dashboardView.ChildLabelAddRequested += OnChildLabelAddRequested;
+        _dashboardView.LabelDropRequested -= OnLabelDropRequested;
+        _dashboardView.LabelDropRequested += OnLabelDropRequested;
+        _dashboardView.LabelSelected -= OnLabelSelected;
+        _dashboardView.LabelSelected += OnLabelSelected;
 
         _dashboardView.BindViewModel(_mailboxViewModel);
         RootContent.Content = _dashboardView;
@@ -253,6 +261,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        ClearLabelSelection();
         _mailboxViewModel?.ExitSearchMode();
         _dashboardView?.ClearMessageContentAsync();
         _dashboardView?.ClearAttachmentsAsync();
@@ -762,6 +771,97 @@ public sealed partial class MainWindow : Window
         }
 
         _mailboxViewModel.ExitSearchMode();
+    }
+
+    private async void OnRootLabelAddRequested(object? sender, EventArgs e) =>
+        await PromptForLabelAsync(null);
+
+    private async void OnChildLabelAddRequested(object? sender, int parentId) =>
+        await PromptForLabelAsync(parentId);
+
+    private void OnLabelSelected(object? sender, LabelViewModel label)
+    {
+        if (_imapService == null || _mailboxViewModel == null)
+        {
+            return;
+        }
+
+        _mailboxViewModel.SelectLabel(label.Id);
+        _mailboxViewModel.SelectedFolder = null;
+        _mailboxViewModel.ExitSearchMode();
+        _ = _dashboardView?.ClearMessageContentAsync();
+        _ = _dashboardView?.ClearAttachmentsAsync();
+        _ = _imapService.LoadLabelMessagesAsync(label.Id);
+    }
+
+    private void OnLabelDropRequested(object? sender, LabelDropRequest e)
+    {
+        if (_imapService == null)
+        {
+            return;
+        }
+
+        var messageId = !string.IsNullOrWhiteSpace(e.MessageId)
+            ? e.MessageId!
+            : _mailboxViewModel?.SelectedMessage?.Id;
+
+        var folderId = !string.IsNullOrWhiteSpace(e.FolderId)
+            ? e.FolderId!
+            : _mailboxViewModel?.SelectedFolder?.Id;
+
+        if (string.IsNullOrWhiteSpace(messageId) || string.IsNullOrWhiteSpace(folderId))
+        {
+            return;
+        }
+
+        _ = _imapService.AssignLabelToMessageAsync(e.LabelId, folderId!, messageId!);
+    }
+
+    private async Task PromptForLabelAsync(int? parentId)
+    {
+        if (_imapService == null)
+        {
+            return;
+        }
+
+        var xamlRoot = GetXamlRoot();
+        if (xamlRoot == null)
+        {
+            return;
+        }
+
+        var nameBox = new TextBox
+        {
+            PlaceholderText = parentId == null ? "Label name" : "Child label name",
+            Width = 260
+        };
+
+        var dialog = new ContentDialog
+        {
+            Title = parentId == null ? "New label" : "New child label",
+            PrimaryButtonText = "Create",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+            Content = nameBox,
+            XamlRoot = xamlRoot
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        await _imapService.CreateLabelAsync(nameBox.Text, parentId);
+    }
+
+    private void ClearLabelSelection()
+    {
+        _mailboxViewModel?.SelectLabel(null);
+        if (_dashboardView?.LabelsTreeControl.SelectedNodes.Count > 0)
+        {
+            _dashboardView.LabelsTreeControl.SelectedNodes.Clear();
+        }
     }
 
     private static string? ExtractAddress(EmailMessageViewModel message)

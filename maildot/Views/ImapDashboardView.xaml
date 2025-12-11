@@ -83,6 +83,68 @@
                     </DataTemplate>
                 </ListView.ItemTemplate>
             </ListView>
+
+            <Grid Margin="0,16,0,8" ColumnSpacing="8" VerticalAlignment="Center">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="Labels" FontSize="18" FontWeight="SemiBold" />
+                <Button Grid.Column="1"
+                        Click="OnAddRootLabelClicked"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        ToolTipService.ToolTip="Add label">
+                    <FontIcon Glyph="&#xE710;" />
+                </Button>
+            </Grid>
+            <TreeView x:Name="LabelsTree"
+                      ItemsSource="{Binding Labels}"
+                      SelectionMode="Single"
+                      ItemInvoked="OnLabelInvoked"
+                      MaxHeight="260"
+                      Margin="-16,0,0,0"
+                      AllowDrop="True"
+                      DragEnter="OnLabelDragEnter"
+                      DragOver="OnLabelDragOver"
+                      DragLeave="OnLabelDragLeave"
+                      Drop="OnLabelDrop">
+                <TreeView.ItemContainerStyle>
+                    <Style TargetType="TreeViewItem">
+                        <Setter Property="Padding" Value="0" />
+                    </Style>
+                </TreeView.ItemContainerStyle>
+                <TreeView.ItemTemplate>
+                    <DataTemplate x:DataType="viewModels:LabelViewModel">
+                        <TreeViewItem ItemsSource="{x:Bind Children}"
+                                      AllowDrop="True"
+                                      DragEnter="OnLabelDragEnter"
+                                      DragLeave="OnLabelDragLeave"
+                                      DragOver="OnLabelDragOver"
+                                      Drop="OnLabelDrop">
+                            <StackPanel Orientation="Horizontal"
+                                        Spacing="6"
+                                        AllowDrop="True"
+                                        DragEnter="OnLabelDragEnter"
+                                        DragOver="OnLabelDragOver"
+                                        DragLeave="OnLabelDragLeave"
+                                        Drop="OnLabelDrop">
+                                <TextBlock Text="{x:Bind Name}"
+                                           TextTrimming="CharacterEllipsis"
+                                           HorizontalAlignment="Stretch" />
+                                <Button Click="OnAddChildLabelClicked"
+                                        Tag="{x:Bind Id}"
+                                        Background="Transparent"
+                                        BorderThickness="0"
+                                        HorizontalAlignment="Right"
+                                        ToolTipService.ToolTip="Add child label">
+                                    <FontIcon Glyph="&#xE710;" FontSize="14"/>
+                                </Button>
+                            </StackPanel>
+                        </TreeViewItem>
+                    </DataTemplate>
+                </TreeView.ItemTemplate>
+            </TreeView>
         </StackPanel>
 
         <Grid Grid.Column="1" Padding="24" RowSpacing="12">
@@ -126,6 +188,8 @@
                     <ListView x:Name="MessagesList"
                               ItemsSource="{Binding Messages}"
                               SelectedItem="{Binding SelectedMessage, Mode=TwoWay}"
+                              CanDragItems="True"
+                              DragItemsStarting="OnMessagesDragItemsStarting"
                               SelectionChanged="OnMessagesSelectionChanged"
                               Loaded="OnMessagesListLoaded">
                         <ListView.ItemTemplate>

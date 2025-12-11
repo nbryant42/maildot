@@ -12,10 +12,13 @@ The initial schema is designed to mirror what the app already tracks locally (ac
 | `message_bodies` | Normalized body/preview text for search. | `message_id (fk)`, `plain_text`, `html_text`, `sanitized_html`, `preview` |
 | `message_attachments` | Attachment metadata with pg_largeobject storage. | `id (int identity, pk)`, `message_id (fk)`, `file_name`, `content_type`, `size_bytes`, `hash`, `large_object_id (oid)` |
 | `message_embeddings` | pgvector column that stores one embedding per message (or per chunk). | `message_id (fk)`, `chunk_index`, `embedding vector(1024)`, `model_version`, `created_at` |
+| `labels` | User-defined labels (hierarchical) per account. | `id (int identity, pk)`, `account_id (fk)`, `name`, `parent_label_id (fk self)` |
+| `message_labels` | Many-to-many between messages and labels. | `label_id (fk)`, `message_id (fk)` |
 
 Notes:
 - `imap_messages.hash` can be a deterministic SHA based on Message-Id + Date headers to avoid duplicates.
 - `message_embeddings.embedding` uses `vector(1024)` to match the Qwen3-Embedding-0.6B model.
+- `labels` enforces a unique `(account_id, parent_label_id, name)` combination with `NULLS NOT DISTINCT` to prevent duplicate siblings at the root or under the same parent.
 
 ## EF Core Entities
 
@@ -31,6 +34,7 @@ public sealed class ImapAccount
     public DateTimeOffset? LastSyncedAt { get; set; }
 
     public ICollection<ImapFolder> Folders { get; set; } = new List<ImapFolder>();
+    public ICollection<Label> Labels { get; set; } = new List<Label>();
 }
 
 public sealed class ImapFolder
@@ -58,11 +62,12 @@ public sealed class ImapMessage
     public string FromAddress { get; set; } = string.Empty;
     public DateTimeOffset ReceivedUtc { get; set; }
     public string Hash { get; set; } = string.Empty;
-    public Dictionary<string, string[]>? Headers { get; set; }
 
     public ImapFolder Folder { get; set; } = default!;
     public MessageBody Body { get; set; } = default!;
+    public ICollection<MessageAttachment> Attachments { get; set; } = new List<MessageAttachment>();
     public ICollection<MessageEmbedding> Embeddings { get; set; } = new List<MessageEmbedding>();
+    public ICollection<MessageLabel> LabelLinks { get; set; } = new List<MessageLabel>();
 }
 
 public sealed class MessageBody
@@ -71,6 +76,7 @@ public sealed class MessageBody
     public string? PlainText { get; set; }
     public string? HtmlText { get; set; }
     public string? SanitizedHtml { get; set; }
+    public Dictionary<string, string[]>? Headers { get; set; }
     public string Preview { get; set; } = string.Empty;
 
     public ImapMessage Message { get; set; } = default!;
@@ -82,20 +88,44 @@ public sealed class MessageAttachment
     public int MessageId { get; set; }
     public string FileName { get; set; } = string.Empty;
     public string ContentType { get; set; } = string.Empty;
+    public string? Disposition { get; set; }
     public long SizeBytes { get; set; }
     public string Hash { get; set; } = string.Empty;
     public uint LargeObjectId { get; set; } // OID for pg_largeobject
 
     public ImapMessage Message { get; set; } = default!;
 }
+
 public sealed class MessageEmbedding
 {
     public int MessageId { get; set; }
     public int ChunkIndex { get; set; }
-    public Vector Vector { get; set; } = new();
+    public Vector Vector { get; set; } = new Vector(Array.Empty<float>());
     public string ModelVersion { get; set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; set; }
 
+    public ImapMessage Message { get; set; } = default!;
+}
+
+public sealed class Label
+{
+    public int Id { get; set; }
+    public int AccountId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public int? ParentLabelId { get; set; }
+
+    public ImapAccount Account { get; set; } = default!;
+    public Label? ParentLabel { get; set; }
+    public ICollection<Label> Children { get; set; } = new List<Label>();
+    public ICollection<MessageLabel> MessageLabels { get; set; } = new List<MessageLabel>();
+}
+
+public sealed class MessageLabel
+{
+    public int LabelId { get; set; }
+    public int MessageId { get; set; }
+
+    public Label Label { get; set; } = default!;
     public ImapMessage Message { get; set; } = default!;
 }
 ```
@@ -146,5 +176,6 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
 ### Migration Plan
 
 1. `InitialPostgresSchema` migration creates `imap_accounts`, `imap_folders`, `imap_messages`, `message_bodies`, `message_embeddings`, `message_attachments`.
-2. Migration seeds nothing, but ensures pgvector extension is installed (`migrationBuilder.Sql("CREATE EXTENSION IF NOT EXISTS vector;");`).
-3. Future migrations can add indexes for vector similarity (`USING ivfflat`), triggers for full-text search, etc.
+2. `AddLabels` adds `labels` and `message_labels`, and creates a unique `(account_id, parent_label_id, name)` index with `NULLS NOT DISTINCT`.
+3. Migration seeds nothing, but ensures pgvector extension is installed (`migrationBuilder.Sql("CREATE EXTENSION IF NOT EXISTS vector;");`).
+4. Future migrations can add indexes for vector similarity (`USING ivfflat`), triggers for full-text search, etc.

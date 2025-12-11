@@ -23,10 +23,12 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
     private bool _canLoadMore;
     private bool _isRetryVisible;
     private EmailMessageViewModel? _selectedMessage;
+    private int? _selectedLabelId;
 
     public ObservableCollection<MailFolderViewModel> Folders { get; } = new();
     public ObservableCollection<EmailMessageViewModel> Messages { get; } = new();
     public ObservableCollection<SearchNavItemViewModel> SearchItems { get; } = new();
+    public ObservableCollection<LabelViewModel> Labels { get; } = new();
 
     public MailFolderViewModel? SelectedFolder
     {
@@ -155,7 +157,7 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
 
     public void SetFolders(IEnumerable<MailFolderViewModel> folders)
     {
-        var selectedId = SelectedFolder?.Id ?? _lastSelectedFolderId;
+        var selectedId = _selectedLabelId != null ? null : SelectedFolder?.Id ?? _lastSelectedFolderId;
         Folders.Clear();
 
         foreach (var folder in folders)
@@ -163,7 +165,7 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
             Folders.Add(folder);
         }
 
-        if (IsSearchActive)
+        if (IsSearchActive || _selectedLabelId != null)
         {
             return;
         }
@@ -175,6 +177,82 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
         }
 
         SelectedFolder = target;
+    }
+
+    public void SetLabels(IEnumerable<LabelViewModel> labels)
+    {
+        var selectedId = _selectedLabelId;
+        Labels.Clear();
+        foreach (var label in labels)
+        {
+            Labels.Add(label);
+        }
+
+        if (selectedId != null)
+        {
+            SelectLabel(selectedId);
+        }
+    }
+
+    public void SelectLabel(int? labelId)
+    {
+        _selectedLabelId = labelId;
+
+        foreach (var root in Labels)
+        {
+            SetLabelSelection(root, labelId);
+        }
+
+        if (labelId != null && SelectedFolder != null)
+        {
+            SelectedFolder = null;
+        }
+    }
+
+    public int? SelectedLabelId => _selectedLabelId;
+
+    private static void SetLabelSelection(LabelViewModel label, int? targetId)
+    {
+        label.IsSelected = label.Id == targetId;
+        foreach (var child in label.Children)
+        {
+            SetLabelSelection(child, targetId);
+        }
+    }
+
+    public void AddLabel(LabelViewModel label, int? parentLabelId)
+    {
+        if (parentLabelId == null)
+        {
+            Labels.Add(label);
+            return;
+        }
+
+        var parent = FindLabel(parentLabelId.Value);
+        if (parent != null)
+        {
+            parent.Children.Add(label);
+        }
+        else
+        {
+            Labels.Add(label);
+        }
+
+        SelectLabel(label.Id);
+    }
+
+    public LabelViewModel? FindLabel(int id)
+    {
+        foreach (var label in Labels)
+        {
+            var found = label.FindById(id);
+            if (found != null)
+            {
+                return found;
+            }
+        }
+
+        return null;
     }
 
     public void SetMessages(string folderTitle, IEnumerable<EmailMessageViewModel> messages)
@@ -258,6 +336,10 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
         {
             _selectedFolder = null;
             OnPropertyChanged(nameof(SelectedFolder));
+        }
+        if (_selectedLabelId != null)
+        {
+            SelectLabel(null);
         }
     }
 
@@ -466,4 +548,67 @@ public sealed class SearchNavItemViewModel
 
     public string Term { get; }
     public string DisplayName => Term;
+}
+
+public sealed class LabelViewModel : INotifyPropertyChanged
+{
+    private string _name;
+    private bool _isSelected;
+
+    public LabelViewModel(int id, string name, int? parentId)
+    {
+        Id = id;
+        _name = name;
+        ParentId = parentId;
+    }
+
+    public int Id { get; }
+    public int? ParentId { get; }
+
+    public string Name
+    {
+        get => _name;
+        set => SetProperty(ref _name, value ?? string.Empty);
+    }
+
+    public ObservableCollection<LabelViewModel> Children { get; } = new();
+
+    public bool IsSelected
+    {
+        get => _isSelected;
+        set => SetProperty(ref _isSelected, value);
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    public LabelViewModel? FindById(int id)
+    {
+        if (Id == id)
+        {
+            return this;
+        }
+
+        foreach (var child in Children)
+        {
+            var found = child.FindById(id);
+            if (found != null)
+            {
+                return found;
+            }
+        }
+
+        return null;
+    }
+
+    private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
+    {
+        if (EqualityComparer<T>.Default.Equals(field, value))
+        {
+            return false;
+        }
+
+        field = value;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        return true;
+    }
 }
