@@ -424,6 +424,8 @@ public sealed class EmailMessageViewModel : INotifyPropertyChanged
     private string _to = string.Empty;
     private string? _cc;
     private string? _bcc;
+    private bool _isSuggested;
+    private double _suggestionScore;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -513,6 +515,17 @@ public sealed class EmailMessageViewModel : INotifyPropertyChanged
     public bool HasTo => !string.IsNullOrWhiteSpace(To);
     public bool HasCc => !string.IsNullOrWhiteSpace(Cc);
     public bool HasBcc => !string.IsNullOrWhiteSpace(Bcc);
+    public bool IsSuggested
+    {
+        get => _isSuggested;
+        set => SetProperty(ref _isSuggested, value, nameof(IsSuggested));
+    }
+
+    public double SuggestionScore
+    {
+        get => _suggestionScore;
+        set => SetProperty(ref _suggestionScore, value, nameof(SuggestionScore));
+    }
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));

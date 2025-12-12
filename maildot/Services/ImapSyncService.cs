@@ -1806,6 +1806,19 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
     private static bool IsUniqueViolation(DbUpdateException ex) =>
         ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation };
 
+    private string BuildConnectionString(MailDbContext db)
+    {
+        if (_pgSettings != null && !string.IsNullOrWhiteSpace(_pgPassword))
+        {
+            var sslMode = _pgSettings.UseSsl ? "Require" : "Disable";
+            var cs = $"Host={_pgSettings.Host};Port={_pgSettings.Port};Database={_pgSettings.Database};Username={_pgSettings.Username};Password={_pgPassword};SSL Mode={sslMode};Maximum Pool Size=10";
+            return cs;
+        }
+
+        var csFromDb = db.Database.GetDbConnection().ConnectionString;
+        return string.IsNullOrWhiteSpace(csFromDb) ? string.Empty : csFromDb;
+    }
+
     private async Task<ImapMessage> UpsertImapMessageAsync(MailDbContext db, int folderId, MimeMessage message, long uid, CancellationToken token)
     {
         var existing = await db.ImapMessages
@@ -1871,6 +1884,127 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         }
 
         return roots;
+    }
+
+    private sealed record SuggestedResult(ImapMessage Message, Models.ImapFolder Folder, MessageBody? Body, double Score);
+
+    private async Task<List<SuggestedResult>> GetSuggestedMessagesAsync(MailDbContext db, int labelId, DateTimeOffset? sinceUtc, CancellationToken token)
+    {
+        const int limit = 20;
+
+        var vectors = new List<float[]>();
+        var connString = BuildConnectionString(db);
+        await using var conn = new NpgsqlConnection(connString);
+        await conn.OpenAsync(token);
+
+        await using (var embedCmd = new NpgsqlCommand(
+            @"SELECT e.""Vector""::real[] FROM ""message_embeddings"" e
+JOIN ""message_labels"" ml ON ml.""MessageId"" = e.""MessageId""
+WHERE ml.""LabelId"" = @p0", conn))
+        {
+            embedCmd.Parameters.AddWithValue("p0", labelId);
+
+            await using var embedReader = await embedCmd.ExecuteReaderAsync(token);
+            while (await embedReader.ReadAsync(token))
+            {
+                if (!embedReader.IsDBNull(0))
+                {
+                    vectors.Add(embedReader.GetFieldValue<float[]>(0));
+                }
+            }
+        }
+
+        if (vectors.Count == 0)
+        {
+            return [];
+        }
+
+        var dim = vectors[0].ToArray().Length;
+        var centroidArr = new float[dim];
+        foreach (var v in vectors)
+        {
+            var arr = v.ToArray();
+            for (int i = 0; i < dim; i++)
+            {
+                centroidArr[i] += arr[i];
+            }
+        }
+
+        for (int i = 0; i < dim; i++)
+        {
+            centroidArr[i] /= vectors.Count;
+        }
+
+        var centroidLiteral = BuildVectorLiteral(centroidArr);
+        var sinceClause = sinceUtc != null ? @"WHERE m.""ReceivedUtc"" >= @p0" : string.Empty;
+
+        var sql = $@"
+SELECT m.""Id"", m.""ImapUid"", m.""FolderId"", m.""ReceivedUtc"", ml.""Vector"" <#> '{centroidLiteral}' AS score
+FROM ""message_embeddings"" ml
+JOIN ""imap_messages"" m ON m.""Id"" = ml.""MessageId""
+{sinceClause}
+ORDER BY score
+LIMIT {limit}";
+
+        var results = new List<SuggestedResult>();
+
+        await using (var cmd = new NpgsqlCommand(sql, conn))
+        {
+            if (sinceUtc != null)
+            {
+                cmd.Parameters.AddWithValue("p0", sinceUtc);
+            }
+
+            await using var reader = await cmd.ExecuteReaderAsync(token);
+            var folderIds = new HashSet<int>();
+            var messageIds = new List<int>();
+            var scoreMap = new Dictionary<int, double>();
+
+            while (await reader.ReadAsync(token))
+            {
+                var id = reader.GetInt32(0);
+                var folderId = reader.GetInt32(2);
+                var score = reader.GetDouble(reader.GetOrdinal("score"));
+                messageIds.Add(id);
+                folderIds.Add(folderId);
+                scoreMap[id] = score;
+            }
+
+            if (messageIds.Count == 0)
+            {
+                return [];
+            }
+
+            var folders = await db.ImapFolders
+                .AsNoTracking()
+                .Where(f => folderIds.Contains(f.Id))
+                .ToListAsync(token);
+            var folderMap = folders.ToDictionary(f => f.Id, f => f);
+
+            var messages = await db.ImapMessages
+                .AsNoTracking()
+                .Where(m => messageIds.Contains(m.Id))
+                .ToListAsync(token);
+            var bodies = await db.MessageBodies
+                .AsNoTracking()
+                .Where(b => messageIds.Contains(b.MessageId))
+                .ToListAsync(token);
+            var bodyMap = bodies.ToDictionary(b => b.MessageId, b => b);
+
+            foreach (var message in messages)
+            {
+                if (!folderMap.TryGetValue(message.FolderId, out var folder))
+                {
+                    continue;
+                }
+
+                var score = scoreMap.TryGetValue(message.Id, out var s) ? s : 0.0;
+                bodyMap.TryGetValue(message.Id, out var body);
+                results.Add(new SuggestedResult(message, folder, body, score));
+            }
+        }
+
+        return results;
     }
 
     private static EmailMessageViewModel CreateEmailViewModel(ImapMessage message, Models.ImapFolder folder, MessageBody? body)
@@ -2104,7 +2238,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         }
     }
 
-    public async Task LoadLabelMessagesAsync(int labelId)
+    public async Task LoadLabelMessagesAsync(int labelId, DateTimeOffset? sinceUtc)
     {
         var token = _cts.Token;
         if (_settings == null)
@@ -2132,11 +2266,9 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
             await ReportStatusAsync($"Loading {label.Name}…", true);
 
-            List<EmailMessageViewModel> items;
-
             try
             {
-                var results = await (
+                var explicitResults = await (
                     from ml in db.MessageLabels.AsNoTracking()
                     where ml.LabelId == labelId
                     join m in db.ImapMessages.AsNoTracking() on ml.MessageId equals m.Id
@@ -2144,26 +2276,55 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     where f.AccountId == _settings.Id
                     join b in db.MessageBodies.AsNoTracking() on m.Id equals b.MessageId into bodies
                     from b in bodies.DefaultIfEmpty()
-                    orderby m.ReceivedUtc descending
                     select new { Message = m, Folder = f, Body = b }
                 ).ToListAsync(token);
 
-                items = results.Select(r => CreateEmailViewModel(r.Message, r.Folder, r.Body)).ToList();
+                var explicitSet = explicitResults
+                    .Select(r =>
+                    {
+                        var vm = CreateEmailViewModel(r.Message, r.Folder, r.Body);
+                        vm.IsSuggested = false;
+                        return vm;
+                    })
+                    .ToList();
+
+                var suggestions = await GetSuggestedMessagesAsync(db, labelId, sinceUtc, token);
+                var explicitIds = explicitResults.Select(r => r.Message.Id).ToHashSet();
+
+                double minScore = suggestions.Count > 0 ? suggestions.Min(s => s.Score) : 0;
+                double maxScore = suggestions.Count > 0 ? suggestions.Max(s => s.Score) : 0;
+                var range = Math.Max(0.0001, maxScore - minScore);
+
+                foreach (var suggestion in suggestions)
+                {
+                    if (explicitIds.Contains(suggestion.Message.Id))
+                    {
+                        continue;
+                    }
+
+                    var vm = CreateEmailViewModel(suggestion.Message, suggestion.Folder, suggestion.Body);
+                    vm.IsSuggested = true;
+                    vm.SuggestionScore = (suggestion.Score - minScore) / range; // normalize 0 (best) .. 1 (worst)
+                    explicitSet.Add(vm);
+                }
+
+                var ordered = explicitSet
+                    .OrderByDescending(m => m.Received)
+                    .ToList();
+
+                await EnqueueAsync(() =>
+                {
+                    _viewModel.SetMessages($"Label: {label.Name}", ordered);
+                    _viewModel.SetStatus("Mailbox is up to date.", false);
+                    _viewModel.SetLoadMoreAvailability(false);
+                    _viewModel.SetRetryVisible(false);
+                });
             }
             catch (Exception ex)
             {
                 await ReportStatusAsync($"Unable to load label: {ex.Message}", false);
                 await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
-                return;
             }
-
-            await EnqueueAsync(() =>
-            {
-                _viewModel.SetMessages($"Label: {label.Name}", items);
-                _viewModel.SetStatus("Mailbox is up to date.", false);
-                _viewModel.SetLoadMoreAvailability(false);
-                _viewModel.SetRetryVisible(false);
-            });
         }
     }
 

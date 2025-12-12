@@ -12,6 +12,7 @@
 
     <UserControl.Resources>
         <conv:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter" />
+        <conv:SuggestionToBrushConverter x:Key="SuggestionToBrushConverter" />
     </UserControl.Resources>
 
     <Grid MinWidth="1050"
@@ -194,33 +195,50 @@
                               Loaded="OnMessagesListLoaded">
                         <ListView.ItemTemplate>
                             <DataTemplate x:DataType="viewModels:EmailMessageViewModel">
-                                <Grid Padding="12" ColumnSpacing="12">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto" />
-                                        <ColumnDefinition Width="*" />
-                                    </Grid.ColumnDefinitions>
-                                    <Grid Width="36" Height="36">
-                                        <Ellipse>
-                                            <Ellipse.Fill>
-                                                <SolidColorBrush Color="{x:Bind SenderColor}" />
-                                            </Ellipse.Fill>
-                                        </Ellipse>
-                                        <TextBlock Text="{x:Bind SenderInitials}"
-                                                   HorizontalAlignment="Center"
-                                                   VerticalAlignment="Center"
-                                                   Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"
-                                                   FontWeight="SemiBold" />
-                                    </Grid>
+                                <Border Background="{Binding SuggestionScore, Converter={StaticResource SuggestionToBrushConverter}}"
+                                        Padding="8"
+                                        CornerRadius="6">
+                                    <Grid Padding="4" ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid Width="36" Height="36">
+                                            <Ellipse>
+                                                <Ellipse.Fill>
+                                                    <SolidColorBrush Color="{x:Bind SenderColor}" />
+                                                </Ellipse.Fill>
+                                            </Ellipse>
+                                            <TextBlock Text="{x:Bind SenderInitials}"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"
+                                                       Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"
+                                                       FontWeight="SemiBold" />
+                                        </Grid>
 
-                                    <StackPanel Grid.Column="1" Spacing="4">
-                                        <TextBlock Text="{x:Bind Subject}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                                        <TextBlock Text="{x:Bind Sender}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                        <StackPanel Orientation="Horizontal" Spacing="12">
-                                            <TextBlock Text="{x:Bind ReceivedDisplay}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                            <TextBlock Text="{x:Bind Preview}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                                        <StackPanel Grid.Column="1" Spacing="4">
+                                            <TextBlock Text="{x:Bind Subject}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{x:Bind Sender}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                            <StackPanel Orientation="Horizontal" Spacing="12">
+                                                <TextBlock Text="{x:Bind ReceivedDisplay}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                                <TextBlock Text="{x:Bind Preview}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                                            </StackPanel>
                                         </StackPanel>
-                                    </StackPanel>
-                                </Grid>
+
+                                        <Border Grid.Column="2"
+                                                Visibility="{Binding IsSuggested, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                                CornerRadius="4"
+                                                Padding="6,2"
+                                                VerticalAlignment="Top"
+                                                HorizontalAlignment="Right">
+                                            <TextBlock Text="Suggested"
+                                                       FontSize="12"
+                                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        </Border>
+                                    </Grid>
+                                </Border>
                             </DataTemplate>
                         </ListView.ItemTemplate>
                     </ListView>

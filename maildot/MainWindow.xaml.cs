@@ -791,7 +791,7 @@ public sealed partial class MainWindow : Window
         _mailboxViewModel.ExitSearchMode();
         _ = _dashboardView?.ClearMessageContentAsync();
         _ = _dashboardView?.ClearAttachmentsAsync();
-        _ = _imapService.LoadLabelMessagesAsync(label.Id);
+        _ = _imapService.LoadLabelMessagesAsync(label.Id, _searchSinceUtc);
     }
 
     private void OnLabelDropRequested(object? sender, LabelDropRequest e)
