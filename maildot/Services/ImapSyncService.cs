@@ -1991,12 +1991,13 @@ WHERE ml.""LabelId"" = @p0", conn))
         }
 
         var centroidLiteral = BuildVectorLiteral(centroidArr);
-        var sinceClause = sinceUtc != null ? @"WHERE m.""ReceivedUtc"" >= @p0" : string.Empty;
+        var sinceClause = sinceUtc != null ? @"AND m.""ReceivedUtc"" >= @p0" : string.Empty;
 
         var sql = $@"
 SELECT m.""Id"", m.""ImapUid"", m.""FolderId"", m.""ReceivedUtc"", ml.""Vector"" <#> '{centroidLiteral}' AS score
 FROM ""message_embeddings"" ml
 JOIN ""imap_messages"" m ON m.""Id"" = ml.""MessageId""
+WHERE NOT EXISTS (SELECT 1 FROM ""message_labels"" ml2 WHERE ml2.""MessageId"" = m.""Id"")
 {sinceClause}
 ORDER BY score
 LIMIT {limit}";
