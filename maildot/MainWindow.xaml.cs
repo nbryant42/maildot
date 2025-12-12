@@ -239,6 +239,8 @@ public sealed partial class MainWindow : Window
         _dashboardView.LabelSelected += OnLabelSelected;
         _dashboardView.SuggestionAccepted -= OnSuggestionAccepted;
         _dashboardView.SuggestionAccepted += OnSuggestionAccepted;
+        _dashboardView.LabelSenderRequested -= OnLabelSenderRequested;
+        _dashboardView.LabelSenderRequested += OnLabelSenderRequested;
 
         _dashboardView.BindViewModel(_mailboxViewModel);
         RootContent.Content = _dashboardView;
@@ -866,6 +868,18 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private static IEnumerable<LabelViewModel> FlattenLabels(IEnumerable<LabelViewModel> roots)
+    {
+        foreach (var l in roots)
+        {
+            yield return l;
+            foreach (var child in FlattenLabels(l.Children))
+            {
+                yield return child;
+            }
+        }
+    }
+
     private async void OnSuggestionAccepted(object? sender, EmailMessageViewModel message)
     {
         if (_imapService == null || _mailboxViewModel?.SelectedLabelId is not int labelId)
@@ -887,6 +901,59 @@ public sealed partial class MainWindow : Window
         {
             message.IsSuggested = false;
             message.SuggestionScore = 0;
+        }
+    }
+
+    private async void OnLabelSenderRequested(object? sender, EmailMessageViewModel message)
+    {
+        if (_imapService == null || _mailboxViewModel == null)
+        {
+            return;
+        }
+
+        var labels = FlattenLabels(_mailboxViewModel.Labels).ToList();
+        if (labels.Count == 0)
+        {
+            return;
+        }
+
+        var xamlRoot = GetXamlRoot();
+        if (xamlRoot == null)
+        {
+            return;
+        }
+
+        var combo = new ComboBox
+        {
+            ItemsSource = labels,
+            DisplayMemberPath = "Name",
+            SelectedItem = labels.FirstOrDefault(),
+            Width = 260
+        };
+
+        var dialog = new ContentDialog
+        {
+            Title = $"Label sender: {message.SenderAddress}",
+            Content = combo,
+            PrimaryButtonText = "Apply",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = xamlRoot
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary || combo.SelectedItem is not LabelViewModel selected)
+        {
+            return;
+        }
+
+        var success = await _imapService.AddSenderLabelAsync(selected.Id, message.SenderAddress);
+        if (success)
+        {
+            message.LabelNames = message.LabelNames
+                .Concat(new[] { selected.Name })
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
     }
 

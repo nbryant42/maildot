@@ -39,6 +39,7 @@ public sealed partial class ImapDashboardView : UserControl
     public event EventHandler<LabelDropRequest>? LabelDropRequested;
     public event EventHandler<LabelViewModel>? LabelSelected;
     public event EventHandler<EmailMessageViewModel>? SuggestionAccepted;
+    public event EventHandler<EmailMessageViewModel>? LabelSenderRequested;
 
     public void BindViewModel(MailboxViewModel viewModel)
     {
@@ -309,15 +310,28 @@ public sealed partial class ImapDashboardView : UserControl
         _contextMenuMessage = (e.OriginalSource as FrameworkElement)?.DataContext as EmailMessageViewModel
                               ?? MessagesList.SelectedItem as EmailMessageViewModel;
 
-        if (_contextMenuMessage == null || !_contextMenuMessage.IsSuggested)
+        if (_contextMenuMessage == null)
         {
             return;
         }
 
         var flyout = new MenuFlyout();
-        var addItem = new MenuFlyoutItem { Text = "Add to label" };
-        addItem.Click += OnAddSuggestionToLabelClick;
-        flyout.Items.Add(addItem);
+        var labelSender = new MenuFlyoutItem { Text = "Label sender..." };
+        labelSender.Click += (_, __) =>
+        {
+            if (_contextMenuMessage != null)
+            {
+                LabelSenderRequested?.Invoke(this, _contextMenuMessage);
+            }
+        };
+        flyout.Items.Add(labelSender);
+
+        if (_contextMenuMessage.IsSuggested)
+        {
+            var addItem = new MenuFlyoutItem { Text = "Add to label" };
+            addItem.Click += OnAddSuggestionToLabelClick;
+            flyout.Items.Add(addItem);
+        }
 
         if (e.TryGetPosition(MessagesList, out var point))
         {

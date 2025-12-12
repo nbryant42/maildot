@@ -1900,21 +1900,32 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             var rows = await (
                 from m in db.ImapMessages.AsNoTracking()
                 join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
-                join ml in db.MessageLabels.AsNoTracking() on m.Id equals ml.MessageId
-                join l in db.Labels.AsNoTracking() on ml.LabelId equals l.Id
                 where f.AccountId == _settings.Id && uidArray.Contains(m.ImapUid)
-                select new { m.ImapUid, l.Name }
+                select new
+                {
+                    m.ImapUid,
+                    MessageLabels = (
+                        from ml in db.MessageLabels.AsNoTracking()
+                        join l in db.Labels.AsNoTracking() on ml.LabelId equals l.Id
+                        where ml.MessageId == m.Id
+                        select l.Name
+                    ).ToList(),
+                    SenderLabels = (
+                        from sl in db.SenderLabels.AsNoTracking()
+                        join l in db.Labels.AsNoTracking() on sl.LabelId equals l.Id
+                        where sl.FromAddress == m.FromAddress.ToLower()
+                        select l.Name
+                    ).ToList()
+                }
             ).ToListAsync(_cts.Token);
 
             foreach (var row in rows)
             {
-                if (!result.TryGetValue(row.ImapUid, out var list))
+                var names = row.MessageLabels.Concat(row.SenderLabels).Distinct().ToList();
+                if (names.Count > 0)
                 {
-                    list = new List<string>();
-                    result[row.ImapUid] = list;
+                    result[row.ImapUid] = names;
                 }
-
-                list.Add(row.Name);
             }
         }
 
@@ -1991,6 +2002,7 @@ SELECT m.""Id"", m.""ImapUid"", m.""FolderId"", m.""ReceivedUtc"", ml.""Vector""
 FROM ""message_embeddings"" ml
 JOIN ""imap_messages"" m ON m.""Id"" = ml.""MessageId""
 WHERE NOT EXISTS (SELECT 1 FROM ""message_labels"" ml2 WHERE ml2.""MessageId"" = m.""Id"")
+  AND NOT EXISTS (SELECT 1 FROM ""sender_labels"" sl WHERE lower(sl.""from_address"") = lower(m.""FromAddress""))
 {sinceClause}
 {dominanceClause}
 ORDER BY score
@@ -2062,8 +2074,12 @@ LIMIT {limit}";
         float[]? centroidArr = null;
         await using (var centroidCmd = new NpgsqlCommand(
             @"SELECT avg(e.""Vector"")::real[] FROM ""message_embeddings"" e
-JOIN ""message_labels"" ml ON ml.""MessageId"" = e.""MessageId""
-WHERE ml.""LabelId"" = @p0", conn))
+JOIN ""imap_messages"" m ON m.""Id"" = e.""MessageId""
+WHERE EXISTS (
+    SELECT 1 FROM ""message_labels"" ml WHERE ml.""MessageId"" = m.""Id"" AND ml.""LabelId"" = @p0
+    UNION
+    SELECT 1 FROM ""sender_labels"" sl WHERE sl.""LabelId"" = @p0 AND sl.""from_address"" = lower(m.""FromAddress"")
+)", conn))
         {
             centroidCmd.Parameters.AddWithValue("p0", labelId);
             var scalar = await centroidCmd.ExecuteScalarAsync(token);
@@ -2351,14 +2367,42 @@ WHERE ml.""LabelId"" = @p0", conn))
                 var explicitSet = explicitResults
                     .Select(r =>
                     {
-                        var vm = CreateEmailViewModel(r.Message, r.Folder, r.Body);
-                        vm.IsSuggested = false;
-                        return vm;
-                    })
-                    .ToList();
+                    var vm = CreateEmailViewModel(r.Message, r.Folder, r.Body);
+                    vm.IsSuggested = false;
+                    return vm;
+                })
+                .ToList();
+
+                var senderResults = await (
+                    from sl in db.SenderLabels.AsNoTracking()
+                    where sl.LabelId == labelId
+                    join m in db.ImapMessages.AsNoTracking() on sl.FromAddress equals m.FromAddress.ToLower()
+                    join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
+                    where f.AccountId == _settings.Id
+                    join b in db.MessageBodies.AsNoTracking() on m.Id equals b.MessageId into bodies
+                    from b in bodies.DefaultIfEmpty()
+                    select new { Message = m, Folder = f, Body = b }
+                ).ToListAsync(token);
+
+                var senderVms = senderResults.Select(r =>
+                {
+                    var vm = CreateEmailViewModel(r.Message, r.Folder, r.Body);
+                    vm.IsSuggested = false;
+                    vm.LabelNames = new List<string> { label.Name };
+                    return vm;
+                }).ToList();
 
                 var suggestions = await GetSuggestedMessagesAsync(db, labelId, sinceUtc, token);
                 var explicitIds = explicitResults.Select(r => r.Message.Id).ToHashSet();
+
+                foreach (var vm in senderVms)
+                {
+                    if (!explicitIds.Contains(int.Parse(vm.Id)))
+                    {
+                        explicitSet.Add(vm);
+                        explicitIds.Add(int.Parse(vm.Id));
+                    }
+                }
 
                 double minScore = suggestions.Count > 0 ? suggestions.Min(s => s.Score) : 0;
                 double maxScore = suggestions.Count > 0 ? suggestions.Max(s => s.Score) : 0;
@@ -2529,6 +2573,57 @@ WHERE ml.""LabelId"" = @p0", conn))
             await ReportStatusAsync($"Applied label \"{label.Name}\"", false);
             return true;
         }
+    }
+
+    public async Task<bool> AddSenderLabelAsync(int labelId, string fromAddress)
+    {
+        var token = _cts.Token;
+        if (_settings == null || string.IsNullOrWhiteSpace(fromAddress))
+        {
+            return false;
+        }
+
+        var cleaned = TextCleaner.CleanNullable(fromAddress)?.Trim();
+        if (string.IsNullOrWhiteSpace(cleaned))
+        {
+            return false;
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return false;
+        }
+
+        await using (db)
+        {
+            var existing = await db.SenderLabels
+                .AsNoTracking()
+                .FirstOrDefaultAsync(s => s.LabelId == labelId && s.FromAddress.ToLower() == cleaned.ToLower(), token);
+
+            if (existing != null)
+            {
+                return true;
+            }
+
+            db.SenderLabels.Add(new SenderLabel
+            {
+                FromAddress = cleaned.ToLowerInvariant(),
+                LabelId = labelId
+            });
+
+            try
+            {
+                await db.SaveChangesAsync(token);
+            }
+            catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+            {
+                return true;
+            }
+        }
+
+        await ReportStatusAsync($"Labeled sender {cleaned}", false);
+        return true;
     }
 
     private async Task<MessageBodyResult?> LoadMessageBodyFromDatabaseAsync(string folderId, string messageId, CancellationToken token)

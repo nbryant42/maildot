@@ -14,6 +14,7 @@ The initial schema is designed to mirror what the app already tracks locally (ac
 | `message_embeddings` | pgvector column that stores one embedding per message (or per chunk). | `message_id (fk)`, `chunk_index`, `embedding vector(1024)`, `model_version`, `created_at` |
 | `labels` | User-defined labels (hierarchical) per account. | `id (int identity, pk)`, `account_id (fk)`, `name`, `parent_label_id (fk self)` |
 | `message_labels` | Many-to-many between messages and labels. | `label_id (fk)`, `message_id (fk)` |
+| `sender_labels` | Maps a sender address to a label. | `id (pk)`, `from_address`, `label_id (fk)` |
 
 Notes:
 - `imap_messages.hash` can be a deterministic SHA based on Message-Id + Date headers to avoid duplicates.
@@ -128,6 +129,15 @@ public sealed class MessageLabel
     public Label Label { get; set; } = default!;
     public ImapMessage Message { get; set; } = default!;
 }
+
+public sealed class SenderLabel
+{
+    public int Id { get; set; }
+    public string FromAddress { get; set; } = string.Empty;
+    public int LabelId { get; set; }
+
+    public Label Label { get; set; } = default!;
+}
 ```
 
 ### Fluent Configuration Highlights
@@ -177,5 +187,6 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
 
 1. `InitialPostgresSchema` migration creates `imap_accounts`, `imap_folders`, `imap_messages`, `message_bodies`, `message_embeddings`, `message_attachments`.
 2. `AddLabels` adds `labels` and `message_labels`, and creates a unique `(account_id, parent_label_id, name)` index with `NULLS NOT DISTINCT`.
-3. Migration seeds nothing, but ensures pgvector extension is installed (`migrationBuilder.Sql("CREATE EXTENSION IF NOT EXISTS vector;");`).
-4. Future migrations can add indexes for vector similarity (`USING ivfflat`), triggers for full-text search, etc.
+3. `AddSenderLabels` adds `sender_labels` to map senders to labels.
+4. Migration seeds nothing, but ensures pgvector extension is installed (`migrationBuilder.Sql("CREATE EXTENSION IF NOT EXISTS vector;");`).
+5. Future migrations can add indexes for vector similarity (`USING ivfflat`), triggers for full-text search, etc.

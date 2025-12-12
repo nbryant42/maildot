@@ -109,3 +109,12 @@ public sealed class MessageLabel
     public Label Label { get; set; } = default!;
     public ImapMessage Message { get; set; } = default!;
 }
+
+public sealed class SenderLabel
+{
+    public int Id { get; set; }
+    public string FromAddress { get; set; } = string.Empty;
+    public int LabelId { get; set; }
+
+    public Label Label { get; set; } = default!;
+}

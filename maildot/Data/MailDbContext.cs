@@ -18,6 +18,7 @@ public sealed class MailDbContext : DbContext
     public DbSet<MessageEmbedding> MessageEmbeddings => Set<MessageEmbedding>();
     public DbSet<Label> Labels => Set<Label>();
     public DbSet<MessageLabel> MessageLabels => Set<MessageLabel>();
+    public DbSet<SenderLabel> SenderLabels => Set<SenderLabel>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -118,6 +119,18 @@ public sealed class MailDbContext : DbContext
             entity.HasOne(ml => ml.Message)
                   .WithMany(m => m.LabelLinks)
                   .HasForeignKey(ml => ml.MessageId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<SenderLabel>(entity =>
+        {
+            entity.ToTable("sender_labels");
+            entity.Property(e => e.Id).HasColumnName("id");
+            entity.Property(e => e.FromAddress).HasColumnName("from_address");
+            entity.HasIndex(e => e.FromAddress);
+            entity.HasOne(e => e.Label)
+                  .WithMany()
+                  .HasForeignKey(e => e.LabelId)
                   .OnDelete(DeleteBehavior.Cascade);
         });
     }
