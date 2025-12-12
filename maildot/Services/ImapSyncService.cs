@@ -970,6 +970,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
         await PersistMessagesAsync(folder, summaries);
 
+        var labelMap = await LoadLabelMapAsync(summaries.Select(s => (long)s.UniqueId.Id));
+
         return summaries
             .OrderByDescending(s => s.InternalDate?.UtcDateTime ?? DateTime.MinValue)
             .Select(summary =>
@@ -994,7 +996,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 var ccList = FormatAddressList(summary.Envelope?.Cc);
                 var bccList = FormatAddressList(summary.Envelope?.Bcc);
 
-                return new EmailMessageViewModel
+                var vm = new EmailMessageViewModel
                 {
                     Id = summary.UniqueId.Id.ToString(),
                     FolderId = folder.FullName,
@@ -1009,6 +1011,13 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     Cc = string.IsNullOrWhiteSpace(ccList) ? null : ccList,
                     Bcc = string.IsNullOrWhiteSpace(bccList) ? null : bccList
                 };
+
+                if (labelMap.TryGetValue(summary.UniqueId.Id, out var names))
+                {
+                    vm.LabelNames = names;
+                }
+
+                return vm;
             })
             .ToList();
     }
@@ -1864,6 +1873,52 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         }
         trimmed = TextCleaner.CleanNullable(trimmed);
         return string.IsNullOrWhiteSpace(trimmed) ? string.Empty : trimmed;
+    }
+
+    private async Task<Dictionary<long, List<string>>> LoadLabelMapAsync(IEnumerable<long> uids)
+    {
+        var result = new Dictionary<long, List<string>>();
+        if (_settings == null)
+        {
+            return result;
+        }
+
+        var uidArray = uids.Distinct().ToArray();
+        if (uidArray.Length == 0)
+        {
+            return result;
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return result;
+        }
+
+        await using (db)
+        {
+            var rows = await (
+                from m in db.ImapMessages.AsNoTracking()
+                join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
+                join ml in db.MessageLabels.AsNoTracking() on m.Id equals ml.MessageId
+                join l in db.Labels.AsNoTracking() on ml.LabelId equals l.Id
+                where f.AccountId == _settings.Id && uidArray.Contains(m.ImapUid)
+                select new { m.ImapUid, l.Name }
+            ).ToListAsync(_cts.Token);
+
+            foreach (var row in rows)
+            {
+                if (!result.TryGetValue(row.ImapUid, out var list))
+                {
+                    list = new List<string>();
+                    result[row.ImapUid] = list;
+                }
+
+                list.Add(row.Name);
+            }
+        }
+
+        return result;
     }
 
     private static List<LabelViewModel> BuildLabelTree(IEnumerable<Label> labels)

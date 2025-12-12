@@ -13,6 +13,8 @@
     <UserControl.Resources>
         <conv:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter" />
         <conv:SuggestionToBrushConverter x:Key="SuggestionToBrushConverter" />
+        <conv:LabelNamesTooltipConverter x:Key="LabelNamesTooltipConverter" />
+        <conv:LabelCountToVisibilityConverter x:Key="LabelCountToVisibilityConverter" />
     </UserControl.Resources>
 
     <Grid MinWidth="1050"
@@ -227,17 +229,31 @@
                                             </StackPanel>
                                         </StackPanel>
 
-                                        <Border Grid.Column="2"
+                                        <StackPanel Grid.Column="2"
                                                 Visibility="{Binding IsSuggested, Converter={StaticResource BoolToVisibilityConverter}}"
-                                                Background="{ThemeResource LayerFillColorDefaultBrush}"
-                                                CornerRadius="4"
-                                                Padding="6,2"
+                                                Orientation="Vertical"
                                                 VerticalAlignment="Top"
-                                                HorizontalAlignment="Right">
-                                            <TextBlock Text="Suggested"
-                                                       FontSize="12"
-                                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                        </Border>
+                                                HorizontalAlignment="Right"
+                                                Spacing="6">
+                                            <Border Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                                    CornerRadius="4"
+                                                    Padding="6,2">
+                                                <TextBlock Text="Suggested"
+                                                           FontSize="12"
+                                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                            </Border>
+                                            <FontIcon Glyph="&#xE932;"
+                                                      Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                      ToolTipService.ToolTip="{Binding LabelNames, Converter={StaticResource LabelNamesTooltipConverter}}" />
+                                        </StackPanel>
+
+                                        <FontIcon Grid.Column="2"
+                                                  Glyph="&#xE932;"
+                                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                  VerticalAlignment="Top"
+                                                  HorizontalAlignment="Right"
+                                                  ToolTipService.ToolTip="{Binding LabelNames, Converter={StaticResource LabelNamesTooltipConverter}}"
+                                                  Visibility="{Binding LabelNames.Count, Converter={StaticResource LabelCountToVisibilityConverter}}" />
                                     </Grid>
                                 </Border>
                             </DataTemplate>

@@ -426,6 +426,7 @@ public sealed class EmailMessageViewModel : INotifyPropertyChanged
     private string? _bcc;
     private bool _isSuggested;
     private double _suggestionScore;
+    private List<string> _labelNames = new();
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -525,6 +526,12 @@ public sealed class EmailMessageViewModel : INotifyPropertyChanged
     {
         get => _suggestionScore;
         set => SetProperty(ref _suggestionScore, value, nameof(SuggestionScore));
+    }
+
+    public List<string> LabelNames
+    {
+        get => _labelNames;
+        set => SetProperty(ref _labelNames, value ?? new List<string>(), nameof(LabelNames));
     }
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
