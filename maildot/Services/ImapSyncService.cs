@@ -1947,51 +1947,44 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
     {
         const int limit = 20;
 
-        var vectors = new List<float[]>();
         var connString = BuildConnectionString(db);
         await using var conn = new NpgsqlConnection(connString);
         await conn.OpenAsync(token);
 
-        await using (var embedCmd = new NpgsqlCommand(
-            @"SELECT e.""Vector""::real[] FROM ""message_embeddings"" e
-JOIN ""message_labels"" ml ON ml.""MessageId"" = e.""MessageId""
-WHERE ml.""LabelId"" = @p0", conn))
-        {
-            embedCmd.Parameters.AddWithValue("p0", labelId);
+        float[]? centroidArr = await GetCentroid(labelId, conn, token);
 
-            await using var embedReader = await embedCmd.ExecuteReaderAsync(token);
-            while (await embedReader.ReadAsync(token))
-            {
-                if (!embedReader.IsDBNull(0))
-                {
-                    vectors.Add(embedReader.GetFieldValue<float[]>(0));
-                }
-            }
-        }
-
-        if (vectors.Count == 0)
+        if (centroidArr == null || centroidArr.Length == 0)
         {
             return [];
         }
 
-        var dim = vectors[0].ToArray().Length;
-        var centroidArr = new float[dim];
-        foreach (var v in vectors)
+        var centroidLiteral = BuildVectorLiteral(centroidArr);
+        var sinceClause = sinceUtc != null ? @"AND m.""ReceivedUtc"" >= @p0" : string.Empty;
+
+        var allLabelIds = await db.Labels
+            .AsNoTracking()
+            .Where(l => _settings != null && l.AccountId == _settings.Id)
+            .Select(l => l.Id)
+            .ToListAsync(token);
+
+        var otherCentroids = new List<float[]>();
+        foreach (var otherId in allLabelIds.Where(id => id != labelId))
         {
-            var arr = v.ToArray();
-            for (int i = 0; i < dim; i++)
+            var other = await GetCentroid(otherId, conn, token);
+            if (other != null && other.Length > 0)
             {
-                centroidArr[i] += arr[i];
+                otherCentroids.Add(other);
             }
         }
 
-        for (int i = 0; i < dim; i++)
+        var betterFilters = new List<string>();
+        foreach (var other in otherCentroids)
         {
-            centroidArr[i] /= vectors.Count;
+            var otherLiteral = BuildVectorLiteral(other);
+            betterFilters.Add($@"ml.""Vector"" <#> '{centroidLiteral}' <= ml.""Vector"" <#> '{otherLiteral}'");
         }
 
-        var centroidLiteral = BuildVectorLiteral(centroidArr);
-        var sinceClause = sinceUtc != null ? @"AND m.""ReceivedUtc"" >= @p0" : string.Empty;
+        var dominanceClause = betterFilters.Count > 0 ? "AND " + string.Join(" AND ", betterFilters) : string.Empty;
 
         var sql = $@"
 SELECT m.""Id"", m.""ImapUid"", m.""FolderId"", m.""ReceivedUtc"", ml.""Vector"" <#> '{centroidLiteral}' AS score
@@ -1999,6 +1992,7 @@ FROM ""message_embeddings"" ml
 JOIN ""imap_messages"" m ON m.""Id"" = ml.""MessageId""
 WHERE NOT EXISTS (SELECT 1 FROM ""message_labels"" ml2 WHERE ml2.""MessageId"" = m.""Id"")
 {sinceClause}
+{dominanceClause}
 ORDER BY score
 LIMIT {limit}";
 
@@ -2061,6 +2055,25 @@ LIMIT {limit}";
         }
 
         return results;
+    }
+
+    private static async Task<float[]?> GetCentroid(int labelId, NpgsqlConnection conn, CancellationToken token)
+    {
+        float[]? centroidArr = null;
+        await using (var centroidCmd = new NpgsqlCommand(
+            @"SELECT avg(e.""Vector"")::real[] FROM ""message_embeddings"" e
+JOIN ""message_labels"" ml ON ml.""MessageId"" = e.""MessageId""
+WHERE ml.""LabelId"" = @p0", conn))
+        {
+            centroidCmd.Parameters.AddWithValue("p0", labelId);
+            var scalar = await centroidCmd.ExecuteScalarAsync(token);
+            if (scalar != null && scalar is float[] floats)
+            {
+                centroidArr = floats;
+            }
+        }
+
+        return centroidArr;
     }
 
     private static EmailMessageViewModel CreateEmailViewModel(ImapMessage message, Models.ImapFolder folder, MessageBody? body)
