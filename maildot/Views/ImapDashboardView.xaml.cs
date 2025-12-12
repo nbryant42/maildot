@@ -15,6 +15,7 @@ public sealed partial class ImapDashboardView : UserControl
     private ScrollViewer? _messagesScrollViewer;
     private bool _hasRequestedMore;
     private bool _attachmentsInitialized;
+    private EmailMessageViewModel? _contextMenuMessage;
 
     public TreeView LabelsTreeControl => LabelsTree;
 
@@ -37,6 +38,7 @@ public sealed partial class ImapDashboardView : UserControl
     public event EventHandler<int>? ChildLabelAddRequested;
     public event EventHandler<LabelDropRequest>? LabelDropRequested;
     public event EventHandler<LabelViewModel>? LabelSelected;
+    public event EventHandler<EmailMessageViewModel>? SuggestionAccepted;
 
     public void BindViewModel(MailboxViewModel viewModel)
     {
@@ -287,6 +289,46 @@ public sealed partial class ImapDashboardView : UserControl
         {
             LabelSelected?.Invoke(this, label);
         }
+    }
+
+    private void OnAddSuggestionToLabelClick(object sender, RoutedEventArgs e)
+    {
+        if (_contextMenuMessage != null)
+        {
+            SuggestionAccepted?.Invoke(this, _contextMenuMessage);
+        }
+    }
+
+    private void OnMessagesContextRequested(object sender, ContextRequestedEventArgs e)
+    {
+        if (sender is not FrameworkElement)
+        {
+            return;
+        }
+
+        _contextMenuMessage = (e.OriginalSource as FrameworkElement)?.DataContext as EmailMessageViewModel
+                              ?? MessagesList.SelectedItem as EmailMessageViewModel;
+
+        if (_contextMenuMessage == null || !_contextMenuMessage.IsSuggested)
+        {
+            return;
+        }
+
+        var flyout = new MenuFlyout();
+        var addItem = new MenuFlyoutItem { Text = "Add to label" };
+        addItem.Click += OnAddSuggestionToLabelClick;
+        flyout.Items.Add(addItem);
+
+        if (e.TryGetPosition(MessagesList, out var point))
+        {
+            flyout.ShowAt(MessagesList, point);
+        }
+        else
+        {
+            flyout.ShowAt(MessagesList);
+        }
+
+        e.Handled = true;
     }
 
     private static void SetLabelDragOperation(DragEventArgs e)

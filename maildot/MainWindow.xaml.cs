@@ -237,6 +237,8 @@ public sealed partial class MainWindow : Window
         _dashboardView.LabelDropRequested += OnLabelDropRequested;
         _dashboardView.LabelSelected -= OnLabelSelected;
         _dashboardView.LabelSelected += OnLabelSelected;
+        _dashboardView.SuggestionAccepted -= OnSuggestionAccepted;
+        _dashboardView.SuggestionAccepted += OnSuggestionAccepted;
 
         _dashboardView.BindViewModel(_mailboxViewModel);
         RootContent.Content = _dashboardView;
@@ -861,6 +863,30 @@ public sealed partial class MainWindow : Window
         if (_dashboardView?.LabelsTreeControl.SelectedNodes.Count > 0)
         {
             _dashboardView.LabelsTreeControl.SelectedNodes.Clear();
+        }
+    }
+
+    private async void OnSuggestionAccepted(object? sender, EmailMessageViewModel message)
+    {
+        if (_imapService == null || _mailboxViewModel?.SelectedLabelId is not int labelId)
+        {
+            return;
+        }
+
+        var folderId = string.IsNullOrWhiteSpace(message.FolderId)
+            ? _mailboxViewModel.SelectedFolder?.Id
+            : message.FolderId;
+
+        if (string.IsNullOrWhiteSpace(folderId))
+        {
+            return;
+        }
+
+        var success = await _imapService.AssignLabelToMessageAsync(labelId, folderId!, message.Id);
+        if (success)
+        {
+            message.IsSuggested = false;
+            message.SuggestionScore = 0;
         }
     }
 

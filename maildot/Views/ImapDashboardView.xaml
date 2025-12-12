@@ -192,7 +192,8 @@
                               CanDragItems="True"
                               DragItemsStarting="OnMessagesDragItemsStarting"
                               SelectionChanged="OnMessagesSelectionChanged"
-                              Loaded="OnMessagesListLoaded">
+                              Loaded="OnMessagesListLoaded"
+                              ContextRequested="OnMessagesContextRequested">
                         <ListView.ItemTemplate>
                             <DataTemplate x:DataType="viewModels:EmailMessageViewModel">
                                 <Border Background="{Binding SuggestionScore, Converter={StaticResource SuggestionToBrushConverter}}"
