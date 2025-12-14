@@ -1962,9 +1962,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         await using var conn = new NpgsqlConnection(connString);
         await conn.OpenAsync(token);
 
-        float[]? centroidArr = await GetCentroid(labelId, conn, token);
-
-        if (centroidArr == null || centroidArr.Length == 0)
+        var centroids = await GetCentroidsAsync(conn, token);
+        if (!centroids.TryGetValue(labelId, out var centroidArr) || centroidArr.Length == 0)
         {
             return [];
         }
@@ -1972,19 +1971,17 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         var centroidLiteral = BuildVectorLiteral(centroidArr);
         var sinceClause = sinceUtc != null ? @"AND m.""ReceivedUtc"" >= @p0" : string.Empty;
 
-        var allLabelIds = await db.Labels
-            .AsNoTracking()
-            .Where(l => _settings != null && l.AccountId == _settings.Id)
-            .Select(l => l.Id)
-            .ToListAsync(token);
-
         var otherCentroids = new List<float[]>();
-        foreach (var otherId in allLabelIds.Where(id => id != labelId))
+        foreach (var kvp in centroids)
         {
-            var other = await GetCentroid(otherId, conn, token);
-            if (other != null && other.Length > 0)
+            if (kvp.Key == labelId)
             {
-                otherCentroids.Add(other);
+                continue;
+            }
+
+            if (kvp.Value.Length > 0)
+            {
+                otherCentroids.Add(kvp.Value);
             }
         }
 
@@ -2069,27 +2066,37 @@ LIMIT {limit}";
         return results;
     }
 
-    private static async Task<float[]?> GetCentroid(int labelId, NpgsqlConnection conn, CancellationToken token)
+    private static async Task<Dictionary<int, float[]>> GetCentroidsAsync(NpgsqlConnection conn, CancellationToken token)
     {
-        float[]? centroidArr = null;
-        await using (var centroidCmd = new NpgsqlCommand(
-            @"SELECT avg(e.""Vector"")::real[] FROM ""message_embeddings"" e
-JOIN ""imap_messages"" m ON m.""Id"" = e.""MessageId""
-WHERE EXISTS (
-    SELECT 1 FROM ""message_labels"" ml WHERE ml.""MessageId"" = m.""Id"" AND ml.""LabelId"" = @p0
+        var sql = @"
+WITH label_ids AS (
+    SELECT ""LabelId"", ""MessageId"" FROM ""message_labels""
     UNION
-    SELECT 1 FROM ""sender_labels"" sl WHERE sl.""LabelId"" = @p0 AND sl.""from_address"" = lower(m.""FromAddress"")
-)", conn))
+    SELECT sl.""LabelId"", m.""Id""
+    FROM ""sender_labels"" sl
+    JOIN ""imap_messages"" m ON sl.""from_address"" = lower(m.""FromAddress"")
+)
+SELECT lids.""LabelId"", avg(e.""Vector"")::real[] AS centroid
+FROM ""message_embeddings"" e
+JOIN label_ids lids ON lids.""MessageId"" = e.""MessageId""
+GROUP BY lids.""LabelId""";
+
+        var map = new Dictionary<int, float[]>();
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        await using var reader = await cmd.ExecuteReaderAsync(token);
+        while (await reader.ReadAsync(token))
         {
-            centroidCmd.Parameters.AddWithValue("p0", labelId);
-            var scalar = await centroidCmd.ExecuteScalarAsync(token);
-            if (scalar != null && scalar is float[] floats)
+            if (reader.IsDBNull(1))
             {
-                centroidArr = floats;
+                continue;
             }
+
+            var labelId = reader.GetInt32(0);
+            var vec = reader.GetFieldValue<float[]>(1);
+            map[labelId] = vec;
         }
 
-        return centroidArr;
+        return map;
     }
 
     private static EmailMessageViewModel CreateEmailViewModel(ImapMessage message, Models.ImapFolder folder, MessageBody? body)
