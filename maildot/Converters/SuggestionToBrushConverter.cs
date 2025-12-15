@@ -10,7 +10,7 @@ public sealed partial class SuggestionToBrushConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, string language)
     {
-        if (value is not double score || score <= 0)
+        if (value is not double score || score < 0)
         {
             return new SolidColorBrush(Colors.Transparent);
         }

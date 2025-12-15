@@ -900,7 +900,7 @@ public sealed partial class MainWindow : Window
         if (success)
         {
             message.IsSuggested = false;
-            message.SuggestionScore = 0;
+            message.SuggestionScore = Double.NegativeInfinity;
         }
     }
 
@@ -947,14 +947,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        var success = await _imapService.AddSenderLabelAsync(selected.Id, message.SenderAddress);
-        if (success)
-        {
-            message.LabelNames = message.LabelNames
-                .Concat(new[] { selected.Name })
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-        }
+        await _imapService.AddSenderLabelAsync(selected.Id, message.SenderAddress);
     }
 
     private static string? ExtractAddress(EmailMessageViewModel message)

@@ -425,8 +425,8 @@ public sealed class EmailMessageViewModel : INotifyPropertyChanged
     private string? _cc;
     private string? _bcc;
     private bool _isSuggested;
-    private double _suggestionScore;
-    private List<string> _labelNames = new();
+    private double _suggestionScore = Double.NegativeInfinity;
+    private List<string> _labelNames = [];
 
     public event PropertyChangedEventHandler? PropertyChanged;
 

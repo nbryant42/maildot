@@ -228,23 +228,17 @@
                                             </StackPanel>
                                         </StackPanel>
 
-                                        <StackPanel Grid.Column="2"
+                                        <Border Grid.Column="2"
                                                 Visibility="{Binding IsSuggested, Converter={StaticResource BoolToVisibilityConverter}}"
-                                                Orientation="Vertical"
+                                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                                CornerRadius="4"
+                                                Padding="6,2"
                                                 VerticalAlignment="Top"
-                                                HorizontalAlignment="Right"
-                                                Spacing="6">
-                                            <Border Background="{ThemeResource LayerFillColorDefaultBrush}"
-                                                    CornerRadius="4"
-                                                    Padding="6,2">
-                                                <TextBlock Text="Suggested"
-                                                           FontSize="12"
-                                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                            </Border>
-                                            <FontIcon Glyph="&#xE932;"
-                                                      Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                                      ToolTipService.ToolTip="{Binding LabelNames, Converter={StaticResource LabelNamesTooltipConverter}}" />
-                                        </StackPanel>
+                                                HorizontalAlignment="Right">
+                                            <TextBlock Text="Suggested"
+                                                       FontSize="12"
+                                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        </Border>
 
                                         <FontIcon Grid.Column="2"
                                                   Glyph="&#xE932;"

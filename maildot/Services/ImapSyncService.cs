@@ -1952,9 +1952,11 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         return roots;
     }
 
-    private sealed record SuggestedResult(ImapMessage Message, Models.ImapFolder Folder, MessageBody? Body, double Score);
+    private sealed record SuggestedResult(ImapMessage Message, Models.ImapFolder Folder, MessageBody? Body,
+        double Score);
 
-    private async Task<List<SuggestedResult>> GetSuggestedMessagesAsync(MailDbContext db, int labelId, DateTimeOffset? sinceUtc, CancellationToken token)
+    private async Task<List<SuggestedResult>> GetSuggestedMessagesAsync(MailDbContext db, int labelId,
+        DateTimeOffset? sinceUtc, CancellationToken token)
     {
         const int limit = 20;
 
@@ -2021,9 +2023,10 @@ LIMIT {limit}";
 
             while (await reader.ReadAsync(token))
             {
+                var score = reader.GetDouble(reader.GetOrdinal("score"));
+                if (score >= 0.0d) break;
                 var id = reader.GetInt32(0);
                 var folderId = reader.GetInt32(2);
-                var score = reader.GetDouble(reader.GetOrdinal("score"));
                 messageIds.Add(id);
                 folderIds.Add(folderId);
                 scoreMap[id] = score;
@@ -2395,7 +2398,6 @@ GROUP BY lids.""LabelId""";
                 {
                     var vm = CreateEmailViewModel(r.Message, r.Folder, r.Body);
                     vm.IsSuggested = false;
-                    vm.LabelNames = new List<string> { label.Name };
                     return vm;
                 }).ToList();
 
@@ -2411,10 +2413,6 @@ GROUP BY lids.""LabelId""";
                     }
                 }
 
-                double minScore = suggestions.Count > 0 ? suggestions.Min(s => s.Score) : 0;
-                double maxScore = suggestions.Count > 0 ? suggestions.Max(s => s.Score) : 0;
-                var range = Math.Max(0.0001, maxScore - minScore);
-
                 foreach (var suggestion in suggestions)
                 {
                     if (explicitIds.Contains(suggestion.Message.Id))
@@ -2424,7 +2422,11 @@ GROUP BY lids.""LabelId""";
 
                     var vm = CreateEmailViewModel(suggestion.Message, suggestion.Folder, suggestion.Body);
                     vm.IsSuggested = true;
-                    vm.SuggestionScore = (suggestion.Score - minScore) / range; // normalize 0 (best) .. 1 (worst)
+                    // convert negative inner product to cosine distance:
+                    // 0 (exact match) .. 1 (orthogonal) .. 2 (opposite meaning)
+                    // real world values I've seen are in the range ~0.057 - ~1.1, so SuggestionToBrushConverter
+                    // maps 0.0 to soft green and 1.0 to soft orange.
+                    vm.SuggestionScore = suggestion.Score + 1.0d;
                     explicitSet.Add(vm);
                 }
 
