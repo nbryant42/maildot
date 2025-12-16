@@ -27,81 +27,84 @@
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
-        <StackPanel Grid.Column="0" Padding="16">
-            <StackPanel Visibility="{Binding IsSearchActive, Converter={StaticResource BoolToVisibilityConverter}}"
+        <ScrollView Grid.Column="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Hidden">
+            <StackPanel Padding="16">
+                <StackPanel Visibility="{Binding IsSearchActive, Converter={StaticResource BoolToVisibilityConverter}}"
                         Spacing="8"
                         Margin="0,0,0,12">
-                <Grid ColumnSpacing="8" VerticalAlignment="Center">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>       <!-- label -->
-                        <ColumnDefinition Width="Auto"/>    <!-- X button -->
-                    </Grid.ColumnDefinitions>
-                    
-                    <TextBlock Grid.Column="0" Text="Search Results" FontSize="18" FontWeight="SemiBold"
+                    <Grid ColumnSpacing="8" VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions>
+                            <!-- label -->
+                            <ColumnDefinition Width="*"/>
+                            <!-- X button -->
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Grid.Column="0" Text="Search Results" FontSize="18" FontWeight="SemiBold"
                                VerticalAlignment="Center"/>
-                    <Button Grid.Column="1"
+                        <Button Grid.Column="1"
                             Click="OnClearSearchClicked"
                             VerticalAlignment="Center"
                             Background="Transparent"
                             BorderThickness="0"
                             ToolTipService.ToolTip="Clear search"
                             Margin="0,0,8,0">
-                        <Button.Resources>
-                            <SolidColorBrush x:Key="ButtonBackground" Color="Transparent" />
-                            <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="Transparent" />
-                            <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="Transparent" />
-                            <SolidColorBrush x:Key="ButtonBackgroundDisabled" Color="Transparent" />
-                            <SolidColorBrush x:Key="ButtonBorderBrush" Color="Transparent" />
-                            <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent" />
-                            <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent" />
-                            <SolidColorBrush x:Key="ButtonBorderBrushDisabled" Color="Transparent" />
-                        </Button.Resources>
-                        <Path Data="M3 3 L13 13 M13 3 L3 13"
+                            <Button.Resources>
+                                <SolidColorBrush x:Key="ButtonBackground" Color="Transparent" />
+                                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="Transparent" />
+                                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="Transparent" />
+                                <SolidColorBrush x:Key="ButtonBackgroundDisabled" Color="Transparent" />
+                                <SolidColorBrush x:Key="ButtonBorderBrush" Color="Transparent" />
+                                <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent" />
+                                <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent" />
+                                <SolidColorBrush x:Key="ButtonBorderBrushDisabled" Color="Transparent" />
+                            </Button.Resources>
+                            <Path Data="M3 3 L13 13 M13 3 L3 13"
                               Stroke="{ThemeResource TextFillColorSecondaryBrush}"
                               StrokeThickness="1.5"/>
-                    </Button>
-                </Grid>
-                <ListView ItemsSource="{Binding SearchItems}"
+                        </Button>
+                    </Grid>
+                    <ListView ItemsSource="{Binding SearchItems}"
                           SelectedItem="{Binding SelectedSearchItem, Mode=TwoWay}">
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="viewModels:SearchNavItemViewModel">
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Stretch" Spacing="8">
+                                    <TextBlock Text="{x:Bind DisplayName}" Width="150" TextTrimming="CharacterEllipsis" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </StackPanel>
+                <TextBlock Text="Folders" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,12" />
+                <ListView x:Name="FoldersList"
+                        ItemsSource="{Binding Folders}"
+                        SelectedItem="{Binding SelectedFolder, Mode=TwoWay}"
+                        SelectionChanged="OnFolderSelectionChanged">
                     <ListView.ItemTemplate>
-                        <DataTemplate x:DataType="viewModels:SearchNavItemViewModel">
+                        <DataTemplate x:DataType="viewModels:MailFolderViewModel">
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Stretch" Spacing="8">
                                 <TextBlock Text="{x:Bind DisplayName}" Width="150" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Text="{x:Bind UnreadCount}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             </StackPanel>
                         </DataTemplate>
                     </ListView.ItemTemplate>
                 </ListView>
-            </StackPanel>
-            <TextBlock Text="Folders" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,12" />
-            <ListView x:Name="FoldersList"
-                        ItemsSource="{Binding Folders}"
-                        SelectedItem="{Binding SelectedFolder, Mode=TwoWay}"
-                        SelectionChanged="OnFolderSelectionChanged">
-                <ListView.ItemTemplate>
-                    <DataTemplate x:DataType="viewModels:MailFolderViewModel">
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Stretch" Spacing="8">
-                            <TextBlock Text="{x:Bind DisplayName}" Width="150" TextTrimming="CharacterEllipsis" />
-                            <TextBlock Text="{x:Bind UnreadCount}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                        </StackPanel>
-                    </DataTemplate>
-                </ListView.ItemTemplate>
-            </ListView>
 
-            <Grid Margin="0,16,0,8" ColumnSpacing="8" VerticalAlignment="Center">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0" Text="Labels" FontSize="18" FontWeight="SemiBold" />
-                <Button Grid.Column="1"
+                <Grid Margin="0,16,0,8" ColumnSpacing="8" VerticalAlignment="Center">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Labels" FontSize="18" FontWeight="SemiBold" />
+                    <Button Grid.Column="1"
                         Click="OnAddRootLabelClicked"
                         Background="Transparent"
                         BorderThickness="0"
                         ToolTipService.ToolTip="Add label">
-                    <FontIcon Glyph="&#xE710;" />
-                </Button>
-            </Grid>
-            <TreeView x:Name="LabelsTree"
+                        <FontIcon Glyph="&#xE710;" />
+                    </Button>
+                </Grid>
+                <TreeView x:Name="LabelsTree"
                       ItemsSource="{Binding Labels}"
                       SelectionMode="Single"
                       ItemInvoked="OnLabelInvoked"
@@ -111,43 +114,44 @@
                       DragOver="OnLabelDragOver"
                       DragLeave="OnLabelDragLeave"
                       Drop="OnLabelDrop">
-                <TreeView.ItemContainerStyle>
-                    <Style TargetType="TreeViewItem">
-                        <Setter Property="Padding" Value="0" />
-                    </Style>
-                </TreeView.ItemContainerStyle>
-                <TreeView.ItemTemplate>
-                    <DataTemplate x:DataType="viewModels:LabelViewModel">
-                        <TreeViewItem ItemsSource="{x:Bind Children}"
+                    <TreeView.ItemContainerStyle>
+                        <Style TargetType="TreeViewItem">
+                            <Setter Property="Padding" Value="0" />
+                        </Style>
+                    </TreeView.ItemContainerStyle>
+                    <TreeView.ItemTemplate>
+                        <DataTemplate x:DataType="viewModels:LabelViewModel">
+                            <TreeViewItem ItemsSource="{x:Bind Children}"
                                       AllowDrop="True"
                                       DragEnter="OnLabelDragEnter"
                                       DragLeave="OnLabelDragLeave"
                                       DragOver="OnLabelDragOver"
                                       Drop="OnLabelDrop">
-                            <StackPanel Orientation="Horizontal"
+                                <StackPanel Orientation="Horizontal"
                                         Spacing="6"
                                         AllowDrop="True"
                                         DragEnter="OnLabelDragEnter"
                                         DragOver="OnLabelDragOver"
                                         DragLeave="OnLabelDragLeave"
                                         Drop="OnLabelDrop">
-                                <TextBlock Text="{x:Bind Name}"
+                                    <TextBlock Text="{x:Bind Name}"
                                            TextTrimming="CharacterEllipsis"
                                            HorizontalAlignment="Stretch" />
-                                <Button Click="OnAddChildLabelClicked"
+                                    <Button Click="OnAddChildLabelClicked"
                                         Tag="{x:Bind Id}"
                                         Background="Transparent"
                                         BorderThickness="0"
                                         HorizontalAlignment="Right"
                                         ToolTipService.ToolTip="Add child label">
-                                    <FontIcon Glyph="&#xE710;" FontSize="14"/>
-                                </Button>
-                            </StackPanel>
-                        </TreeViewItem>
-                    </DataTemplate>
-                </TreeView.ItemTemplate>
-            </TreeView>
-        </StackPanel>
+                                        <FontIcon Glyph="&#xE710;" FontSize="14"/>
+                                    </Button>
+                                </StackPanel>
+                            </TreeViewItem>
+                        </DataTemplate>
+                    </TreeView.ItemTemplate>
+                </TreeView>
+            </StackPanel>
+        </ScrollView>
 
         <Grid Grid.Column="1" Padding="24" RowSpacing="12">
             <Grid.RowDefinitions>
