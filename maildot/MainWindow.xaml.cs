@@ -30,6 +30,7 @@ public sealed partial class MainWindow : Window
     private AccountSettings? _activeAccount;
     private PostgresSettings _postgresSettings = PostgresSettingsStore.Load();
     private McpSettings _mcpSettings = McpSettingsStore.Load();
+    private McpServerHost? _mcpHost;
     private bool _startupInitialized;
     private SearchMode _searchMode = SearchMode.Auto;
     private AppWindow? _appWindow;
@@ -257,6 +258,12 @@ public sealed partial class MainWindow : Window
         await CleanupImapServiceAsync();
         _imapService = new ImapSyncService(_mailboxViewModel, DispatcherQueue);
         await _imapService.StartAsync(settings, password);
+
+        if (_mcpSettings.Enabled)
+        {
+            _mcpHost ??= new McpServerHost();
+            _ = _mcpHost.TryStartAsync(_mcpSettings);
+        }
     }
 
     private void OnFolderSelected(object? sender, MailFolderViewModel folder)
@@ -329,6 +336,11 @@ public sealed partial class MainWindow : Window
         {
             view.SetMcpStatus("MCP settings saved.", false);
         }
+
+        if (_mcpHost != null)
+        {
+            _ = _mcpHost.TryRestartAsync(_mcpSettings);
+        }
     }
 
     private async Task ShowSettingsDialogAsync(string? postgresStatusMessage = null, bool isError = false, bool forceShowWhenNoAccounts = false)
@@ -366,26 +378,26 @@ public sealed partial class MainWindow : Window
             XamlRoot = xamlRoot
         };
 
-        EventHandler addAccountHandler = async (_, __) =>
+        async void addAccountHandler(object? _, EventArgs __)
         {
             dialog.Hide();
             await ShowAccountSetup(null);
-        };
-        EventHandler<int> setActiveHandler = async (_, id) =>
+        }
+        async void setActiveHandler(object? _, int id)
         {
             dialog.Hide();
             await SwitchActiveAccountAsync(id);
-        };
-        EventHandler<int> reenterHandler = async (_, id) =>
+        }
+        async void reenterHandler(object? _, int id)
         {
             dialog.Hide();
             await ReenterPasswordAsync(id);
-        };
-        EventHandler<int> deleteHandler = async (_, id) =>
+        }
+        async void deleteHandler(object? _, int id)
         {
             dialog.Hide();
             await DeleteAccountAsync(id);
-        };
+        }
 
         settingsView.AddAccountRequested += addAccountHandler;
         settingsView.SetActiveAccountRequested += setActiveHandler;
@@ -517,6 +529,12 @@ public sealed partial class MainWindow : Window
         {
             await _imapService.DisposeAsync();
             _imapService = null;
+        }
+
+        if (_mcpHost != null)
+        {
+            await _mcpHost.StopAsync();
+            _mcpHost = null;
         }
     }
 

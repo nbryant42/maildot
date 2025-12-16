@@ -131,7 +131,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 _folderNextEndIndex[folderId] = -1;
                 await EnqueueAsync(() =>
                 {
-                    _viewModel.SetMessages(folderDisplay, Array.Empty<EmailMessageViewModel>());
+                    _viewModel.SetMessages(folderDisplay, []);
                     _viewModel.SetStatus("Folder is empty.", false);
                     _viewModel.SetLoadMoreAvailability(false);
                     _viewModel.SetRetryVisible(false);

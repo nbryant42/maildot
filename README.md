@@ -11,6 +11,12 @@ persistence engine from process crashes.
 - **No forced cloud storage:** This project will never force the user to store their emails "in the cloud."
 (PostgreSQL could be cloud-hosted if the user chooses, but we default to `localhost`.)
 - **Testbed for local AI inference:** I'm building out vector embeddings as a search and categorization mechanism.
+- **AI tooling connectivity**: via Model Context Protocol (MCP) to connect to local or cloud-hosted AI models.
+
+## Non-goals
+
+- **LLM-in-the-loop email management:** Out of scope for now. Other products like LM Studio have done great work
+  building LLM UX. Connect LM Studio, Claude Desktop, or similar to our MCP server for tooling.
 
 ## Project status
 
@@ -19,17 +25,21 @@ persistence engine from process crashes.
 - Basic email receiving UX works.
 - Basic rich-text email rendering: works, but HTML is sanitized heavily. Needs improvement.
 - PostgreSQL persistence works.
-- Search: semantic search via vector embeddings, and a simple sender filter over archived emails.
+- Search: semantic search via vector embeddings, and simple sender/subject filters over archived emails.
 - Email sending (Reply, Forward) is a kludge, which delegates to the system default mailer via mailto: links,
   which have length limits and no attachments.
-- Categorization via vector embeddings centroids: planned but not yet implemented.
-- Installer/packaging: not yet implemented. VS publish profiles for an unpackaged, framework-dependent deployment exist,
-  and should work, but are mostly untested.
+- Labelling/categorization via vector embeddings centroids: works, but suggestions are a bit underwhelming.
+- Installer/packaging: not yet implemented. Visual Studio publish profiles for an unpackaged, framework-dependent
+  deployment exist, and should work, but are mostly untested.
+- Basic MCP functionality: implemented, but needs richer message-listing and -labeling functionality at minimum
+- LLM-in-the-loop email management: only via MCP currently; no built-in functionality yet.
 	
-## Hardware requirements
+## System requirements
 
-- Windows 10 Version 2004, x64 (Build 19041 or higher)
+- Windows 11 Version 22H2, x64 (Build 22621 or higher)
 - DirectX 12 capable GPU (for local AI inference)
+- .NET 10 Runtime
+- Windows App SDK Runtime 1.8.x
 - Vector embeddings use the [Qwen3-Embedding-0.6B-ONNX](https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX)
   model. The integration was developed and tested on an NVIDIA GeForce RTX 4070. It's currently tuned for 12 GB VRAM and
   32GB of system RAM, and processing a large batch of emails will most likely fail with an OOM on smaller GPUs. Tuning
