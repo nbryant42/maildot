@@ -29,6 +29,7 @@ public sealed partial class MainWindow : Window
     private readonly List<AccountSettings> _accounts = [];
     private AccountSettings? _activeAccount;
     private PostgresSettings _postgresSettings = PostgresSettingsStore.Load();
+    private McpSettings _mcpSettings = McpSettingsStore.Load();
     private bool _startupInitialized;
     private SearchMode _searchMode = SearchMode.Auto;
     private AppWindow? _appWindow;
@@ -320,6 +321,16 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private void OnMcpSettingsSaved(object? sender, McpSettingsSavedEventArgs e)
+    {
+        _mcpSettings = e.Settings;
+        McpSettingsStore.Save(e.Settings);
+        if (sender is SettingsView view)
+        {
+            view.SetMcpStatus("MCP settings saved.", false);
+        }
+    }
+
     private async Task ShowSettingsDialogAsync(string? postgresStatusMessage = null, bool isError = false, bool forceShowWhenNoAccounts = false)
     {
         if (_accounts.Count == 0 && !forceShowWhenNoAccounts)
@@ -333,18 +344,19 @@ public sealed partial class MainWindow : Window
         {
             // If no XamlRoot yet, fall back to embedding settings in main content.
             var inlineView = new SettingsView();
-            inlineView.Initialize(_accounts, _activeAccount?.Id, _postgresSettings, postgresStatusMessage, isError);
+            inlineView.Initialize(_accounts, _activeAccount?.Id, _postgresSettings, _mcpSettings, postgresStatusMessage, isError);
             inlineView.AddAccountRequested += async (_, __) => await ShowAccountSetup(null);
             inlineView.SetActiveAccountRequested += async (_, id) => await SwitchActiveAccountAsync(id);
             inlineView.ReenterPasswordRequested += async (_, id) => await ReenterPasswordAsync(id);
             inlineView.DeleteAccountRequested += async (_, id) => await DeleteAccountAsync(id);
             inlineView.PostgresSettingsSaved += OnPostgresSettingsSaved;
+            inlineView.McpSettingsSaved += OnMcpSettingsSaved;
             RootContent.Content = inlineView;
             return;
         }
 
         var settingsView = new SettingsView();
-        settingsView.Initialize(_accounts, _activeAccount?.Id, _postgresSettings, postgresStatusMessage, isError);
+        settingsView.Initialize(_accounts, _activeAccount?.Id, _postgresSettings, _mcpSettings, postgresStatusMessage, isError);
 
         var dialog = new ContentDialog
         {
@@ -380,6 +392,7 @@ public sealed partial class MainWindow : Window
         settingsView.ReenterPasswordRequested += reenterHandler;
         settingsView.DeleteAccountRequested += deleteHandler;
         settingsView.PostgresSettingsSaved += OnPostgresSettingsSaved;
+        settingsView.McpSettingsSaved += OnMcpSettingsSaved;
 
         await dialog.ShowAsync();
 
@@ -388,6 +401,7 @@ public sealed partial class MainWindow : Window
         settingsView.ReenterPasswordRequested -= reenterHandler;
         settingsView.DeleteAccountRequested -= deleteHandler;
         settingsView.PostgresSettingsSaved -= OnPostgresSettingsSaved;
+        settingsView.McpSettingsSaved -= OnMcpSettingsSaved;
     }
 
     private static string BuildPostgresStatusMessage()

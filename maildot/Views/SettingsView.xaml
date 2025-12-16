@@ -5,50 +5,99 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:models="using:maildot.Models">
 
-    <ScrollViewer>
-        <StackPanel Spacing="16" Width="460">
-            <TextBlock Text="Settings" FontSize="24" FontWeight="SemiBold" />
+    <Grid>
+        <ScrollViewer>
+            <StackPanel Spacing="16" Width="460">
+                <TextBlock Text="Settings" FontSize="24" FontWeight="SemiBold" />
 
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="8">
-                <TextBlock Text="Accounts" FontSize="18" FontWeight="SemiBold" />
-                <Button Content="Add"
-                        Click="OnAddAccountClicked"
-                        HorizontalAlignment="Left" />
-            </StackPanel>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="8">
+                    <TextBlock Text="Accounts" FontSize="18" FontWeight="SemiBold" />
+                    <Button Content="Add"
+                            Click="OnAddAccountClicked"
+                            HorizontalAlignment="Left" />
+                </StackPanel>
 
-            <ListView ItemsSource="{x:Bind Accounts}">
-                <ListView.ItemTemplate>
-                    <DataTemplate x:DataType="models:AccountSettings">
-                        <StackPanel Spacing="4" Padding="8">
-                            <TextBlock Text="{x:Bind AccountName}" FontWeight="SemiBold" />
-                            <TextBlock Text="{x:Bind Username}" />
-                            <TextBlock Text="{x:Bind Server}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <Button Content="Set active"
-                                        Click="OnSetActiveClicked" />
-                                <Button Content="Re-enter password"
-                                        Click="OnReenterPasswordClicked" />
-                                <Button Content="Delete"
-                                        Click="OnDeleteAccountClicked"
-                                        Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+                <ListView ItemsSource="{x:Bind Accounts}">
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="models:AccountSettings">
+                            <StackPanel Spacing="4" Padding="8">
+                                <TextBlock Text="{x:Bind AccountName}" FontWeight="SemiBold" />
+                                <TextBlock Text="{x:Bind Username}" />
+                                <TextBlock Text="{x:Bind Server}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Button Content="Set active"
+                                            Click="OnSetActiveClicked" />
+                                    <Button Content="Re-enter password"
+                                            Click="OnReenterPasswordClicked" />
+                                    <Button Content="Delete"
+                                            Click="OnDeleteAccountClicked"
+                                            Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+                                </StackPanel>
                             </StackPanel>
-                        </StackPanel>
-                    </DataTemplate>
-                </ListView.ItemTemplate>
-            </ListView>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
 
-            <StackPanel Spacing="8">
-                <TextBlock Text="PostgreSQL" FontSize="18" FontWeight="SemiBold" />
-                <TextBox x:Name="PgHostTextBox" Header="Host" />
-                <TextBox x:Name="PgPortTextBox" Header="Port" PlaceholderText="5432" InputScope="Number" />
-                <TextBox x:Name="PgDatabaseTextBox" Header="Database" />
-                <TextBox x:Name="PgUsernameTextBox" Header="Username" />
-                <PasswordBox x:Name="PgPasswordBox" Header="Password" PasswordRevealMode="Peek" />
-                <CheckBox x:Name="PgSslCheckBox" Content="Use SSL" IsChecked="True" />
-                <TextBlock x:Name="PgStatusTextBlock" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-                <Button Content="Save PostgreSQL settings"
-                        Click="OnSavePostgresClicked" />
+                <StackPanel Spacing="8">
+                    <TextBlock Text="PostgreSQL" FontSize="18" FontWeight="SemiBold" />
+                    <TextBox x:Name="PgHostTextBox" Header="Host" />
+                    <TextBox x:Name="PgPortTextBox" Header="Port" PlaceholderText="5432" InputScope="Number" />
+                    <TextBox x:Name="PgDatabaseTextBox" Header="Database" />
+                    <TextBox x:Name="PgUsernameTextBox" Header="Username" />
+                    <PasswordBox x:Name="PgPasswordBox" Header="Password" PasswordRevealMode="Peek" />
+                    <CheckBox x:Name="PgSslCheckBox" Content="Use SSL" IsChecked="True" />
+                    <TextBlock x:Name="PgStatusTextBlock" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                    <Button Content="Save PostgreSQL settings"
+                            Click="OnSavePostgresClicked" />
+                </StackPanel>
+
+                <StackPanel Spacing="8">
+                    <TextBlock Text="Model Context Protocol" FontSize="18" FontWeight="SemiBold" />
+                    <ToggleSwitch x:Name="McpEnabledToggle"
+                                  Header="Enable MCP server"
+                                  OffContent="Disabled"
+                                  OnContent="Enabled" />
+                    <TextBox x:Name="McpBindAddressTextBox"
+                             Header="Bind address"
+                             PlaceholderText="127.0.0.1" />
+                    <TextBox x:Name="McpPortTextBox"
+                             Header="Port"
+                             PlaceholderText="3001"
+                             InputScope="Number" />
+                    <TextBlock x:Name="McpStatusTextBlock"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap" />
+                    <Button Content="Save MCP settings"
+                            Click="OnSaveMcpClicked" />
+                </StackPanel>
             </StackPanel>
-        </StackPanel>
-    </ScrollViewer>
+        </ScrollViewer>
+
+        <Grid x:Name="McpWarningOverlay"
+              Visibility="Collapsed"
+              Background="#80000000">
+            <Border Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                    Padding="16"
+                    CornerRadius="8"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Width="420">
+                <StackPanel Spacing="12">
+                    <TextBlock x:Name="McpWarningTitle"
+                               FontSize="18"
+                               FontWeight="SemiBold"
+                               Text="Warning" />
+                    <TextBlock x:Name="McpWarningMessage"
+                               TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+                        <Button Content="Cancel"
+                                Click="OnMcpWarningCancelClicked" />
+                        <Button x:Name="McpWarningConfirmButton"
+                                Content="I understand the risks"
+                                Click="OnMcpWarningConfirmClicked" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Grid>
 </UserControl>
