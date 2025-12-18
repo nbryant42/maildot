@@ -21,6 +21,7 @@ using Npgsql;
 using System.Globalization;
 using System.Security.Cryptography;
 using Float16 = Microsoft.ML.OnnxRuntime.Float16;
+using MimeKit.Utils;
 
 namespace maildot.Services;
 
@@ -1789,6 +1790,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             ? $"uid:{uid}@{_settings?.Server}"
             : message.MessageId;
         var messageId = TextCleaner.CleanNullable(rawMessageId) ?? string.Empty;
+        var receivedUtc = ResolveReceivedUtc(message, internalDateFallback: null, existingReceived: null);
 
         return new ImapMessage
         {
@@ -1798,7 +1800,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             Subject = TextCleaner.CleanNullable(message.Subject) ?? string.Empty,
             FromName = senderName,
             FromAddress = senderAddress,
-            ReceivedUtc = message.Date.ToUniversalTime(),
+            ReceivedUtc = receivedUtc,
             Hash = $"{messageId}:{uid}"
         };
     }
@@ -1809,11 +1811,66 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         entity.Subject = TextCleaner.CleanNullable(message.Subject) ?? string.Empty;
         entity.FromName = TextCleaner.CleanNullable(sender?.Name) ?? string.Empty;
         entity.FromAddress = TextCleaner.CleanNullable(sender?.Address) ?? string.Empty;
-        entity.ReceivedUtc = message.Date.ToUniversalTime();
+        entity.ReceivedUtc = ResolveReceivedUtc(message, internalDateFallback: null, existingReceived: entity.ReceivedUtc);
     }
 
     private static bool IsUniqueViolation(DbUpdateException ex) =>
         ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation };
+
+    private static DateTimeOffset ResolveReceivedUtc(
+        MimeMessage message,
+        DateTimeOffset? internalDateFallback,
+        DateTimeOffset? existingReceived)
+    {
+        if (TryParseReceivedHeader(message, out var parsed))
+        {
+            return parsed;
+        }
+
+        if (internalDateFallback.HasValue)
+        {
+            return internalDateFallback.Value;
+        }
+
+        if (existingReceived.HasValue)
+        {
+            return existingReceived.Value;
+        }
+
+        return DateTimeOffset.UtcNow;
+    }
+
+    private static bool TryParseReceivedHeader(MimeMessage message, out DateTimeOffset receivedUtc)
+    {
+        receivedUtc = default;
+        var receivedHeader = message.Headers?
+            .FirstOrDefault(h => h != null && string.Equals(h.Field, "Received", StringComparison.OrdinalIgnoreCase))
+            ?.Value;
+
+        if (string.IsNullOrWhiteSpace(receivedHeader))
+        {
+            return false;
+        }
+
+        var semicolonIndex = receivedHeader.LastIndexOf(';');
+        var datePortion = semicolonIndex >= 0
+            ? receivedHeader[(semicolonIndex + 1)..].Trim()
+            : receivedHeader.Trim();
+
+        if (DateUtils.TryParse(datePortion, out var parsed))
+        {
+            receivedUtc = parsed.ToUniversalTime();
+            return true;
+        }
+
+        if (DateTimeOffset.TryParse(datePortion, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var dto))
+        {
+            receivedUtc = dto.ToUniversalTime();
+            return true;
+        }
+
+        return false;
+    }
 
     private string BuildConnectionString(MailDbContext db)
     {

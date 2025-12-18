@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Globalization;
 using System.Security.Cryptography;
 using maildot.Data;
 using maildot.Models;
@@ -7,11 +8,13 @@ using MailKit;
 using MailKit.Net.Imap;
 using Microsoft.EntityFrameworkCore;
 using MimeKit;
+using MimeKit.Utils;
 using Npgsql;
 
 namespace ImapBackfill;
 
-internal sealed record BackfillOptions(bool ProcessBodies, bool ProcessAttachments, long? TargetUid);
+internal sealed record BackfillOptions(bool ProcessBodies, bool ProcessAttachments, bool EnvelopeOnly, long? TargetUid);
+internal sealed record MessageEnvelope(string Subject, string FromName, string FromAddress, string MessageId, DateTimeOffset ReceivedUtc);
 
 internal static class Program
 {
@@ -65,6 +68,7 @@ internal static class Program
     {
         var processBodies = args.Any(a => string.Equals(a, "--bodies", StringComparison.OrdinalIgnoreCase));
         var processAttachments = args.Any(a => string.Equals(a, "--attachments", StringComparison.OrdinalIgnoreCase));
+        var envelopeOnly = args.Any(a => string.Equals(a, "--envelope", StringComparison.OrdinalIgnoreCase));
         long? targetUid = null;
 
         for (int i = 0; i < args.Length; i++)
@@ -81,13 +85,18 @@ internal static class Program
             }
         }
 
-        if (!processBodies && !processAttachments)
+        if (envelopeOnly)
+        {
+            processBodies = false;
+            processAttachments = false;
+        }
+        else if (!processBodies && !processAttachments)
         {
             processBodies = true;
             processAttachments = true;
         }
 
-        return new BackfillOptions(processBodies, processAttachments, targetUid);
+        return new BackfillOptions(processBodies, processAttachments, envelopeOnly, targetUid);
     }
 
     private static async Task ProcessAccountAsync(MailDbContext db, AccountSettings account, string password, BackfillOptions options)
@@ -142,27 +151,12 @@ internal static class Program
         IMailFolder folder,
         BackfillOptions options)
     {
-        var messages = await db.ImapMessages
-            .AsNoTracking()
-            .Include(m => m.Body)
-            .Include(m => m.Attachments)
-            .Where(m => m.FolderId == folderEntity.Id)
-            .ToListAsync();
-
-        var targets = messages
-            .Where(m => NeedsRefresh(m, options))
-            .Select(m => new { m.ImapUid, m.Id })
-            .Where(m => !options.TargetUid.HasValue || m.ImapUid == options.TargetUid.Value)
-            .OrderByDescending(m => m.ImapUid)
-            .ToList();
-
-        if (targets.Count == 0)
+        var existingMessages = await LoadExistingMessagesAsync(db, folderEntity.Id, options);
+        if (existingMessages.Count == 0)
         {
-            Console.WriteLine($"  Folder {folderEntity.FullName}: nothing to update.");
+            Console.WriteLine($"  Folder {folderEntity.FullName}: no tracked messages to update.");
             return;
         }
-
-        Console.WriteLine($"  Folder {folderEntity.FullName}: re-downloading {targets.Count} message(s).");
 
         try
         {
@@ -174,55 +168,183 @@ internal static class Program
             return;
         }
 
-        foreach (var target in targets)
-        {
-            try
-            {
-                var mime = await folder.GetMessageAsync(new UniqueId((uint)target.ImapUid));
-                await PersistMessageAsync(db, server, folderEntity.Id, mime, options, target.ImapUid, CancellationToken.None);
-                Console.WriteLine($"    Refreshed UID {target.ImapUid}");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"    UID {target.ImapUid} failed: {ex.Message}");
-            }
-        }
+        var summaryItems = MessageSummaryItems.UniqueId | MessageSummaryItems.Envelope | MessageSummaryItems.InternalDate;
 
         try
         {
-            await folder.CloseAsync(false);
+            IList<IMessageSummary> summaries;
+            try
+            {
+                summaries = options.TargetUid.HasValue
+                    ? await folder.FetchAsync([new UniqueId((uint)options.TargetUid.Value)], summaryItems)
+                    : await folder.FetchAsync(0, -1, summaryItems);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  Unable to enumerate folder {folderEntity.FullName}: {ex.Message}");
+                return;
+            }
+
+            var targets = summaries
+                .Select(s => new { Summary = s, Uid = (long)s.UniqueId!.Id })
+                .Where(s => existingMessages.ContainsKey(s.Uid))
+                .OrderByDescending(s => s.Uid)
+                .ToList();
+
+            if (targets.Count == 0)
+            {
+                Console.WriteLine($"  Folder {folderEntity.FullName}: nothing to update.");
+                return;
+            }
+
+            var modeDescription = options.EnvelopeOnly
+                ? "envelopes"
+                : string.Join(" & ", new[]
+                {
+                    options.ProcessBodies ? "bodies" : null,
+                    options.ProcessAttachments ? "attachments" : null
+                }.Where(x => x != null));
+
+            if (string.IsNullOrWhiteSpace(modeDescription))
+            {
+                modeDescription = "envelopes";
+            }
+
+            Console.WriteLine($"  Folder {folderEntity.FullName}: " +
+                $"refreshing {targets.Count} message(s) ({modeDescription}).");
+
+            foreach (var target in targets)
+            {
+                var uid = target.Uid;
+                var summary = target.Summary;
+                var summaryEnvelope = BuildEnvelope(summary, server, uid);
+                var existing = existingMessages[uid];
+
+                if (!options.ProcessBodies && !options.ProcessAttachments)
+                {
+                    var envelopeChanged =
+                        existing.Subject != summaryEnvelope.Subject ||
+                        existing.FromName != summaryEnvelope.FromName ||
+                        existing.FromAddress != summaryEnvelope.FromAddress ||
+                        existing.ReceivedUtc != summaryEnvelope.ReceivedUtc ||
+                        options.EnvelopeOnly;
+
+                    if (envelopeChanged)
+                    {
+                        try
+                        {
+                            await UpsertImapMessageAsync(db, server, folderEntity.Id, summaryEnvelope, uid,
+                                CancellationToken.None);
+                            Console.WriteLine($"    Updated envelope UID {uid}");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"    UID {uid} failed: {ex.Message}");
+                        }
+                    }
+
+                    continue;
+                }
+
+                try
+                {
+                    var mime = await folder.GetMessageAsync(summary.UniqueId);
+                    var mimeEnvelope = BuildEnvelope(mime, server, uid, summary.InternalDate?.ToUniversalTime(),
+                        existing.ReceivedUtc);
+                    await PersistMessageAsync(db, server, folderEntity.Id, mime, mimeEnvelope, options, uid,
+                        CancellationToken.None);
+                    Console.WriteLine($"    Refreshed UID {uid}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"    UID {uid} failed: {ex.Message}");
+                }
+            }
         }
-        catch
+        finally
         {
+            try
+            {
+                await folder.CloseAsync(false);
+            }
+            catch
+            {
+            }
         }
     }
 
-    private static bool NeedsRefresh(ImapMessage message, BackfillOptions options)
+    private static async Task<Dictionary<long, ImapMessage>> LoadExistingMessagesAsync(
+        MailDbContext db,
+        int folderId,
+        BackfillOptions options)
     {
-        var needsBody = options.ProcessBodies && BodyNeedsRefresh(message.Body);
-        var needsAttachments = options.ProcessAttachments && AttachmentsNeedRefresh(message.Attachments);
-        return needsBody || needsAttachments;
+        IQueryable<ImapMessage> query = db.ImapMessages
+            .AsNoTracking()
+            .Where(m => m.FolderId == folderId);
+
+        if (options.ProcessBodies)
+        {
+            query = query.Include(m => m.Body);
+        }
+
+        if (options.ProcessAttachments)
+        {
+            query = query.Include(m => m.Attachments);
+        }
+
+        var messages = await query.ToListAsync();
+        return messages.ToDictionary(m => m.ImapUid);
     }
 
-    private static bool BodyNeedsRefresh(MessageBody? body) =>
-        body == null ||
-        (string.IsNullOrWhiteSpace(body.PlainText) && string.IsNullOrWhiteSpace(body.HtmlText));
+    private static MessageEnvelope BuildEnvelope(IMessageSummary summary, string? server, long uid)
+    {
+        var sender = summary.Envelope?.From?.Mailboxes?.FirstOrDefault();
+        var subject = TextCleaner.CleanNullable(summary.Envelope?.Subject) ?? string.Empty;
+        var fromName = TextCleaner.CleanNullable(sender?.Name) ?? string.Empty;
+        var fromAddress = TextCleaner.CleanNullable(sender?.Address) ?? string.Empty;
 
-    private static bool AttachmentsNeedRefresh(ICollection<MessageAttachment>? attachments) =>
-        attachments == null ||
-        attachments.Count == 0 ||
-        attachments.Any(a => a.LargeObjectId == 0 || a.SizeBytes == 0);
+        var rawMessageId = string.IsNullOrWhiteSpace(summary.Envelope?.MessageId)
+            ? $"uid:{uid}@{server}"
+            : summary.Envelope!.MessageId;
+
+        var messageId = TextCleaner.CleanNullable(rawMessageId) ?? $"uid:{uid}@{server}";
+        var received = summary.InternalDate?.ToUniversalTime() ?? DateTimeOffset.UtcNow;
+
+        return new MessageEnvelope(subject, fromName, fromAddress, messageId, received);
+    }
+
+    private static MessageEnvelope BuildEnvelope(
+        MimeMessage message,
+        string? server,
+        long uid,
+        DateTimeOffset? internalDateFallback,
+        DateTimeOffset? existingReceived)
+    {
+        var sender = message.From.OfType<MailboxAddress>().FirstOrDefault();
+        var subject = TextCleaner.CleanNullable(message.Subject) ?? string.Empty;
+        var fromName = TextCleaner.CleanNullable(sender?.Name) ?? string.Empty;
+        var fromAddress = TextCleaner.CleanNullable(sender?.Address) ?? string.Empty;
+        var rawMessageId = string.IsNullOrWhiteSpace(message.MessageId)
+            ? $"uid:{uid}@{server}"
+            : message.MessageId;
+
+        var messageId = TextCleaner.CleanNullable(rawMessageId) ?? $"uid:{uid}@{server}";
+        var received = ResolveReceivedUtc(message, internalDateFallback, existingReceived);
+
+        return new MessageEnvelope(subject, fromName, fromAddress, messageId, received);
+    }
 
     private static async Task PersistMessageAsync(
         MailDbContext db,
         string? server,
         int folderId,
         MimeMessage mime,
+        MessageEnvelope envelope,
         BackfillOptions options,
         long uid,
         CancellationToken token)
     {
-        var entity = await UpsertImapMessageAsync(db, server, folderId, mime, uid, token);
+        var entity = await UpsertImapMessageAsync(db, server, folderId, envelope, uid, token);
 
         var existingBody = await db.MessageBodies
             .AsNoTracking()
@@ -232,10 +354,7 @@ internal static class Program
             .Where(a => a.MessageId == entity.Id)
             .ToListAsync(token);
 
-        var refreshBody = options.ProcessBodies && BodyNeedsRefresh(existingBody);
-        var refreshAttachments = options.ProcessAttachments && AttachmentsNeedRefresh(existingAttachments);
-
-        if (!refreshBody && !refreshAttachments)
+        if (!options.ProcessBodies && !options.ProcessAttachments)
         {
             return;
         }
@@ -243,7 +362,7 @@ internal static class Program
         await db.Database.OpenConnectionAsync(token);
         await using var tx = await db.Database.BeginTransactionAsync(token);
 
-        if (refreshBody)
+        if (options.ProcessBodies)
         {
             var rebuilt = BuildMessageBody(mime, entity.Id);
             var trackedBody = await db.MessageBodies.FirstOrDefaultAsync(b => b.MessageId == entity.Id, token);
@@ -261,7 +380,7 @@ internal static class Program
             }
         }
 
-        if (refreshAttachments)
+        if (options.ProcessAttachments)
         {
             var conn = (NpgsqlConnection)db.Database.GetDbConnection();
             var manager = new NpgsqlLargeObjectManager(conn);
@@ -297,7 +416,7 @@ internal static class Program
         MailDbContext db,
         string? server,
         int folderId,
-        MimeMessage message,
+        MessageEnvelope envelope,
         long uid,
         CancellationToken token)
     {
@@ -305,12 +424,12 @@ internal static class Program
 
         if (existing != null)
         {
-            UpdateImapMessage(existing, message);
+            UpdateImapMessage(existing, envelope);
             await db.SaveChangesAsync(token);
             return existing;
         }
 
-        var entity = CreateImapMessage(server, folderId, message, uid);
+        var entity = CreateImapMessage(server, folderId, envelope, uid);
         db.ImapMessages.Add(entity);
 
         try
@@ -322,42 +441,93 @@ internal static class Program
         {
             db.Entry(entity).State = EntityState.Detached;
             var reloaded = await db.ImapMessages.FirstAsync(m => m.FolderId == folderId && m.ImapUid == uid, token);
-            UpdateImapMessage(reloaded, message);
+            UpdateImapMessage(reloaded, envelope);
             await db.SaveChangesAsync(token);
             return reloaded;
         }
     }
 
-    private static ImapMessage CreateImapMessage(string? server, int folderId, MimeMessage message, long uid)
+    private static ImapMessage CreateImapMessage(string? server, int folderId, MessageEnvelope envelope, long uid)
     {
-        var sender = message.From.OfType<MailboxAddress>().FirstOrDefault();
-        var senderName = TextCleaner.CleanNullable(sender?.Name) ?? string.Empty;
-        var senderAddress = TextCleaner.CleanNullable(sender?.Address) ?? string.Empty;
-        var rawMessageId = string.IsNullOrWhiteSpace(message.MessageId)
-            ? $"uid:{uid}@{server}"
-            : message.MessageId;
-        var messageId = TextCleaner.CleanNullable(rawMessageId) ?? string.Empty;
+        var messageId = string.IsNullOrWhiteSpace(envelope.MessageId)
+            ? TextCleaner.CleanNullable($"uid:{uid}@{server}") ?? string.Empty
+            : envelope.MessageId;
 
         return new ImapMessage
         {
             FolderId = folderId,
             ImapUid = uid,
             MessageId = messageId,
-            Subject = TextCleaner.CleanNullable(message.Subject) ?? string.Empty,
-            FromName = senderName,
-            FromAddress = senderAddress,
-            ReceivedUtc = message.Date.ToUniversalTime(),
+            Subject = envelope.Subject,
+            FromName = envelope.FromName,
+            FromAddress = envelope.FromAddress,
+            ReceivedUtc = envelope.ReceivedUtc,
             Hash = $"{messageId}:{uid}"
         };
     }
 
-    private static void UpdateImapMessage(ImapMessage entity, MimeMessage message)
+    private static void UpdateImapMessage(ImapMessage entity, MessageEnvelope envelope)
     {
-        var sender = message.From.OfType<MailboxAddress>().FirstOrDefault();
-        entity.Subject = TextCleaner.CleanNullable(message.Subject) ?? string.Empty;
-        entity.FromName = TextCleaner.CleanNullable(sender?.Name) ?? string.Empty;
-        entity.FromAddress = TextCleaner.CleanNullable(sender?.Address) ?? string.Empty;
-        entity.ReceivedUtc = message.Date.ToUniversalTime();
+        entity.Subject = envelope.Subject;
+        entity.FromName = envelope.FromName;
+        entity.FromAddress = envelope.FromAddress;
+        entity.ReceivedUtc = envelope.ReceivedUtc;
+    }
+
+    private static DateTimeOffset ResolveReceivedUtc(
+        MimeMessage message,
+        DateTimeOffset? internalDateFallback,
+        DateTimeOffset? existingReceived)
+    {
+        if (TryParseReceivedHeader(message, out var parsed))
+        {
+            return parsed;
+        }
+
+        if (internalDateFallback.HasValue)
+        {
+            return internalDateFallback.Value;
+        }
+
+        if (existingReceived.HasValue)
+        {
+            return existingReceived.Value;
+        }
+
+        return DateTimeOffset.UtcNow;
+    }
+
+    private static bool TryParseReceivedHeader(MimeMessage message, out DateTimeOffset receivedUtc)
+    {
+        receivedUtc = default;
+        var receivedHeader = message.Headers?
+            .FirstOrDefault(h => h != null && string.Equals(h.Field, "Received", StringComparison.OrdinalIgnoreCase))
+            ?.Value;
+
+        if (string.IsNullOrWhiteSpace(receivedHeader))
+        {
+            return false;
+        }
+
+        var semicolonIndex = receivedHeader.LastIndexOf(';');
+
+        var datePortion = semicolonIndex >= 0
+            ? receivedHeader[(semicolonIndex + 1)..].Trim()
+            : receivedHeader.Trim();
+
+        if (DateUtils.TryParse(datePortion, out var parsed))
+        {
+            receivedUtc = parsed.ToUniversalTime();
+            return true;
+        }
+
+        if (DateTimeOffset.TryParse(datePortion, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var dto))
+        {
+            receivedUtc = dto.ToUniversalTime();
+            return true;
+        }
+
+        return false;
     }
 
     private static MessageBody BuildMessageBody(MimeMessage message, int messageId)

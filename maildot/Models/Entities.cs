@@ -29,7 +29,7 @@ public sealed class ImapFolder
     public string? SyncToken { get; set; }
 
     public ImapAccount Account { get; set; } = default!;
-    public ICollection<ImapMessage> Messages { get; set; } = new List<ImapMessage>();
+    public ICollection<ImapMessage> Messages { get; set; } = [];
 }
 
 public sealed class ImapMessage
@@ -46,9 +46,9 @@ public sealed class ImapMessage
 
     public ImapFolder Folder { get; set; } = default!;
     public MessageBody Body { get; set; } = default!;
-    public ICollection<MessageAttachment> Attachments { get; set; } = new List<MessageAttachment>();
-    public ICollection<MessageEmbedding> Embeddings { get; set; } = new List<MessageEmbedding>();
-    public ICollection<MessageLabel> LabelLinks { get; set; } = new List<MessageLabel>();
+    public ICollection<MessageAttachment> Attachments { get; set; } = [];
+    public ICollection<MessageEmbedding> Embeddings { get; set; } = [];
+    public ICollection<MessageLabel> LabelLinks { get; set; } = [];
 }
 
 public sealed class MessageBody
