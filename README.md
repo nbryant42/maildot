@@ -33,6 +33,31 @@ persistence engine from process crashes.
   deployment exist, and should work, but are mostly untested.
 - Basic MCP functionality: implemented, but needs richer message-listing and -labeling functionality at minimum
 - LLM-in-the-loop email management: only via MCP currently; no built-in functionality yet.
+
+## Who is this for?
+
+At this time? Developers, mainly. If you're looking for a production-ready email client, this is not it. If you're
+looking for a testbed to experiment with AI inference over your email archive, this might be interesting.
+
+I've made some unusual design decisions that fit my personal workflow; I still use a legacy (non-Gmail) ISP email
+provider, mostly via Mozilla Thunderbird with POP3 with the "remove from server after 90 days" option enabled; the idea
+is to stay within the server's size limits but archive everything locally, indefinitely, automatically. This has
+some serious drawbacks. Thunderbird was a great product until about 2 years ago, but has been very unreliable lately,
+with data corruption problems, search bugs, and freezes.
+
+I can also connect to my email provider via IMAP, but baseline IMAP does not have Gmail-like labels. So this project
+implements a Gmail-like multi-label system on top of IMAP, with local storage of all email data in PostgreSQL, and
+labels stored locally. I can continue to let Thunderbird delete old emails from the server, while also keeping a full
+archive in Postgres via this application--and gradually move away from Thunderbird.
+
+For the above reasons, this project is designed around a somewhat POP3-like usage model where the local storage persists
+even if the server data is deleted, contrary to most IMAP clients, which treat the server as the source of truth and are
+designed to mirror server state locally. It's not ready to fully replace Thunderbird, but it can fill in some gaps in my
+workflow.
+
+If your IMAP provider is Gmail, you will likely be frustrated that our "labels" are not synced to Gmail labels, which
+are emulated folders when viewed via IMAP. But if your workflow is like mine, you might be in the right place.
+
 	
 ## System requirements
 
