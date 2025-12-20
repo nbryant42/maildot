@@ -18,12 +18,12 @@ using Desc = System.ComponentModel.DescriptionAttribute;
 namespace maildot.Services;
 
 // TODO there is too much duplication between MCP and pre-existing search code; refactor to share more logic
-// and especially use the same QwenEmbedder instance.
 [McpServerToolType]
 public static class McpTools
 {
     private const int MaxListCount = 200;
-    private const int MaxSearchResults = 50;
+    private const int DefaultMaxSearchResults = 60;
+    private const int AbsoluteMaxSearchResults = 1000;
     private const int EmbeddingDim = 1024;
 
     [McpServerTool(Name = "list_accounts")]
@@ -99,15 +99,16 @@ public static class McpTools
 
     [McpServerTool(Name = "search_messages")]
     [Desc("Searches mail by subject, sender, and/or embedding relevance, or lists messages when no query is provided. " +
-          "Returns up to 50 items with message_id, imap_uid, folder_full_name, subject, from fields, preview, received_utc, score " +
-          "(lower is better), source=subject|sender|embedding|list.")]
-    public static async Task<List<SearchMessageResult>> SearchMessagesAsync(
+          "Returns results with message_id, imap_uid, folder_full_name, subject, from fields, preview, received_utc, score " +
+          "(lower is better), source=subject|sender|embedding|list, plus count/lowestImapUid metadata.")]
+    public static async Task<SearchMessageResults> SearchMessagesAsync(
         [Desc("Optional search query. If empty/null, returns messages without text/embedding filtering. '*' wildcarding not supported. " +
               "Subject and sender searches are simple substring filters. Content search is via vector embeddings only. " +
               "Boolean AND/OR are not directly supported, but the embeddings model might understand.")] string? query = null,
         [Desc("Search mode: auto | sender | content | all | subject (default: auto).")] string? mode = "auto",
         [Desc("Optional ISO-8601 timestamp filter (e.g., 2025-12-16T00:00:00Z).")] string? sinceUtc = null,
         [Desc("Optional exclusive upper bound on ImapUid for pagination (e.g., request older pages).")] long? imapUidLessThan = null,
+        [Desc("Optional maximum results to return (default 60, max 1000).")] int? maxResults = null,
         [Desc("Account id; defaults to the active/first account when null.")] int? accountId = null,
         [Desc("Optional cancellation token.")] CancellationToken cancellationToken = default)
     {
@@ -123,26 +124,30 @@ public static class McpTools
             since = parsed;
         }
 
+        var limit = Math.Clamp(maxResults ?? DefaultMaxSearchResults, 1, AbsoluteMaxSearchResults);
+
         if (string.IsNullOrWhiteSpace(trimmed))
         {
-            return await ListMessagesAsync(db, account.Id, since, imapUidLessThan, cancellationToken);
+            var listResults = await ListMessagesAsync(db, account.Id, since, imapUidLessThan, limit, cancellationToken);
+            return WrapResults(listResults);
         }
 
         var effectiveMode = ResolveSearchMode(trimmed, mode);
 
         var subjectResults = ShouldSearchSubject(effectiveMode)
-            ? await SearchBySubjectAsync(db, account.Id, trimmed, since, imapUidLessThan, cancellationToken)
+            ? await SearchBySubjectAsync(db, account.Id, trimmed, since, imapUidLessThan, limit, cancellationToken)
             : [];
 
         var senderResults = ShouldSearchSender(effectiveMode)
-            ? await SearchBySenderAsync(db, account.Id, trimmed, since, imapUidLessThan, cancellationToken)
+            ? await SearchBySenderAsync(db, account.Id, trimmed, since, imapUidLessThan, limit, cancellationToken)
             : [];
 
         var vectorResults = ShouldSearchVector(effectiveMode)
-            ? await SearchByEmbeddingAsync(db, account.Id, trimmed, since, imapUidLessThan, cancellationToken)
+            ? await SearchByEmbeddingAsync(db, account.Id, trimmed, since, imapUidLessThan, limit, cancellationToken)
             : [];
 
-        return MergeResults(subjectResults, senderResults, vectorResults);
+        var merged = MergeResults(limit, subjectResults, senderResults, vectorResults);
+        return WrapResults(merged);
     }
 
     [McpServerTool(Name = "get_message_body")]
@@ -382,6 +387,7 @@ public static class McpTools
         int accountId,
         DateTimeOffset? sinceUtc,
         long? imapUidLessThan,
+        int limit,
         CancellationToken token)
     {
         var conn = (NpgsqlConnection)db.Database.GetDbConnection();
@@ -410,7 +416,7 @@ public static class McpTools
 
         await using var cmd = new NpgsqlCommand(sql.ToString(), conn);
         cmd.Parameters.AddWithValue("accountId", accountId);
-        cmd.Parameters.AddWithValue("limit", MaxSearchResults);
+        cmd.Parameters.AddWithValue("limit", limit);
         if (sinceUtc.HasValue)
         {
             cmd.Parameters.AddWithValue("sinceUtc", sinceUtc.Value);
@@ -476,6 +482,7 @@ public static class McpTools
         string query,
         DateTimeOffset? sinceUtc,
         long? imapUidLessThan,
+        int limit,
         CancellationToken token)
     {
         var conn = (NpgsqlConnection)db.Database.GetDbConnection();
@@ -505,7 +512,7 @@ public static class McpTools
         await using var cmd = new NpgsqlCommand(sql.ToString(), conn);
         cmd.Parameters.AddWithValue("accountId", accountId);
         cmd.Parameters.AddWithValue("subjectPattern", $"%{query}%");
-        cmd.Parameters.AddWithValue("limit", MaxSearchResults);
+        cmd.Parameters.AddWithValue("limit", limit);
         if (sinceUtc.HasValue)
         {
             cmd.Parameters.AddWithValue("sinceUtc", sinceUtc.Value);
@@ -547,6 +554,7 @@ public static class McpTools
         string query,
         DateTimeOffset? sinceUtc,
         long? imapUidLessThan,
+        int limit,
         CancellationToken token)
     {
         var conn = (NpgsqlConnection)db.Database.GetDbConnection();
@@ -602,7 +610,7 @@ public static class McpTools
 
         await using var cmd = new NpgsqlCommand(sql.ToString(), conn);
         cmd.Parameters.AddWithValue("accountId", accountId);
-        cmd.Parameters.AddWithValue("limit", MaxSearchResults);
+        cmd.Parameters.AddWithValue("limit", limit);
         if (sinceUtc.HasValue)
         {
             cmd.Parameters.AddWithValue("sinceUtc", sinceUtc.Value);
@@ -652,6 +660,7 @@ public static class McpTools
         string query,
         DateTimeOffset? sinceUtc,
         long? imapUidLessThan,
+        int limit,
         CancellationToken token)
     {
         var embedder = await EnsureSearchEmbedderAsync() ??
@@ -702,7 +711,7 @@ public static class McpTools
         await using var cmd = new NpgsqlCommand(vectorSql.ToString(), conn);
         cmd.Parameters.AddWithValue("queryVec", vectorLiteral);
         cmd.Parameters.AddWithValue("accountId", accountId);
-        cmd.Parameters.AddWithValue("limit", MaxSearchResults);
+        cmd.Parameters.AddWithValue("limit", limit);
         if (sinceUtc.HasValue)
         {
             cmd.Parameters.AddWithValue("sinceUtc", sinceUtc.Value);
@@ -739,7 +748,7 @@ public static class McpTools
         return results;
     }
 
-    private static List<SearchMessageResult> MergeResults(params IEnumerable<SearchResult>[] resultSets)
+    private static List<SearchMessageResult> MergeResults(int limit, params IEnumerable<SearchResult>[] resultSets)
     {
         var combined = new Dictionary<int, SearchResult>();
 
@@ -771,7 +780,7 @@ public static class McpTools
             .OrderBy(r => r.SourcePriority)
             .ThenBy(r => r.Score)
             .ThenByDescending(r => r.ImapUid)
-            .Take(MaxSearchResults)
+            .Take(limit)
             .Select(r => new SearchMessageResult(
                 r.MessageId,
                 r.ImapUid,
@@ -876,6 +885,14 @@ public static class McpTools
     public record MessageHeaderInfo(string From, string FromAddress, string To, string? Cc, string? Bcc);
     public record AttachmentResult(string FileName, string ContentType, long SizeBytes, string? Disposition, string? Base64Data);
     public record SchemaSnapshot(List<string> Tables);
+
+    public record SearchMessageResults(int Count, long? LowestImapUid, List<SearchMessageResult> Results);
+
+    private static SearchMessageResults WrapResults(List<SearchMessageResult> results) =>
+        new(
+            Results: results,
+            Count: results.Count,
+            LowestImapUid: results.Count == 0 ? null : results.Min(r => (long?)r.ImapUid));
 
     private record SearchResult(
         int MessageId,

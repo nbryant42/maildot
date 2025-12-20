@@ -49,9 +49,9 @@ Draft of read-only MCP tools that surface the maildot data model and the existin
 
 - `search_messages`
   - Purpose: Reuse existing search pipeline (subject/sender/embedding) and support no-query listing.
-  - Input: optional `query` (string; when empty/null, returns messages without text/embedding filtering), optional `mode` (`auto|sender|content|all|subject`), optional `sinceUtc` (ISO 8601), optional `imapUidLessThan` for pagination.
-  - Output: up to 50 results `{ messageId, imapUid, folderFullName, subject, fromName, fromAddress, preview, receivedUtc, score, source }` where `source` is `subject|sender|embedding|list`.
-  - Notes: `messageId` is DB PK; `imapUid` + `folderFullName` pair can be reused to fetch bodies/attachments. No-query path ignores `mode`, orders by `ImapUid DESC`, and can page via `imapUidLessThan`. Subject and sender searches now order by `ImapUid DESC`; embedding continues to order by cosine distance.
+  - Input: optional `query` (string; when empty/null, returns messages without text/embedding filtering), optional `mode` (`auto|sender|content|all|subject`), optional `sinceUtc` (ISO 8601), optional `imapUidLessThan` for pagination, optional `maxResults` (default 250, max 1000).
+  - Output: `{ results: [ { messageId, imapUid, folderFullName, subject, fromName, fromAddress, preview, receivedUtc, score, source } ], count, lowestImapUid }` where `source` is `subject|sender|embedding|list`.
+  - Notes: `messageId` is DB PK; `imapUid` + `folderFullName` pair can be reused to fetch bodies/attachments. No-query path ignores `mode`, orders by `ImapUid DESC`, and can page via `imapUidLessThan`. Subject and sender searches now order by `ImapUid DESC`; embedding continues to order by cosine distance. `count` and `lowestImapUid` are included for paging hints.
 
 - `get_message_body`
   - Purpose: Fetch sanitized HTML and headers for a message.
