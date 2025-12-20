@@ -23,73 +23,76 @@
                 Grid.Row="0"
                 Background="{ThemeResource LayerFillColorDefaultBrush}"
                 MinHeight="52">
-                <Grid x:Name="TitleBarDragArea"
+            <Grid x:Name="TitleBarDragArea"
                   ColumnSpacing="12"
                   Padding="12,10,12,10"
                   VerticalAlignment="Center">
+
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="160" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
-                <TextBlock Text="Mail.NET"
+                <TextBlock Grid.Column="0"
+                           Text="Mail.NET"
                            VerticalAlignment="Center"
                            FontWeight="SemiBold"
                            Opacity="0.75" />
 
-                <Grid Grid.Column="1"
-                      ColumnSpacing="8"
-                      VerticalAlignment="Center">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="140" />
-                        <ColumnDefinition Width="150" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
+                <ToggleSwitch Grid.Column="1"
+                              x:Name="GpuToggle"
+                              VerticalAlignment="Center"
+                              IsOn="True"
+                              OnContent="GPU"
+                              OffContent="CPU"
+                              Toggled="OnGpuToggleToggled"
+                              ToolTipService.ToolTip="Toggle GPU (DirectML) embeddings" />
 
-                    <ComboBox x:Name="SearchModeCombo"
-                              Grid.Column="0"
-                              Width="140"
-                              SelectionChanged="OnSearchModeChanged">
-                        <ComboBoxItem Content="Auto" Tag="Auto" IsSelected="True" />
-                        <ComboBoxItem Content="Sender" Tag="Sender" />
-                        <ComboBoxItem Content="Subject" Tag="Subject" />
-                        <ComboBoxItem Content="Content" Tag="Content" />
-                        <ComboBoxItem Content="All" Tag="All" />
-                    </ComboBox>
+                <ComboBox x:Name="SearchModeCombo"
+                          Grid.Column="2"
+                          Width="140"
+                          SelectionChanged="OnSearchModeChanged">
+                    <ComboBoxItem Content="Auto" Tag="Auto" IsSelected="True" />
+                    <ComboBoxItem Content="Sender" Tag="Sender" />
+                    <ComboBoxItem Content="Subject" Tag="Subject" />
+                    <ComboBoxItem Content="Content" Tag="Content" />
+                    <ComboBoxItem Content="All" Tag="All" />
+                </ComboBox>
 
-                    <ComboBox x:Name="SearchSinceCombo"
-                              Grid.Column="1"
+                <ComboBox x:Name="SearchSinceCombo"
+                              Grid.Column="3"
                               Width="150"
                               SelectionChanged="OnSearchSinceChanged">
-                        <ComboBoxItem Content="All time" Tag="all" IsSelected="True" />
-                        <ComboBoxItem Content="Last 7 days" Tag="7d" />
-                        <ComboBoxItem Content="Last 30 days" Tag="30d" />
-                        <ComboBoxItem Content="Last 90 days" Tag="90d" />
-                        <ComboBoxItem Content="Last year" Tag="365d" />
-                    </ComboBox>
+                    <ComboBoxItem Content="All time" Tag="all" IsSelected="True" />
+                    <ComboBoxItem Content="Last 7 days" Tag="7d" />
+                    <ComboBoxItem Content="Last 30 days" Tag="30d" />
+                    <ComboBoxItem Content="Last 90 days" Tag="90d" />
+                    <ComboBoxItem Content="Last year" Tag="365d" />
+                </ComboBox>
 
-                    <AutoSuggestBox x:Name="SearchBox"
-                                    Grid.Column="2"
-                                    PlaceholderText="Search mail"
-                                    QueryIcon="Find"
-                                    HorizontalAlignment="Stretch"
-                                    QuerySubmitted="OnSearchQuerySubmitted" />
+                <AutoSuggestBox x:Name="SearchBox"
+                                Grid.Column="4"
+                                PlaceholderText="Search mail"
+                                QueryIcon="Find"
+                                HorizontalAlignment="Stretch"
+                                QuerySubmitted="OnSearchQuerySubmitted" />
 
-                    <Button x:Name="AdvancedSearchButton"
-                            Grid.Column="3"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            ToolTipService.ToolTip="Advanced search"
-                            Click="OnAdvancedSearchClicked">
-                        <StackPanel Orientation="Vertical" Spacing="2" VerticalAlignment="Center">
-                            <Rectangle Height="2" Width="10" Fill="{ThemeResource TextFillColorPrimaryBrush}" RadiusX="1" RadiusY="1" />
-                            <Rectangle Height="2" Width="8" Fill="{ThemeResource TextFillColorPrimaryBrush}" RadiusX="1" RadiusY="1" />
-                            <Rectangle Height="2" Width="6" Fill="{ThemeResource TextFillColorPrimaryBrush}" RadiusX="1" RadiusY="1" />
-                        </StackPanel>
-                    </Button>
-                </Grid>
+                <Button x:Name="AdvancedSearchButton"
+                        Grid.Column="5"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        ToolTipService.ToolTip="Advanced search"
+                        Click="OnAdvancedSearchClicked">
+                    <StackPanel Orientation="Vertical" Spacing="2" VerticalAlignment="Center">
+                        <Rectangle Height="2" Width="10" Fill="{ThemeResource TextFillColorPrimaryBrush}" RadiusX="1" RadiusY="1" />
+                        <Rectangle Height="2" Width="8" Fill="{ThemeResource TextFillColorPrimaryBrush}" RadiusX="1" RadiusY="1" />
+                        <Rectangle Height="2" Width="6" Fill="{ThemeResource TextFillColorPrimaryBrush}" RadiusX="1" RadiusY="1" />
+                    </StackPanel>
+                </Button>
             </Grid>
         </Border>
 

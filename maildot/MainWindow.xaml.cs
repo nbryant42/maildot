@@ -58,6 +58,25 @@ public sealed partial class MainWindow : Window
         await EvaluateStartupAsync();
     }
 
+    private async void OnGpuToggleToggled(object sender, RoutedEventArgs e)
+    {
+        var useGpu = GpuToggle.IsOn;
+        GpuToggle.IsEnabled = false;
+        try
+        {
+            var embedder = await QwenEmbedder.GetSharedAsync(useGpu);
+            if (embedder == null)
+            {
+                // revert toggle if initialization failed
+                GpuToggle.IsOn = !useGpu;
+            }
+        }
+        finally
+        {
+            GpuToggle.IsEnabled = true;
+        }
+    }
+
     private async Task EvaluateStartupAsync()
     {
         if (!await EnsurePostgresReadyAsync(forceShowSettings: true))

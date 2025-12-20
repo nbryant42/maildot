@@ -43,7 +43,6 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
     private string? _pgPassword;
     private Task? _backgroundTask;
     private Task? _embeddingTask;
-    private QwenEmbedder? _searchEmbedder;
 
     private const int EmbeddingBatchSize = 256;
     private static readonly TimeSpan EmbeddingIdleDelay = TimeSpan.FromMinutes(1);
@@ -798,22 +797,13 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
     private async Task<QwenEmbedder?> EnsureSearchEmbedderAsync()
     {
-        if (_searchEmbedder != null)
+        var embedder = await QwenEmbedder.GetSharedAsync();
+        if (embedder == null)
         {
-            return _searchEmbedder;
+            Debug.WriteLine("Failed to initialize shared search embedder.");
         }
 
-        try
-        {
-            _searchEmbedder = await QwenEmbedder.Build(QwenEmbedder.ModelId);
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"Failed to initialize search embedder: {ex}");
-            _searchEmbedder = null;
-        }
-
-        return _searchEmbedder;
+        return embedder;
     }
 
     private static (string Name, string Address) ExtractSenderTerms(string query)
@@ -2262,8 +2252,6 @@ GROUP BY lids.""LabelId""";
             try { await _embeddingTask.ConfigureAwait(false); }
             catch { }
         }
-        _searchEmbedder?.Dispose();
-        _searchEmbedder = null;
 
         _semaphore.Dispose();
         _pgPassword = null;

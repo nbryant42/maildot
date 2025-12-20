@@ -26,9 +26,6 @@ public static class McpTools
     private const int MaxSearchResults = 50;
     private const int EmbeddingDim = 1024;
 
-    private static readonly SemaphoreSlim EmbedderLock = new(1, 1);
-    private static QwenEmbedder? _embedder;
-
     [McpServerTool(Name = "list_accounts")]
     [Desc("Lists configured IMAP accounts with basic metadata (id, display_name, server, username, last_synced_at). No secrets returned.")]
     public static async Task<List<AccountResult>> ListAccountsAsync(
@@ -819,32 +816,13 @@ public static class McpTools
 
     private static async Task<QwenEmbedder?> EnsureSearchEmbedderAsync()
     {
-        if (_embedder != null)
+        var embedder = await QwenEmbedder.GetSharedAsync();
+        if (embedder == null)
         {
-            return _embedder;
+            System.Diagnostics.Debug.WriteLine("Failed to initialize shared MCP search embedder.");
         }
 
-        await EmbedderLock.WaitAsync();
-        try
-        {
-            if (_embedder != null)
-            {
-                return _embedder;
-            }
-
-            _embedder = await QwenEmbedder.Build(QwenEmbedder.ModelId);
-            return _embedder;
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"Failed to initialize MCP search embedder: {ex}");
-            _embedder = null;
-            return null;
-        }
-        finally
-        {
-            EmbedderLock.Release();
-        }
+        return embedder;
     }
 
     private static string FormatMailbox(string? name, string? address)

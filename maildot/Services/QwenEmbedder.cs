@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Tokenizers.DotNet;
 
@@ -24,6 +25,10 @@ public partial class QwenEmbedder : IDisposable
     private readonly Tokenizer _tok;
     private readonly int _maxLen;
     private readonly long _padId;
+    private readonly SemaphoreSlim _sessionLock = new(1, 1);
+    private static readonly SemaphoreSlim SharedLock = new(1, 1);
+    private static QwenEmbedder? _sharedInstance;
+    private static bool _sharedUseGpu = true;
 
     // upper bound on batch_size * seq_len to both avoid OOM and prevent allocations from spilling into shared memory.
     // note there is some room for debate about the optimal value here; in theory, bigger batches improve GPU
@@ -39,7 +44,10 @@ public partial class QwenEmbedder : IDisposable
     private static readonly string hfCacheDir =
     Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "maildot", "hf");
 
-    public static async Task<QwenEmbedder> Build(string modelDir, int maxLen = 1024)
+    /// <summary>
+    /// do not call except from unit tests. the production app should use GetSharedAsync().
+    /// </summary>
+    internal static async Task<QwenEmbedder> Build(string modelDir, int maxLen = 1024, bool useGpu = true)
     {
         // disabled; none of the auto-downloadable providers are working for me as of WinAppSDK 2.0.0-experimental3.
 #if false
@@ -99,7 +107,10 @@ public partial class QwenEmbedder : IDisposable
 #endif
 
         // Must register DML before CPU. Use both; ONNX Runtime will use CPU for certain node types if deemed optimal.
-        try { so.AppendExecutionProvider_DML(); } catch (OnnxRuntimeException e) { Debug.WriteLine(e); }
+        if (useGpu)
+        {
+            try { so.AppendExecutionProvider_DML(); } catch (OnnxRuntimeException e) { Debug.WriteLine(e); }
+        }
         so.AppendExecutionProvider_CPU();
         so.SetEpSelectionPolicy(ExecutionProviderDevicePolicy.MAX_PERFORMANCE);
 
@@ -109,6 +120,58 @@ public partial class QwenEmbedder : IDisposable
 
         // TODO <|endoftext|> seems to encode to two tokens, this may be incorrect.
         return new(sess, tok, maxLen, tok.Encode("<|endoftext|>").FirstOrDefault());
+    }
+
+    internal static Task<QwenEmbedder?> GetSharedAsync(bool? useGpu = null, int maxLen = 1024)
+    {
+        return Task.Run(() => GetSharedAsyncInternal(useGpu, maxLen));
+    }
+
+    private static async Task<QwenEmbedder?> GetSharedAsyncInternal(bool? useGpu, int maxLen)
+    {
+        var desiredUseGpu = useGpu ?? _sharedUseGpu;
+        if (_sharedInstance != null && _sharedUseGpu == desiredUseGpu)
+        {
+            return _sharedInstance;
+        }
+
+        await SharedLock.WaitAsync();
+        try
+        {
+            desiredUseGpu = useGpu ?? _sharedUseGpu;
+            if (_sharedInstance != null && _sharedUseGpu == desiredUseGpu)
+            {
+                return _sharedInstance;
+            }
+
+            QwenEmbedder? built = null;
+            try
+            {
+                built = await Build(ModelId, maxLen, desiredUseGpu);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to initialize shared Qwen embedder: {ex}");
+            }
+
+            if (built != null)
+            {
+                var old = _sharedInstance;
+                _sharedInstance = built;
+                _sharedUseGpu = desiredUseGpu;
+                old?.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Failed to initialize shared Qwen embedder: {ex}");
+        }
+        finally
+        {
+            SharedLock.Release();
+        }
+
+        return _sharedInstance;
     }
 
     private QwenEmbedder(InferenceSession sess, Tokenizer tok, int maxLen, long padId)
@@ -121,6 +184,9 @@ public partial class QwenEmbedder : IDisposable
 
     public Float16[][] EmbedBatch(IEnumerable<string> texts)
     {
+        _sessionLock.Wait();
+        try
+        {
         var list = texts.ToList();
         if (list.Count == 0) return [];
 
@@ -227,6 +293,11 @@ public partial class QwenEmbedder : IDisposable
         }
 
         return outputs;
+        }
+        finally
+        {
+            _sessionLock.Release();
+        }
     }
 
     public Float16[]? EmbedQuery(string query) =>
@@ -294,5 +365,17 @@ public partial class QwenEmbedder : IDisposable
         return outArr;
     }
 
-    public void Dispose() => _sess?.Dispose();
+    public void Dispose()
+    {
+        _sessionLock.Wait();
+        try
+        {
+            _sess?.Dispose();
+        }
+        finally
+        {
+            _sessionLock.Release();
+            _sessionLock.Dispose();
+        }
+    }
 }
