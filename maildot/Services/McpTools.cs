@@ -101,23 +101,20 @@ public static class McpTools
     }
 
     [McpServerTool(Name = "search_messages")]
-    [Desc("Searches mail by subject, sender, and/or embedding relevance. Returns up to 50 items with message_id, " +
-          "imap_uid, folder_full_name, subject, from fields, preview, received_utc, score " +
-          "(lower is better), source=subject|sender|embedding.")]
+    [Desc("Searches mail by subject, sender, and/or embedding relevance, or lists messages when no query is provided. " +
+          "Returns up to 50 items with message_id, imap_uid, folder_full_name, subject, from fields, preview, received_utc, score " +
+          "(lower is better), source=subject|sender|embedding|list.")]
     public static async Task<List<SearchMessageResult>> SearchMessagesAsync(
-        [Desc("Search query text. Must not be empty. '*' wildcarding not supported. Subject and sender searches are " +
-              "simple substring filters. Content search is via vector embeddings only. Thus, boolean AND/OR are not " +
-              "directly supported, but the embeddings model might understand.")] string query,
+        [Desc("Optional search query. If empty/null, returns messages without text/embedding filtering. '*' wildcarding not supported. " +
+              "Subject and sender searches are simple substring filters. Content search is via vector embeddings only. " +
+              "Boolean AND/OR are not directly supported, but the embeddings model might understand.")] string? query = null,
         [Desc("Search mode: auto | sender | content | all | subject (default: auto).")] string? mode = "auto",
         [Desc("Optional ISO-8601 timestamp filter (e.g., 2025-12-16T00:00:00Z).")] string? sinceUtc = null,
+        [Desc("Optional exclusive upper bound on ImapUid for pagination (e.g., request older pages).")] long? imapUidLessThan = null,
         [Desc("Account id; defaults to the active/first account when null.")] int? accountId = null,
         [Desc("Optional cancellation token.")] CancellationToken cancellationToken = default)
     {
         var trimmed = TextCleaner.CleanNullable(query) ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(trimmed))
-        {
-            return [];
-        }
 
         await using var db = await CreateDbContextAsync(cancellationToken);
         var account = await ResolveAccountAsync(db, accountId, cancellationToken);
@@ -129,18 +126,23 @@ public static class McpTools
             since = parsed;
         }
 
+        if (string.IsNullOrWhiteSpace(trimmed))
+        {
+            return await ListMessagesAsync(db, account.Id, since, imapUidLessThan, cancellationToken);
+        }
+
         var effectiveMode = ResolveSearchMode(trimmed, mode);
 
         var subjectResults = ShouldSearchSubject(effectiveMode)
-            ? await SearchBySubjectAsync(db, account.Id, trimmed, since, cancellationToken)
+            ? await SearchBySubjectAsync(db, account.Id, trimmed, since, imapUidLessThan, cancellationToken)
             : [];
 
         var senderResults = ShouldSearchSender(effectiveMode)
-            ? await SearchBySenderAsync(db, account.Id, trimmed, since, cancellationToken)
+            ? await SearchBySenderAsync(db, account.Id, trimmed, since, imapUidLessThan, cancellationToken)
             : [];
 
         var vectorResults = ShouldSearchVector(effectiveMode)
-            ? await SearchByEmbeddingAsync(db, account.Id, trimmed, since, cancellationToken)
+            ? await SearchByEmbeddingAsync(db, account.Id, trimmed, since, imapUidLessThan, cancellationToken)
             : [];
 
         return MergeResults(subjectResults, senderResults, vectorResults);
@@ -378,6 +380,75 @@ public static class McpTools
         return first;
     }
 
+    private static async Task<List<SearchMessageResult>> ListMessagesAsync(
+        MailDbContext db,
+        int accountId,
+        DateTimeOffset? sinceUtc,
+        long? imapUidLessThan,
+        CancellationToken token)
+    {
+        var conn = (NpgsqlConnection)db.Database.GetDbConnection();
+        if (conn.State != ConnectionState.Open)
+        {
+            await conn.OpenAsync(token);
+        }
+
+        var sql = new System.Text.StringBuilder();
+        sql.Append("SELECT m.\"Id\", m.\"ImapUid\", m.\"Subject\", m.\"FromName\", m.\"FromAddress\", m.\"ReceivedUtc\", ");
+        sql.Append("COALESCE(b.\"Preview\", ''), f.\"FullName\" ");
+        sql.Append("FROM imap_messages m ");
+        sql.Append("JOIN imap_folders f ON f.id = m.\"FolderId\" ");
+        sql.Append("LEFT JOIN message_bodies b ON b.\"MessageId\" = m.\"Id\" ");
+        sql.Append("WHERE f.\"AccountId\" = @accountId ");
+        if (sinceUtc.HasValue)
+        {
+            sql.Append("AND m.\"ReceivedUtc\" >= @sinceUtc ");
+        }
+        if (imapUidLessThan.HasValue)
+        {
+            sql.Append("AND m.\"ImapUid\" < @imapUidLessThan ");
+        }
+        sql.Append("ORDER BY m.\"ImapUid\" DESC ");
+        sql.Append("LIMIT @limit");
+
+        await using var cmd = new NpgsqlCommand(sql.ToString(), conn);
+        cmd.Parameters.AddWithValue("accountId", accountId);
+        cmd.Parameters.AddWithValue("limit", MaxSearchResults);
+        if (sinceUtc.HasValue)
+        {
+            cmd.Parameters.AddWithValue("sinceUtc", sinceUtc.Value);
+        }
+        if (imapUidLessThan.HasValue)
+        {
+            cmd.Parameters.AddWithValue("imapUidLessThan", imapUidLessThan.Value);
+        }
+
+        var results = new List<SearchMessageResult>();
+        await using var reader = await cmd.ExecuteReaderAsync(token);
+        while (await reader.ReadAsync(token))
+        {
+            var subject = TextCleaner.CleanNullable(reader.GetString(2)) ?? string.Empty;
+            var fromName = TextCleaner.CleanNullable(reader.GetString(3)) ?? string.Empty;
+            var fromAddress = TextCleaner.CleanNullable(reader.GetString(4)) ?? string.Empty;
+            var preview = TextCleaner.CleanNullable(reader.IsDBNull(6) ? string.Empty : reader.GetString(6)) ?? string.Empty;
+            var folderFullName = TextCleaner.CleanNullable(reader.GetString(7)) ?? string.Empty;
+
+            results.Add(new SearchMessageResult(
+                reader.GetInt32(0),
+                reader.GetInt64(1),
+                folderFullName,
+                string.IsNullOrWhiteSpace(subject) ? "(No subject)" : subject,
+                string.IsNullOrWhiteSpace(fromName) ? fromAddress : fromName,
+                fromAddress,
+                string.IsNullOrWhiteSpace(preview) ? subject : preview,
+                reader.GetFieldValue<DateTimeOffset>(5),
+                0,
+                "list"));
+        }
+
+        return results;
+    }
+
     private static SearchMode ResolveSearchMode(string query, string? mode)
     {
         if (!Enum.TryParse<SearchMode>(mode ?? string.Empty, true, out var parsed))
@@ -407,6 +478,7 @@ public static class McpTools
         int accountId,
         string query,
         DateTimeOffset? sinceUtc,
+        long? imapUidLessThan,
         CancellationToken token)
     {
         var conn = (NpgsqlConnection)db.Database.GetDbConnection();
@@ -427,14 +499,23 @@ public static class McpTools
         {
             sql.Append("AND m.\"ReceivedUtc\" >= @sinceUtc ");
         }
-        sql.Append("ORDER BY m.\"ReceivedUtc\" DESC LIMIT 50");
+        if (imapUidLessThan.HasValue)
+        {
+            sql.Append("AND m.\"ImapUid\" < @imapUidLessThan ");
+        }
+        sql.Append("ORDER BY m.\"ImapUid\" DESC LIMIT @limit");
 
         await using var cmd = new NpgsqlCommand(sql.ToString(), conn);
         cmd.Parameters.AddWithValue("accountId", accountId);
         cmd.Parameters.AddWithValue("subjectPattern", $"%{query}%");
+        cmd.Parameters.AddWithValue("limit", MaxSearchResults);
         if (sinceUtc.HasValue)
         {
             cmd.Parameters.AddWithValue("sinceUtc", sinceUtc.Value);
+        }
+        if (imapUidLessThan.HasValue)
+        {
+            cmd.Parameters.AddWithValue("imapUidLessThan", imapUidLessThan.Value);
         }
 
         var results = new List<SearchResult>();
@@ -468,6 +549,7 @@ public static class McpTools
         int accountId,
         string query,
         DateTimeOffset? sinceUtc,
+        long? imapUidLessThan,
         CancellationToken token)
     {
         var conn = (NpgsqlConnection)db.Database.GetDbConnection();
@@ -497,6 +579,10 @@ public static class McpTools
         {
             sql.Append("AND m.\"ReceivedUtc\" >= @sinceUtc ");
         }
+        if (imapUidLessThan.HasValue)
+        {
+            sql.Append("AND m.\"ImapUid\" < @imapUidLessThan ");
+        }
 
         var clauses = new List<string>();
         if (addressPattern != null)
@@ -515,13 +601,18 @@ public static class McpTools
             sql.Append(") ");
         }
 
-        sql.Append("ORDER BY m.\"ReceivedUtc\" DESC LIMIT 50");
+        sql.Append("ORDER BY m.\"ImapUid\" DESC LIMIT @limit");
 
         await using var cmd = new NpgsqlCommand(sql.ToString(), conn);
         cmd.Parameters.AddWithValue("accountId", accountId);
+        cmd.Parameters.AddWithValue("limit", MaxSearchResults);
         if (sinceUtc.HasValue)
         {
             cmd.Parameters.AddWithValue("sinceUtc", sinceUtc.Value);
+        }
+        if (imapUidLessThan.HasValue)
+        {
+            cmd.Parameters.AddWithValue("imapUidLessThan", imapUidLessThan.Value);
         }
         if (addressPattern != null)
         {
@@ -563,6 +654,7 @@ public static class McpTools
         int accountId,
         string query,
         DateTimeOffset? sinceUtc,
+        long? imapUidLessThan,
         CancellationToken token)
     {
         var embedder = await EnsureSearchEmbedderAsync() ??
@@ -601,17 +693,26 @@ public static class McpTools
         {
             vectorSql.Append("AND m.\"ReceivedUtc\" >= @sinceUtc ");
         }
+        if (imapUidLessThan.HasValue)
+        {
+            vectorSql.Append("AND m.\"ImapUid\" < @imapUidLessThan ");
+        }
         vectorSql.Append("    ORDER BY me.\"MessageId\", negative_inner_product ");
         vectorSql.Append(") AS ranked ");
         vectorSql.Append("ORDER BY cosine_distance ");
-        vectorSql.Append("LIMIT 50");
+        vectorSql.Append("LIMIT @limit");
 
         await using var cmd = new NpgsqlCommand(vectorSql.ToString(), conn);
         cmd.Parameters.AddWithValue("queryVec", vectorLiteral);
         cmd.Parameters.AddWithValue("accountId", accountId);
+        cmd.Parameters.AddWithValue("limit", MaxSearchResults);
         if (sinceUtc.HasValue)
         {
             cmd.Parameters.AddWithValue("sinceUtc", sinceUtc.Value);
+        }
+        if (imapUidLessThan.HasValue)
+        {
+            cmd.Parameters.AddWithValue("imapUidLessThan", imapUidLessThan.Value);
         }
 
         var results = new List<SearchResult>();
@@ -672,7 +773,7 @@ public static class McpTools
         return combined.Values
             .OrderBy(r => r.SourcePriority)
             .ThenBy(r => r.Score)
-            .ThenByDescending(r => r.ReceivedUtc)
+            .ThenByDescending(r => r.ImapUid)
             .Take(MaxSearchResults)
             .Select(r => new SearchMessageResult(
                 r.MessageId,

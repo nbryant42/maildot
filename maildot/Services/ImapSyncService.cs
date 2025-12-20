@@ -450,7 +450,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         {
             sql.Append("AND m.\"ReceivedUtc\" >= @sinceUtc ");
         }
-        sql.Append("ORDER BY m.\"ReceivedUtc\" DESC LIMIT 50");
+        sql.Append("ORDER BY m.\"ImapUid\" DESC LIMIT 50");
 
         await using var cmd = new NpgsqlCommand(sql.ToString(), conn);
         cmd.Parameters.AddWithValue("accountId", _settings!.Id);
@@ -534,7 +534,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             sql.Append(") ");
         }
 
-        sql.Append("ORDER BY m.\"ReceivedUtc\" DESC LIMIT 50");
+        sql.Append("ORDER BY m.\"ImapUid\" DESC LIMIT 50");
 
         await using var cmd = new NpgsqlCommand(sql.ToString(), conn);
         cmd.Parameters.AddWithValue("accountId", _settings!.Id);

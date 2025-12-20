@@ -11,3 +11,6 @@ long-running background fetch runs with a per-call semaphore (don’t hold it).
 - Tokenizer/embedding downloads cache under `%LocalAppData%\maildot\hf\` using the HuggingFace helper.
 - Do not add Linux/macOS-only commands or bash scripts; stay PowerShell-compatible.
 - Avoid destructive git operations unless explicitly requested (no `reset --hard`, no reverting user changes).
+- The `maildot` MCP server at http://localhost:3001 is tools-only.
+- Expected tools: list_accounts, list_folders, list_labels, search_messages, get_message_body, list_attachments, get_schema_snapshot.
+- when probing for MCP features here, skip resources/list and go straight to tool calls (or a tools/list endpoint if present).

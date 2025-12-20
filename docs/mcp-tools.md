@@ -32,38 +32,38 @@ Draft of read-only MCP tools that surface the maildot data model and the existin
 - `list_accounts`
   - Purpose: Discover available IMAP accounts.
   - Input: none.
-  - Output: list of `{ id, display_name, server, username, last_synced_at }`.
+  - Output: list of `{ id, displayName, server, username, lastSyncedAt }`.
   - Notes: IDs map to `imap_accounts.id`; hides passwords/ports/SSL flags beyond metadata.
 
 - `list_folders`
   - Purpose: Enumerate folders for an account.
-  - Input: `account_id` (int), optional `prefix` filter.
-  - Output: list of `{ id, full_name, display_name, uid_validity, last_uid }`.
-  - Notes: `id` is `imap_folders.id`; `full_name` matches `FolderFullName` used in search results.
+  - Input: `accountId` (int), optional `prefix` filter.
+  - Output: list of `{ id, fullName, displayName, uidValidity, lastUid }`.
+  - Notes: `id` is `imap_folders.id`; `fullName` matches `FolderFullName` used in search results.
 
 - `list_labels`
   - Purpose: Enumerate labels and hierarchy.
-  - Input: `account_id` (int).
-  - Output: list of `{ id, name, parent_label_id }`.
+  - Input: `accountId` (int).
+  - Output: list of `{ id, name, parentLabelId }`.
   - Notes: Mirrors `labels` table; useful for future label-aware queries.
 
 - `search_messages`
-  - Purpose: Reuse existing search pipeline (subject/sender/embedding).
-  - Input: `query` (string), optional `mode` (`auto|sender|content|all|subject`), optional `since_utc` (ISO 8601).
-  - Output: up to 50 results `{ message_id, imap_uid, folder_full_name, subject, from_name, from_address, preview, received_utc, score, source }` where `source` is `subject|sender|embedding`.
-  - Notes: `message_id` is DB PK; `imap_uid` + `folder_full_name` pair can be reused to fetch bodies/attachments. `score` is negative inner product for embeddings or `0` otherwise.
+  - Purpose: Reuse existing search pipeline (subject/sender/embedding) and support no-query listing.
+  - Input: optional `query` (string; when empty/null, returns messages without text/embedding filtering), optional `mode` (`auto|sender|content|all|subject`), optional `sinceUtc` (ISO 8601), optional `imapUidLessThan` for pagination.
+  - Output: up to 50 results `{ messageId, imapUid, folderFullName, subject, fromName, fromAddress, preview, receivedUtc, score, source }` where `source` is `subject|sender|embedding|list`.
+  - Notes: `messageId` is DB PK; `imapUid` + `folderFullName` pair can be reused to fetch bodies/attachments. No-query path ignores `mode`, orders by `ImapUid DESC`, and can page via `imapUidLessThan`. Subject and sender searches now order by `ImapUid DESC`; embedding continues to order by cosine distance.
 
 - `get_message_body`
   - Purpose: Fetch sanitized HTML and headers for a message.
-  - Input: `folder_full_name` (string), `imap_uid` (long).
-  - Output: `{ html, headers: { from, from_address, to, cc, bcc } }`.
+  - Input: `folderFullName` (string), `imapUid` (long).
+  - Output: `{ html, headers: { from, fromAddress, to, cc, bcc } }`.
   - Notes: Uses database copy (`message_bodies`); no network IMAP fetch. Returns minimal HTML if only plaintext exists.
 
 - `list_attachments`
   - Purpose: List attachments for a message.
-  - Input: `folder_full_name` (string), `imap_uid` (long), optional `content_type_prefix` (string, default `image/`), optional `include_data` (bool, default `false`), optional `max_bytes` (int, cap when returning data).
-  - Output: list of `{ file_name, content_type, size_bytes, disposition, large_object_id?, base64_data? }`.
-  - Notes: When `include_data` is true, stream from pg_largeobject and respect `max_bytes` to avoid huge payloads. For read-only scope we can omit `large_object_id` if undesired.
+  - Input: `folderFullName` (string), `imapUid` (long), optional `contentTypePrefix` (string, default `image/`), optional `includeData` (bool, default `false`), optional `maxBytes` (int, cap when returning data).
+  - Output: list of `{ fileName, contentType, sizeBytes, disposition, largeObjectId?, base64Data? }`.
+  - Notes: When `includeData` is true, stream from pg_largeobject and respect `maxBytes` to avoid huge payloads. For read-only scope we can omit `largeObjectId` if undesired.
 
 - `get_schema_snapshot` (optional helper)
   - Purpose: Provide high-level schema metadata for grounding.
