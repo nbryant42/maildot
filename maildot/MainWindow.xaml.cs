@@ -1,22 +1,26 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using maildot.Models;
 using maildot.Services;
-using maildot.Views;
 using maildot.ViewModels;
+using maildot.Views;
+using Microsoft.UI;
+using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using MimeKit;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
-using Windows.System;
-using Windows.UI;
-using WinRT.Interop;
-using Microsoft.UI;
+using System.Linq;
 using System.Net;
+using System.Text;
+using System.Threading.Tasks;
+using Windows.Foundation;
+using Windows.Graphics;
+using Windows.System;
+using WinRT.Interop;
 
 namespace maildot;
 
@@ -35,7 +39,6 @@ public sealed partial class MainWindow : Window
     private SearchMode _searchMode = SearchMode.Auto;
     private AppWindow? _appWindow;
     private DateTimeOffset? _searchSinceUtc = null;
-    private const double TitleBarMinHeight = 52;
 
     public MainWindow()
     {
@@ -54,8 +57,12 @@ public sealed partial class MainWindow : Window
 
         _startupInitialized = true;
         Activated -= OnWindowActivated;
-
         await EvaluateStartupAsync();
+    }
+
+    private void OnRootGridLoaded(object sender, RoutedEventArgs e)
+    {
+        UpdateTitleBarMetrics();
     }
 
     private async void OnGpuToggleToggled(object sender, RoutedEventArgs e)
@@ -188,7 +195,7 @@ public sealed partial class MainWindow : Window
         try
         {
             var hWnd = WindowNative.GetWindowHandle(this);
-            var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hWnd);
+            var windowId = Win32Interop.GetWindowIdFromWindow(hWnd);
             var appWindow = AppWindow.GetFromWindowId(windowId);
             var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
 
@@ -199,7 +206,7 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"Failed to set window icon: {ex}");
+            Debug.WriteLine($"Failed to set window icon: {ex}");
         }
     }
 
@@ -303,10 +310,7 @@ public sealed partial class MainWindow : Window
 
     private void OnUnlabeledOnlyToggled(object? sender, bool isOn)
     {
-        if (_mailboxViewModel != null)
-        {
-            _mailboxViewModel.UnlabeledOnly = isOn;
-        }
+        _mailboxViewModel?.UnlabeledOnly = isOn;
 
         if (_imapService == null || _mailboxViewModel?.SelectedFolder is not MailFolderViewModel folder)
         {
@@ -664,7 +668,7 @@ public sealed partial class MainWindow : Window
 
     private async void OnComposeRequested(object? sender, EventArgs e)
     {
-        var uri = BuildMailToUri(Array.Empty<string>(), null, null);
+        var uri = BuildMailToUri([], null, null);
         await Launcher.LaunchUriAsync(uri);
     }
 
@@ -674,7 +678,7 @@ public sealed partial class MainWindow : Window
     private async void OnReplyAllRequested(object? sender, EmailMessageViewModel message) =>
         await LaunchReplyAsync(message);
 
-    private async Task LaunchReplyAsync(EmailMessageViewModel message)
+    private static async Task LaunchReplyAsync(EmailMessageViewModel message)
     {
         var to = ExtractAddress(message);
         if (string.IsNullOrEmpty(to))
@@ -683,14 +687,14 @@ public sealed partial class MainWindow : Window
         }
 
         var body = BuildQuotedBody(message);
-        var uri = BuildMailToUri(new[] { to }, $"Re: {message.Subject}", body);
+        var uri = BuildMailToUri([to], $"Re: {message.Subject}", body);
         await Launcher.LaunchUriAsync(uri);
     }
 
     private async void OnForwardRequested(object? sender, EmailMessageViewModel message)
     {
         var body = $"Forwarded message:\r\nFrom: {message.Sender}\r\nSubject: {message.Subject}\r\n\r\n{message.Preview}";
-        var uri = BuildMailToUri(Array.Empty<string>(), $"Fwd: {message.Subject}", body);
+        var uri = BuildMailToUri([], $"Fwd: {message.Subject}", body);
         await Launcher.LaunchUriAsync(uri);
     }
 
@@ -700,7 +704,7 @@ public sealed partial class MainWindow : Window
         var toList = recipients?
             .Where(r => !string.IsNullOrWhiteSpace(r))
             .Select(r => r.Trim())
-            .ToList() ?? new List<string>();
+            .ToList() ?? [];
 
         if (toList.Count > 0)
         {
@@ -747,21 +751,57 @@ public sealed partial class MainWindow : Window
                 appTitleBar.ButtonInactiveBackgroundColor = Colors.Transparent;
                 appTitleBar.ButtonForegroundColor = null;
                 appTitleBar.ButtonInactiveForegroundColor = null;
-                UpdateTitleBarMetrics(appTitleBar);
+                appTitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
             }
 
             SetTitleBar(TitleBarDragArea);
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"Failed to initialize custom title bar: {ex}");
+            Debug.WriteLine($"Failed to initialize custom title bar: {ex}");
         }
     }
 
-    private void UpdateTitleBarMetrics(AppWindowTitleBar titleBar)
+    private void UpdateTitleBarMetrics()
     {
-        TitleBarRoot.Height = Math.Max(titleBar.Height, TitleBarMinHeight);
-        TitleBarRoot.Padding = new Thickness(titleBar.LeftInset, 0, titleBar.RightInset, 0);
+        try
+        {
+            var hWnd = WindowNative.GetWindowHandle(this);
+            var windowId = Win32Interop.GetWindowIdFromWindow(hWnd);
+            _appWindow = AppWindow.GetFromWindowId(windowId);
+
+            if (_appWindow?.TitleBar is { } titleBar)
+            {
+                // Specify the interactive regions of the title bar.
+                var xamlRoot = GetXamlRoot() ?? throw new InvalidOperationException("XamlRoot is not available.");
+                double scale = xamlRoot.RasterizationScale;
+
+                TitleBarRoot.Padding = new Thickness(titleBar.LeftInset / scale, 0, titleBar.RightInset / scale, 0);
+
+                GeneralTransform transform = GpuToggle.TransformToVisual(null);
+                Rect bounds = transform.TransformBounds(new Rect(0, 0, GpuToggle.ActualWidth, GpuToggle.ActualHeight));
+
+                var rectArray = new RectInt32[] { GetRect(bounds, scale) };
+
+                InputNonClientPointerSource nonClientInputSrc =
+                    InputNonClientPointerSource.GetForWindowId(AppWindow.Id);
+                nonClientInputSrc.SetRegionRects(NonClientRegionKind.Passthrough, rectArray);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Failed to initialize custom title bar: {ex}");
+        }
+    }
+
+    private static RectInt32 GetRect(Rect bounds, double scale)
+    {
+        return new RectInt32(
+            _X: (int)Math.Round(bounds.X * scale),
+            _Y: (int)Math.Round(bounds.Y * scale),
+            _Width: (int)Math.Round(bounds.Width * scale),
+            _Height: (int)Math.Round(bounds.Height * scale)
+        );
     }
 
     private async void OnSearchQuerySubmitted(AutoSuggestBox sender, AutoSuggestBoxQuerySubmittedEventArgs args)
@@ -1033,7 +1073,7 @@ public sealed partial class MainWindow : Window
         }
 
         var trimmed = display?.Trim();
-        return trimmed != null && trimmed.Contains("@", StringComparison.Ordinal) ? trimmed : null;
+        return trimmed != null && trimmed.Contains('@', StringComparison.Ordinal) ? trimmed : null;
     }
 
     private static string? BuildQuotedBody(EmailMessageViewModel message)

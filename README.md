@@ -48,7 +48,7 @@ with data corruption problems, search bugs, and freezes.
 I can also connect to my email provider via IMAP, but baseline IMAP does not have Gmail-like labels. So this project
 implements a Gmail-like multi-label system on top of IMAP, with local storage of all email data in PostgreSQL, and
 labels stored locally. I can continue to let Thunderbird delete old emails from the server, while also keeping a full
-archive in Postgres via this application--and gradually move away from Thunderbird.
+archive in Postgres via this application—and gradually move away from Thunderbird.
 
 For the above reasons, this project is designed around a somewhat POP3-like usage model where the local storage persists
 even if the server data is deleted, contrary to most IMAP clients, which treat the server as the source of truth and are
@@ -56,7 +56,7 @@ designed to mirror server state locally. It's not ready to fully replace Thunder
 workflow.
 
 If your IMAP provider is Gmail, you will likely be frustrated that our "labels" are not synced to Gmail labels, which
-are emulated folders when viewed via IMAP. But if your workflow is like mine, you might be in the right place.
+are emulated as folders when viewed via IMAP. But if your workflow is like mine, you might be in the right place.
 
 	
 ## System requirements

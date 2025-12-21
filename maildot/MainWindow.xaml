@@ -13,7 +13,7 @@
         <MicaBackdrop />
     </Window.SystemBackdrop>
 
-    <Grid>
+    <Grid Loaded="OnRootGridLoaded">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
@@ -21,11 +21,11 @@
 
         <Border x:Name="TitleBarRoot"
                 Grid.Row="0"
-                Background="{ThemeResource LayerFillColorDefaultBrush}"
-                MinHeight="52">
+                Background="{ThemeResource LayerFillColorDefaultBrush}">
             <Grid x:Name="TitleBarDragArea"
                   ColumnSpacing="12"
-                  Padding="12,10,12,10"
+                  Padding="12,0,12,0"
+                  MinHeight="48"
                   VerticalAlignment="Center">
 
                 <Grid.ColumnDefinitions>
@@ -55,6 +55,7 @@
                 <ComboBox x:Name="SearchModeCombo"
                           Grid.Column="2"
                           Width="140"
+                          VerticalAlignment="Center"
                           SelectionChanged="OnSearchModeChanged">
                     <ComboBoxItem Content="Auto" Tag="Auto" IsSelected="True" />
                     <ComboBoxItem Content="Sender" Tag="Sender" />
@@ -66,6 +67,7 @@
                 <ComboBox x:Name="SearchSinceCombo"
                               Grid.Column="3"
                               Width="150"
+                              VerticalAlignment="Center"
                               SelectionChanged="OnSearchSinceChanged">
                     <ComboBoxItem Content="All time" Tag="all" IsSelected="True" />
                     <ComboBoxItem Content="Last 7 days" Tag="7d" />
@@ -79,9 +81,11 @@
                                 PlaceholderText="Search mail"
                                 QueryIcon="Find"
                                 HorizontalAlignment="Stretch"
+                                VerticalAlignment="Center"
                                 QuerySubmitted="OnSearchQuerySubmitted" />
 
                 <Button x:Name="AdvancedSearchButton"
+                        VerticalAlignment="Center"
                         Grid.Column="5"
                         Background="Transparent"
                         BorderThickness="0"
