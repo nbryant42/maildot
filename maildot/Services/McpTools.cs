@@ -4,7 +4,6 @@ using System.Data;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using maildot.Data;
@@ -98,17 +97,21 @@ public static class McpTools
     }
 
     [McpServerTool(Name = "search_messages")]
-    [Desc("Searches mail by subject, sender, and/or embedding relevance, or lists messages when no query is provided. " +
-          "Returns results with message_id, imap_uid, folder_full_name, subject, from fields, preview, received_utc, score " +
-          "(lower is better), source=subject|sender|embedding|list, plus count/lowestImapUid metadata.")]
+    [Desc("Searches mail by subject, sender, and/or embedding relevance, or lists messages when no query is " +
+          "provided. Returns results with message_id, imap_uid, folder_full_name, subject, from fields, preview, " +
+          "received_utc, score (lower is better), source=subject|sender|embedding|list, label_ids," +
+          "plus count/lowestImapUid metadata.")]
     public static async Task<SearchMessageResults> SearchMessagesAsync(
-        [Desc("Optional search query. If empty/null, returns messages without text/embedding filtering. '*' wildcarding not supported. " +
+        [Desc("Optional search query. Must not be null, but if empty/omitted, returns messages without text/embedding filtering. '*' wildcarding not supported. " +
               "Subject and sender searches are simple substring filters. Content search is via vector embeddings only. " +
               "Boolean AND/OR are not directly supported, but the embeddings model might understand.")] string? query = null,
         [Desc("Search mode: auto | sender | content | all | subject (default: auto).")] string? mode = "auto",
         [Desc("Optional ISO-8601 timestamp filter (e.g., 2025-12-16T00:00:00Z).")] string? sinceUtc = null,
         [Desc("Optional exclusive upper bound on ImapUid for pagination (e.g., request older pages).")] long? imapUidLessThan = null,
         [Desc("Optional maximum results to return (default 60, max 1000).")] int? maxResults = null,
+        [Desc("Optional label ids (disjunctive). When combined with includeUnlabeled, returns messages with any of these labels OR no labels.")] List<int>? labelIds = null,
+        [Desc("Optional folder ids (disjunctive).")] List<int>? folderIds = null,
+        [Desc("Include unlabeled messages even if there is a label_ids filter. (Default: true)")] bool includeUnlabeled = true,
         [Desc("Account id; defaults to the active/first account when null.")] int? accountId = null,
         [Desc("Optional cancellation token.")] CancellationToken cancellationToken = default)
     {
@@ -124,29 +127,34 @@ public static class McpTools
             since = parsed;
         }
 
+        var labelIdList = labelIds?.Where(id => id > 0).Distinct().ToArray();
+        var folderIdList = folderIds?.Where(id => id > 0).Distinct().ToArray();
+
         var limit = Math.Clamp(maxResults ?? DefaultMaxSearchResults, 1, AbsoluteMaxSearchResults);
 
         if (string.IsNullOrWhiteSpace(trimmed))
         {
-            var listResults = await ListMessagesAsync(db, account.Id, since, imapUidLessThan, limit, cancellationToken);
+            var listResults = await ListMessagesAsync(db, account.Id, since, imapUidLessThan, limit, labelIdList, folderIdList, includeUnlabeled, cancellationToken);
+            await PopulateLabelIdsAsync(db, listResults, cancellationToken);
             return WrapResults(listResults);
         }
 
         var effectiveMode = ResolveSearchMode(trimmed, mode);
 
         var subjectResults = ShouldSearchSubject(effectiveMode)
-            ? await SearchBySubjectAsync(db, account.Id, trimmed, since, imapUidLessThan, limit, cancellationToken)
+            ? await SearchBySubjectAsync(db, account.Id, trimmed, since, imapUidLessThan, limit, labelIdList, folderIdList, includeUnlabeled, cancellationToken)
             : [];
 
         var senderResults = ShouldSearchSender(effectiveMode)
-            ? await SearchBySenderAsync(db, account.Id, trimmed, since, imapUidLessThan, limit, cancellationToken)
+            ? await SearchBySenderAsync(db, account.Id, trimmed, since, imapUidLessThan, limit, labelIdList, folderIdList, includeUnlabeled, cancellationToken)
             : [];
 
         var vectorResults = ShouldSearchVector(effectiveMode)
-            ? await SearchByEmbeddingAsync(db, account.Id, trimmed, since, imapUidLessThan, limit, cancellationToken)
+            ? await SearchByEmbeddingAsync(db, account.Id, trimmed, since, imapUidLessThan, limit, labelIdList, folderIdList, includeUnlabeled, cancellationToken)
             : [];
 
         var merged = MergeResults(limit, subjectResults, senderResults, vectorResults);
+        await PopulateLabelIdsAsync(db, merged, cancellationToken);
         return WrapResults(merged);
     }
 
@@ -388,6 +396,9 @@ public static class McpTools
         DateTimeOffset? sinceUtc,
         long? imapUidLessThan,
         int limit,
+        int[]? labelIds,
+        int[]? folderIds,
+        bool includeUnlabeled,
         CancellationToken token)
     {
         var conn = (NpgsqlConnection)db.Database.GetDbConnection();
@@ -395,6 +406,9 @@ public static class McpTools
         {
             await conn.OpenAsync(token);
         }
+
+        var hasLabelFilter = labelIds is { Length: > 0 };
+        var hasFolderFilter = folderIds is { Length: > 0 };
 
         var sql = new System.Text.StringBuilder();
         sql.Append("SELECT m.\"Id\", m.\"ImapUid\", m.\"Subject\", m.\"FromName\", m.\"FromAddress\", m.\"ReceivedUtc\", ");
@@ -411,6 +425,27 @@ public static class McpTools
         {
             sql.Append("AND m.\"ImapUid\" < @imapUidLessThan ");
         }
+        if (hasFolderFilter)
+        {
+            sql.Append("AND m.\"FolderId\" = ANY(@folderIds) ");
+        }
+        if (hasLabelFilter)
+        {
+            if (includeUnlabeled)
+            {
+                sql.Append("AND (");
+                sql.Append("EXISTS (SELECT 1 FROM message_labels ml WHERE ml.\"MessageId\" = m.\"Id\" AND ml.\"LabelId\" = ANY(@labelIds)) ");
+                sql.Append("OR EXISTS (SELECT 1 FROM sender_labels sl WHERE sl.from_address = lower(m.\"FromAddress\") AND sl.\"LabelId\" = ANY(@labelIds)) ");
+                sql.Append("OR (NOT EXISTS (SELECT 1 FROM message_labels ml2 WHERE ml2.\"MessageId\" = m.\"Id\") ");
+                sql.Append("AND NOT EXISTS (SELECT 1 FROM sender_labels sl2 WHERE sl2.from_address = lower(m.\"FromAddress\")))");
+                sql.Append(") ");
+            }
+            else
+            {
+                sql.Append("AND (EXISTS (SELECT 1 FROM message_labels ml WHERE ml.\"MessageId\" = m.\"Id\" AND ml.\"LabelId\" = ANY(@labelIds)) ");
+                sql.Append("OR EXISTS (SELECT 1 FROM sender_labels sl WHERE sl.from_address = lower(m.\"FromAddress\") AND sl.\"LabelId\" = ANY(@labelIds))) ");
+            }
+        }
         sql.Append("ORDER BY m.\"ImapUid\" DESC ");
         sql.Append("LIMIT @limit");
 
@@ -425,6 +460,14 @@ public static class McpTools
         {
             cmd.Parameters.AddWithValue("imapUidLessThan", imapUidLessThan.Value);
         }
+        if (hasLabelFilter)
+        {
+            cmd.Parameters.AddWithValue("labelIds", labelIds!);
+        }
+        if (hasFolderFilter)
+        {
+            cmd.Parameters.AddWithValue("folderIds", folderIds!);
+        }
 
         var results = new List<SearchMessageResult>();
         await using var reader = await cmd.ExecuteReaderAsync(token);
@@ -433,7 +476,8 @@ public static class McpTools
             var subject = TextCleaner.CleanNullable(reader.GetString(2)) ?? string.Empty;
             var fromName = TextCleaner.CleanNullable(reader.GetString(3)) ?? string.Empty;
             var fromAddress = TextCleaner.CleanNullable(reader.GetString(4)) ?? string.Empty;
-            var preview = TextCleaner.CleanNullable(reader.IsDBNull(6) ? string.Empty : reader.GetString(6)) ?? string.Empty;
+            var preview = TextCleaner.CleanNullable(reader.IsDBNull(6) ? string.Empty : reader.GetString(6))
+                ?? string.Empty;
             var folderFullName = TextCleaner.CleanNullable(reader.GetString(7)) ?? string.Empty;
 
             results.Add(new SearchMessageResult(
@@ -446,7 +490,8 @@ public static class McpTools
                 string.IsNullOrWhiteSpace(preview) ? subject : preview,
                 reader.GetFieldValue<DateTimeOffset>(5),
                 0,
-                "list"));
+                "list",
+                []));
         }
 
         return results;
@@ -483,6 +528,9 @@ public static class McpTools
         DateTimeOffset? sinceUtc,
         long? imapUidLessThan,
         int limit,
+        int[]? labelIds,
+        int[]? folderIds,
+        bool includeUnlabeled,
         CancellationToken token)
     {
         var conn = (NpgsqlConnection)db.Database.GetDbConnection();
@@ -490,6 +538,9 @@ public static class McpTools
         {
             await conn.OpenAsync(token);
         }
+
+        var hasLabelFilter = labelIds is { Length: > 0 };
+        var hasFolderFilter = folderIds is { Length: > 0 };
 
         var sql = new System.Text.StringBuilder();
         sql.Append("SELECT m.\"Id\", m.\"ImapUid\", m.\"Subject\", m.\"FromName\", m.\"FromAddress\", m.\"ReceivedUtc\", ");
@@ -507,6 +558,27 @@ public static class McpTools
         {
             sql.Append("AND m.\"ImapUid\" < @imapUidLessThan ");
         }
+        if (hasFolderFilter)
+        {
+            sql.Append("AND m.\"FolderId\" = ANY(@folderIds) ");
+        }
+        if (hasLabelFilter)
+        {
+            if (includeUnlabeled)
+            {
+                sql.Append("AND (");
+                sql.Append("EXISTS (SELECT 1 FROM message_labels ml WHERE ml.\"MessageId\" = m.\"Id\" AND ml.\"LabelId\" = ANY(@labelIds)) ");
+                sql.Append("OR EXISTS (SELECT 1 FROM sender_labels sl WHERE sl.from_address = lower(m.\"FromAddress\") AND sl.\"LabelId\" = ANY(@labelIds)) ");
+                sql.Append("OR (NOT EXISTS (SELECT 1 FROM message_labels ml2 WHERE ml2.\"MessageId\" = m.\"Id\") ");
+                sql.Append("AND NOT EXISTS (SELECT 1 FROM sender_labels sl2 WHERE sl2.from_address = lower(m.\"FromAddress\"))");
+                sql.Append(") ");
+            }
+            else
+            {
+                sql.Append("AND (EXISTS (SELECT 1 FROM message_labels ml WHERE ml.\"MessageId\" = m.\"Id\" AND ml.\"LabelId\" = ANY(@labelIds)) ");
+                sql.Append("OR EXISTS (SELECT 1 FROM sender_labels sl WHERE sl.from_address = lower(m.\"FromAddress\") AND sl.\"LabelId\" = ANY(@labelIds))) ");
+            }
+        }
         sql.Append("ORDER BY m.\"ImapUid\" DESC LIMIT @limit");
 
         await using var cmd = new NpgsqlCommand(sql.ToString(), conn);
@@ -520,6 +592,14 @@ public static class McpTools
         if (imapUidLessThan.HasValue)
         {
             cmd.Parameters.AddWithValue("imapUidLessThan", imapUidLessThan.Value);
+        }
+        if (hasLabelFilter)
+        {
+            cmd.Parameters.AddWithValue("labelIds", labelIds!);
+        }
+        if (hasFolderFilter)
+        {
+            cmd.Parameters.AddWithValue("folderIds", folderIds!);
         }
 
         var results = new List<SearchResult>();
@@ -555,6 +635,9 @@ public static class McpTools
         DateTimeOffset? sinceUtc,
         long? imapUidLessThan,
         int limit,
+        int[]? labelIds,
+        int[]? folderIds,
+        bool includeUnlabeled,
         CancellationToken token)
     {
         var conn = (NpgsqlConnection)db.Database.GetDbConnection();
@@ -562,6 +645,9 @@ public static class McpTools
         {
             await conn.OpenAsync(token);
         }
+
+        var hasLabelFilter = labelIds is { Length: > 0 };
+        var hasFolderFilter = folderIds is { Length: > 0 };
 
         var terms = ExtractSenderTerms(query);
         var addressPattern = string.IsNullOrWhiteSpace(terms.Address) ? null : $"%{terms.Address}%";
@@ -587,6 +673,27 @@ public static class McpTools
         if (imapUidLessThan.HasValue)
         {
             sql.Append("AND m.\"ImapUid\" < @imapUidLessThan ");
+        }
+        if (hasFolderFilter)
+        {
+            sql.Append("AND m.\"FolderId\" = ANY(@folderIds) ");
+        }
+        if (hasLabelFilter)
+        {
+            if (includeUnlabeled)
+            {
+                sql.Append("AND (");
+                sql.Append("EXISTS (SELECT 1 FROM message_labels ml WHERE ml.\"MessageId\" = m.\"Id\" AND ml.\"LabelId\" = ANY(@labelIds)) ");
+                sql.Append("OR EXISTS (SELECT 1 FROM sender_labels sl WHERE sl.from_address = lower(m.\"FromAddress\") AND sl.\"LabelId\" = ANY(@labelIds)) ");
+                sql.Append("OR (NOT EXISTS (SELECT 1 FROM message_labels ml2 WHERE ml2.\"MessageId\" = m.\"Id\") ");
+                sql.Append("AND NOT EXISTS (SELECT 1 FROM sender_labels sl2 WHERE sl2.from_address = lower(m.\"FromAddress\"))");
+                sql.Append(") ");
+            }
+            else
+            {
+                sql.Append("AND (EXISTS (SELECT 1 FROM message_labels ml WHERE ml.\"MessageId\" = m.\"Id\" AND ml.\"LabelId\" = ANY(@labelIds)) ");
+                sql.Append("OR EXISTS (SELECT 1 FROM sender_labels sl WHERE sl.from_address = lower(m.\"FromAddress\") AND sl.\"LabelId\" = ANY(@labelIds))) ");
+            }
         }
 
         var clauses = new List<string>();
@@ -618,6 +725,14 @@ public static class McpTools
         if (imapUidLessThan.HasValue)
         {
             cmd.Parameters.AddWithValue("imapUidLessThan", imapUidLessThan.Value);
+        }
+        if (hasLabelFilter)
+        {
+            cmd.Parameters.AddWithValue("labelIds", labelIds!);
+        }
+        if (hasFolderFilter)
+        {
+            cmd.Parameters.AddWithValue("folderIds", folderIds!);
         }
         if (addressPattern != null)
         {
@@ -661,6 +776,9 @@ public static class McpTools
         DateTimeOffset? sinceUtc,
         long? imapUidLessThan,
         int limit,
+        int[]? labelIds,
+        int[]? folderIds,
+        bool includeUnlabeled,
         CancellationToken token)
     {
         var embedder = await EnsureSearchEmbedderAsync() ??
@@ -680,6 +798,9 @@ public static class McpTools
         {
             await conn.OpenAsync(token);
         }
+
+        var hasLabelFilter = labelIds is { Length: > 0 };
+        var hasFolderFilter = folderIds is { Length: > 0 };
 
         var vectorSql = new System.Text.StringBuilder();
         vectorSql.Append("SELECT ranked.\"MessageId\", ranked.\"ImapUid\", ranked.\"Subject\", ranked.\"FromName\", ranked.\"FromAddress\", ");
@@ -703,6 +824,27 @@ public static class McpTools
         {
             vectorSql.Append("AND m.\"ImapUid\" < @imapUidLessThan ");
         }
+        if (hasFolderFilter)
+        {
+            vectorSql.Append("AND m.\"FolderId\" = ANY(@folderIds) ");
+        }
+        if (hasLabelFilter)
+        {
+            if (includeUnlabeled)
+            {
+                vectorSql.Append("AND (");
+                vectorSql.Append("EXISTS (SELECT 1 FROM message_labels ml WHERE ml.\"MessageId\" = m.\"Id\" AND ml.\"LabelId\" = ANY(@labelIds)) ");
+                vectorSql.Append("OR EXISTS (SELECT 1 FROM sender_labels sl WHERE sl.from_address = lower(m.\"FromAddress\") AND sl.\"LabelId\" = ANY(@labelIds)) ");
+                vectorSql.Append("OR (NOT EXISTS (SELECT 1 FROM message_labels ml2 WHERE ml2.\"MessageId\" = m.\"Id\") ");
+                vectorSql.Append("AND NOT EXISTS (SELECT 1 FROM sender_labels sl2 WHERE sl2.from_address = lower(m.\"FromAddress\"))");
+                vectorSql.Append(") ");
+            }
+            else
+            {
+                vectorSql.Append("AND (EXISTS (SELECT 1 FROM message_labels ml WHERE ml.\"MessageId\" = m.\"Id\" AND ml.\"LabelId\" = ANY(@labelIds)) ");
+                vectorSql.Append("OR EXISTS (SELECT 1 FROM sender_labels sl WHERE sl.from_address = lower(m.\"FromAddress\") AND sl.\"LabelId\" = ANY(@labelIds))) ");
+            }
+        }
         vectorSql.Append("    ORDER BY me.\"MessageId\", negative_inner_product ");
         vectorSql.Append(") AS ranked ");
         vectorSql.Append("ORDER BY cosine_distance ");
@@ -719,6 +861,14 @@ public static class McpTools
         if (imapUidLessThan.HasValue)
         {
             cmd.Parameters.AddWithValue("imapUidLessThan", imapUidLessThan.Value);
+        }
+        if (hasLabelFilter)
+        {
+            cmd.Parameters.AddWithValue("labelIds", labelIds!);
+        }
+        if (hasFolderFilter)
+        {
+            cmd.Parameters.AddWithValue("folderIds", folderIds!);
         }
 
         var results = new List<SearchResult>();
@@ -791,7 +941,8 @@ public static class McpTools
                 string.IsNullOrWhiteSpace(r.Preview) ? r.Subject : r.Preview,
                 r.ReceivedUtc,
                 r.Score,
-                r.Source))
+                r.Source,
+                new List<int>()))
             .ToList();
     }
 
@@ -880,7 +1031,8 @@ public static class McpTools
         string Preview,
         DateTimeOffset ReceivedUtc,
         double Score,
-        string Source);
+        string Source,
+        List<int> LabelIds);
     public record MessageBodyResult(string Html, MessageHeaderInfo Headers);
     public record MessageHeaderInfo(string From, string FromAddress, string To, string? Cc, string? Bcc);
     public record AttachmentResult(string FileName, string ContentType, long SizeBytes, string? Disposition, string? Base64Data);
@@ -913,5 +1065,90 @@ public static class McpTools
             "embedding" => 2,
             _ => 3
         };
+    }
+
+    private static async Task PopulateLabelIdsAsync(
+        MailDbContext db,
+        List<SearchMessageResult> results,
+        CancellationToken token)
+    {
+        if (results.Count == 0)
+        {
+            return;
+        }
+
+        var messageIds = results.Select(r => r.MessageId).Distinct().ToArray();
+        var conn = (NpgsqlConnection)db.Database.GetDbConnection();
+        if (conn.State != System.Data.ConnectionState.Open)
+        {
+            await conn.OpenAsync(token);
+        }
+
+        var labelMap = new Dictionary<int, List<int>>();
+
+        await using (var cmd = new NpgsqlCommand("SELECT \"MessageId\", \"LabelId\" FROM message_labels WHERE \"MessageId\" = ANY(@messageIds)", conn))
+        {
+            cmd.Parameters.AddWithValue("messageIds", messageIds);
+
+            await using var reader = await cmd.ExecuteReaderAsync(token);
+            while (await reader.ReadAsync(token))
+            {
+                var messageId = reader.GetInt32(0);
+                var labelId = reader.GetInt32(1);
+
+                if (!labelMap.TryGetValue(messageId, out var list))
+                {
+                    list = new List<int>();
+                    labelMap[messageId] = list;
+                }
+
+                if (!list.Contains(labelId))
+                {
+                    list.Add(labelId);
+                }
+            }
+        }
+
+        var fromAddresses = results.Select(r => r.FromAddress).Where(a => !string.IsNullOrWhiteSpace(a)).Distinct().ToArray();
+        if (fromAddresses.Length > 0)
+        {
+            await using var senderCmd = new NpgsqlCommand("SELECT from_address, \"LabelId\" FROM sender_labels WHERE from_address = ANY(@fromAddresses)", conn);
+            senderCmd.Parameters.AddWithValue("fromAddresses", fromAddresses);
+
+            var senderLabelMap = new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
+            await using var senderReader = await senderCmd.ExecuteReaderAsync(token);
+            while (await senderReader.ReadAsync(token))
+            {
+                var address = TextCleaner.CleanNullable(senderReader.GetString(0)) ?? string.Empty;
+                var labelId = senderReader.GetInt32(1);
+                if (!senderLabelMap.TryGetValue(address, out var list))
+                {
+                    list = new List<int>();
+                    senderLabelMap[address] = list;
+                }
+
+                if (!list.Contains(labelId))
+                {
+                    list.Add(labelId);
+                }
+            }
+
+            foreach (var result in results)
+            {
+                if (!string.IsNullOrWhiteSpace(result.FromAddress) &&
+                    senderLabelMap.TryGetValue(result.FromAddress, out var labels))
+                {
+                    result.LabelIds.AddRange(labels);
+                }
+            }
+        }
+
+        foreach (var result in results)
+        {
+            if (labelMap.TryGetValue(result.MessageId, out var labels))
+            {
+                result.LabelIds.AddRange(labels);
+            }
+        }
     }
 }
