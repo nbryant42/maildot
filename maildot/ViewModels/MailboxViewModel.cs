@@ -24,6 +24,7 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
     private bool _isRetryVisible;
     private EmailMessageViewModel? _selectedMessage;
     private int? _selectedLabelId;
+    private bool _unlabeledOnly;
 
     public ObservableCollection<MailFolderViewModel> Folders { get; } = new();
     public ObservableCollection<EmailMessageViewModel> Messages { get; } = new();
@@ -154,6 +155,19 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
+
+    public bool UnlabeledOnly
+    {
+        get => _unlabeledOnly;
+        set
+        {
+            if (_unlabeledOnly != value)
+            {
+                _unlabeledOnly = value;
+                OnPropertyChanged(nameof(UnlabeledOnly));
+            }
+        }
+    }
 
     public void SetFolders(IEnumerable<MailFolderViewModel> folders)
     {

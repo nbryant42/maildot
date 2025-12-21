@@ -262,6 +262,8 @@ public sealed partial class MainWindow : Window
         _dashboardView.SuggestionAccepted += OnSuggestionAccepted;
         _dashboardView.LabelSenderRequested -= OnLabelSenderRequested;
         _dashboardView.LabelSenderRequested += OnLabelSenderRequested;
+        _dashboardView.UnlabeledOnlyToggled -= OnUnlabeledOnlyToggled;
+        _dashboardView.UnlabeledOnlyToggled += OnUnlabeledOnlyToggled;
 
         _dashboardView.BindViewModel(_mailboxViewModel);
         RootContent.Content = _dashboardView;
@@ -296,6 +298,21 @@ public sealed partial class MainWindow : Window
         _mailboxViewModel?.ExitSearchMode();
         _dashboardView?.ClearMessageContentAsync();
         _dashboardView?.ClearAttachmentsAsync();
+        _ = _imapService.LoadFolderAsync(folder.Id);
+    }
+
+    private void OnUnlabeledOnlyToggled(object? sender, bool isOn)
+    {
+        if (_mailboxViewModel != null)
+        {
+            _mailboxViewModel.UnlabeledOnly = isOn;
+        }
+
+        if (_imapService == null || _mailboxViewModel?.SelectedFolder is not MailFolderViewModel folder)
+        {
+            return;
+        }
+
         _ = _imapService.LoadFolderAsync(folder.Id);
     }
 

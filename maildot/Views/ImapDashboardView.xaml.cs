@@ -40,6 +40,7 @@ public sealed partial class ImapDashboardView : UserControl
     public event EventHandler<LabelViewModel>? LabelSelected;
     public event EventHandler<EmailMessageViewModel>? SuggestionAccepted;
     public event EventHandler<EmailMessageViewModel>? LabelSenderRequested;
+    public event EventHandler<bool>? UnlabeledOnlyToggled;
 
     public void BindViewModel(MailboxViewModel viewModel)
     {
@@ -158,6 +159,26 @@ public sealed partial class ImapDashboardView : UserControl
         else
         {
             _hasRequestedMore = false;
+        }
+    }
+
+    private void OnUnlabeledOnlyToggled(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MailboxViewModel vm)
+        {
+            return;
+        }
+
+        if (sender is ToggleSwitch ts)
+        {
+            vm.UnlabeledOnly = ts.IsOn;
+            UnlabeledOnlyToggled?.Invoke(this, ts.IsOn);
+        }
+        else if (sender is CheckBox cb)
+        {
+            var isOn = cb.IsChecked == true;
+            vm.UnlabeledOnly = isOn;
+            UnlabeledOnlyToggled?.Invoke(this, isOn);
         }
     }
 
