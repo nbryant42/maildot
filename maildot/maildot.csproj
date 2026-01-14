@@ -57,8 +57,8 @@
 		<PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL.NodaTime" Version="10.0.0" />
 		<PackageReference Include="Pgvector.EntityFrameworkCore" Version="0.3.0" />
 		<PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3650.58" />
-		<PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.7175" />
-		<PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.251106002" />
+		<PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.7463" />
+		<PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260101001" />
 		<PackageReference Include="Tokenizers.DotNet" Version="1.3.0" />
 		<PackageReference Include="Tokenizers.DotNet.runtime.win-x64" Version="1.3.0" />
 	</ItemGroup>
