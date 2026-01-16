@@ -1,15 +1,10 @@
-﻿using Microsoft.ML.OnnxRuntime;
-using Microsoft.ML.OnnxRuntime.Tensors;
-using System;
+﻿using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Threading.Tasks;
-using Tokenizers.DotNet;
 
 namespace maildot.Services;
 
-static class Clustering
+public static class Clustering
 {
     // Cosine distance on already L2-normalized vectors: 1 - dot(a,b)
     static float CosDist(float[] a, float[] b)

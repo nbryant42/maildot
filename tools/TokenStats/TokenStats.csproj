@@ -19,6 +19,5 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\maildot\maildot.csproj" />
-    <PackageReference Include="HtmlAgilityPack" Version="1.12.4" />
   </ItemGroup>
 </Project>

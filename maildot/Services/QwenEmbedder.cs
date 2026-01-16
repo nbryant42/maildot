@@ -47,7 +47,7 @@ public partial class QwenEmbedder : IDisposable
     /// <summary>
     /// do not call except from unit tests. the production app should use GetSharedAsync().
     /// </summary>
-    internal static async Task<QwenEmbedder> Build(string modelDir, int maxLen = 1024, bool useGpu = true)
+    public static async Task<QwenEmbedder> Build(string modelDir, int maxLen = 1024, bool useGpu = true)
     {
         // disabled; none of the auto-downloadable providers are working for me as of WinAppSDK 2.0.0-experimental3.
 #if false
