@@ -1022,7 +1022,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     SenderInitials = SenderInitialsHelper.From(senderName, senderAddress),
                     SenderColor = messageColor,
                     Preview = summary.Envelope?.Subject ?? string.Empty,
-                    Received = summary.InternalDate?.DateTime ?? DateTime.UtcNow,
+                    Received = summary.InternalDate?.LocalDateTime ?? DateTimeOffset.UtcNow.LocalDateTime,
                     To = toList,
                     Cc = string.IsNullOrWhiteSpace(ccList) ? null : ccList,
                     Bcc = string.IsNullOrWhiteSpace(bccList) ? null : bccList
@@ -1106,7 +1106,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     SenderInitials = SenderInitialsHelper.From(r.FromName, r.FromAddress),
                     SenderColor = new Color { A = 255, R = color.R, G = color.G, B = color.B },
                     Preview = string.IsNullOrWhiteSpace(r.Preview) ? r.Subject ?? string.Empty : r.Preview!,
-                    Received = r.ReceivedUtc.UtcDateTime,
+                    Received = r.ReceivedUtc.LocalDateTime,
                     LabelNames = []
                 };
             }).ToList();
@@ -2295,7 +2295,7 @@ GROUP BY lids.""LabelId""";
             SenderInitials = SenderInitialsHelper.From(message.FromName, message.FromAddress),
             SenderColor = messageColor,
             Preview = BuildPreview(previewSource),
-            Received = message.ReceivedUtc.UtcDateTime
+            Received = message.ReceivedUtc.LocalDateTime
         };
     }
 
