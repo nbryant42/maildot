@@ -822,7 +822,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void OnSearchSinceChanged(object sender, SelectionChangedEventArgs e)
+    private async void OnSearchSinceChanged(object sender, SelectionChangedEventArgs e)
     {
         if (SearchSinceCombo.SelectedItem is ComboBoxItem item && item.Tag is string tag)
         {
@@ -835,6 +835,51 @@ public sealed partial class MainWindow : Window
                 _ => null
             };
         }
+
+        if (_imapService == null || _mailboxViewModel?.SelectedLabelId is not int labelId || _mailboxViewModel.IsSearchActive)
+        {
+            return;
+        }
+
+        var removedSelectedMessage = RemoveSuggestedMessagesFromCurrentLabelView();
+        if (removedSelectedMessage)
+        {
+            _mailboxViewModel.SelectedMessage = null;
+            _ = _dashboardView?.ClearMessageContentAsync();
+            _ = _dashboardView?.ClearAttachmentsAsync();
+        }
+
+        await _imapService.LoadLabelMessagesAsync(labelId, _searchSinceUtc);
+    }
+
+    private bool RemoveSuggestedMessagesFromCurrentLabelView()
+    {
+        if (_mailboxViewModel == null)
+        {
+            return false;
+        }
+
+        var selectedMessageId = _mailboxViewModel.SelectedMessage?.Id;
+        var removedSelected = false;
+
+        for (var i = _mailboxViewModel.Messages.Count - 1; i >= 0; i--)
+        {
+            var message = _mailboxViewModel.Messages[i];
+            if (!message.IsSuggested)
+            {
+                continue;
+            }
+
+            if (!removedSelected && selectedMessageId != null &&
+                string.Equals(message.Id, selectedMessageId, StringComparison.Ordinal))
+            {
+                removedSelected = true;
+            }
+
+            _mailboxViewModel.Messages.RemoveAt(i);
+        }
+
+        return removedSelected;
     }
 
     private async void OnAdvancedSearchClicked(object sender, RoutedEventArgs e)
