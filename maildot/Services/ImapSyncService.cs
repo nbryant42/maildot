@@ -2785,18 +2785,29 @@ GROUP BY lids.""LabelId""";
 
         await using (db)
         {
+            var label = await db.Labels
+                .AsNoTracking()
+                .FirstOrDefaultAsync(l => l.Id == labelId && l.AccountId == _settings.Id, token);
+
+            if (label == null)
+            {
+                return false;
+            }
+
+            var normalizedAddress = cleaned.ToLowerInvariant();
             var existing = await db.SenderLabels
                 .AsNoTracking()
-                .FirstOrDefaultAsync(s => s.LabelId == labelId && s.FromAddress.ToLower() == cleaned.ToLower(), token);
+                .FirstOrDefaultAsync(s => s.LabelId == labelId && s.FromAddress == normalizedAddress, token);
 
             if (existing != null)
             {
+                await UpdateVisibleMessagesForSenderLabelAsync(cleaned, label.Name);
                 return true;
             }
 
             db.SenderLabels.Add(new SenderLabel
             {
-                FromAddress = cleaned.ToLowerInvariant(),
+                FromAddress = normalizedAddress,
                 LabelId = labelId
             });
 
@@ -2806,12 +2817,65 @@ GROUP BY lids.""LabelId""";
             }
             catch (DbUpdateException ex) when (IsUniqueViolation(ex))
             {
+                await UpdateVisibleMessagesForSenderLabelAsync(cleaned, label.Name);
                 return true;
             }
+
+            await UpdateVisibleMessagesForSenderLabelAsync(cleaned, label.Name);
         }
 
         await ReportStatusAsync($"Labeled sender {cleaned}", false);
         return true;
+    }
+
+    private Task UpdateVisibleMessagesForSenderLabelAsync(string senderAddress, string labelName)
+    {
+        return EnqueueAsync(() => ApplySenderLabelToVisibleMessages(_viewModel, senderAddress, labelName));
+    }
+
+    internal static void ApplySenderLabelToVisibleMessages(MailboxViewModel viewModel, string senderAddress, string labelName)
+    {
+        var normalizedAddress = senderAddress?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(normalizedAddress) || string.IsNullOrWhiteSpace(labelName))
+        {
+            return;
+        }
+
+        var inUnlabeledFolderView =
+            viewModel.UnlabeledOnly &&
+            viewModel.SelectedFolder != null &&
+            !viewModel.IsSearchActive &&
+            viewModel.SelectedLabelId == null;
+
+        if (inUnlabeledFolderView)
+        {
+            for (var i = viewModel.Messages.Count - 1; i >= 0; i--)
+            {
+                var message = viewModel.Messages[i];
+                if (string.Equals(message.SenderAddress?.Trim(), normalizedAddress, StringComparison.OrdinalIgnoreCase))
+                {
+                    viewModel.Messages.RemoveAt(i);
+                }
+            }
+
+            return;
+        }
+
+        foreach (var message in viewModel.Messages)
+        {
+            if (!string.Equals(message.SenderAddress?.Trim(), normalizedAddress, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var names = message.LabelNames ?? [];
+            if (names.Any(n => string.Equals(n, labelName, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            message.LabelNames = [..names, labelName];
+        }
     }
 
     private async Task<MessageBodyResult?> LoadMessageBodyFromDatabaseAsync(string folderId, string messageId, CancellationToken token)
