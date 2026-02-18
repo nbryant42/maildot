@@ -267,6 +267,8 @@ public sealed partial class MainWindow : Window
         _dashboardView.LabelSelected += OnLabelSelected;
         _dashboardView.SuggestionAccepted -= OnSuggestionAccepted;
         _dashboardView.SuggestionAccepted += OnSuggestionAccepted;
+        _dashboardView.SenderSuggestionAccepted -= OnSenderSuggestionAccepted;
+        _dashboardView.SenderSuggestionAccepted += OnSenderSuggestionAccepted;
         _dashboardView.LabelSenderRequested -= OnLabelSenderRequested;
         _dashboardView.LabelSenderRequested += OnLabelSenderRequested;
         _dashboardView.UnlabeledOnlyToggled -= OnUnlabeledOnlyToggled;
@@ -1010,6 +1012,22 @@ public sealed partial class MainWindow : Window
             message.IsSuggested = false;
             message.SuggestionScore = Double.NegativeInfinity;
         }
+    }
+
+    private async void OnSenderSuggestionAccepted(object? sender, EmailMessageViewModel message)
+    {
+        if (_imapService == null || _mailboxViewModel?.SelectedLabelId is not int labelId)
+        {
+            return;
+        }
+
+        var senderAddress = ExtractAddress(message);
+        if (string.IsNullOrWhiteSpace(senderAddress))
+        {
+            return;
+        }
+
+        await _imapService.AddSenderLabelAsync(labelId, senderAddress);
     }
 
     private async void OnLabelSenderRequested(object? sender, EmailMessageViewModel message)

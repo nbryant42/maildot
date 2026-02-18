@@ -39,6 +39,7 @@ public sealed partial class ImapDashboardView : UserControl
     public event EventHandler<LabelDropRequest>? LabelDropRequested;
     public event EventHandler<LabelViewModel>? LabelSelected;
     public event EventHandler<EmailMessageViewModel>? SuggestionAccepted;
+    public event EventHandler<EmailMessageViewModel>? SenderSuggestionAccepted;
     public event EventHandler<EmailMessageViewModel>? LabelSenderRequested;
     public event EventHandler<bool>? UnlabeledOnlyToggled;
 
@@ -321,6 +322,14 @@ public sealed partial class ImapDashboardView : UserControl
         }
     }
 
+    private void OnAddSenderSuggestionToLabelClick(object sender, RoutedEventArgs e)
+    {
+        if (_contextMenuMessage != null)
+        {
+            SenderSuggestionAccepted?.Invoke(this, _contextMenuMessage);
+        }
+    }
+
     private void OnMessagesContextRequested(object sender, ContextRequestedEventArgs e)
     {
         if (sender is not FrameworkElement)
@@ -352,6 +361,10 @@ public sealed partial class ImapDashboardView : UserControl
             var addItem = new MenuFlyoutItem { Text = "Add to label" };
             addItem.Click += OnAddSuggestionToLabelClick;
             flyout.Items.Add(addItem);
+
+            var addSenderItem = new MenuFlyoutItem { Text = "Add sender to label" };
+            addSenderItem.Click += OnAddSenderSuggestionToLabelClick;
+            flyout.Items.Add(addSenderItem);
         }
 
         if (e.TryGetPosition(MessagesList, out var point))
