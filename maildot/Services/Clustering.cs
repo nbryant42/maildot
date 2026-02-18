@@ -4,7 +4,7 @@ using System.Linq;
 
 namespace maildot.Services;
 
-public static class Clustering
+internal static class Clustering
 {
     // Cosine distance on already L2-normalized vectors: 1 - dot(a,b)
     static float CosDist(float[] a, float[] b)
