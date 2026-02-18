@@ -18,7 +18,7 @@ public class ImapSyncServiceTests
         vm.Messages.Add(new EmailMessageViewModel { Id = "2", SenderAddress = "other@example.com", LabelNames = [] });
         vm.Messages.Add(new EmailMessageViewModel { Id = "3", SenderAddress = "SAME@example.com", LabelNames = [] });
 
-        ImapSyncService.ApplySenderLabelToVisibleMessages(vm, "same@example.com", "Clients");
+        ImapSyncService.ApplySenderLabelToVisibleMessages(vm, "same@example.com", 10, "Clients");
 
         Assert.Single(vm.Messages);
         Assert.Equal("2", vm.Messages[0].Id);
@@ -36,8 +36,8 @@ public class ImapSyncServiceTests
         };
         vm.Messages.Add(message);
 
-        ImapSyncService.ApplySenderLabelToVisibleMessages(vm, "sender@example.com", "Clients");
-        ImapSyncService.ApplySenderLabelToVisibleMessages(vm, "sender@example.com", "clients");
+        ImapSyncService.ApplySenderLabelToVisibleMessages(vm, "sender@example.com", 10, "Clients");
+        ImapSyncService.ApplySenderLabelToVisibleMessages(vm, "sender@example.com", 10, "clients");
 
         Assert.Equal(["Existing", "Clients"], message.LabelNames);
     }
@@ -57,9 +57,50 @@ public class ImapSyncServiceTests
         };
         vm.Messages.Add(message);
 
-        ImapSyncService.ApplySenderLabelToVisibleMessages(vm, "same@example.com", "Clients");
+        ImapSyncService.ApplySenderLabelToVisibleMessages(vm, "same@example.com", 10, "Clients");
 
         Assert.Single(vm.Messages);
         Assert.Equal(["Clients"], message.LabelNames);
+    }
+
+    [Fact]
+    public void ApplySenderLabelToVisibleMessages_RemovesSuggestedMessage_InDifferentLabelView()
+    {
+        var vm = new MailboxViewModel();
+        vm.SelectLabel(1);
+        vm.Messages.Add(new EmailMessageViewModel
+        {
+            Id = "1",
+            SenderAddress = "same@example.com",
+            IsSuggested = true,
+            LabelNames = []
+        });
+
+        ImapSyncService.ApplySenderLabelToVisibleMessages(vm, "same@example.com", 2, "Different");
+
+        Assert.Empty(vm.Messages);
+    }
+
+    [Fact]
+    public void ApplySenderLabelToVisibleMessages_ConvertsSuggestionToExplicit_InSameLabelView()
+    {
+        var vm = new MailboxViewModel();
+        vm.SelectLabel(7);
+        var message = new EmailMessageViewModel
+        {
+            Id = "1",
+            SenderAddress = "same@example.com",
+            IsSuggested = true,
+            SuggestionScore = 0.42d,
+            LabelNames = []
+        };
+        vm.Messages.Add(message);
+
+        ImapSyncService.ApplySenderLabelToVisibleMessages(vm, "same@example.com", 7, "Current");
+
+        Assert.Single(vm.Messages);
+        Assert.False(message.IsSuggested);
+        Assert.Equal(Double.NegativeInfinity, message.SuggestionScore);
+        Assert.Equal(["Current"], message.LabelNames);
     }
 }

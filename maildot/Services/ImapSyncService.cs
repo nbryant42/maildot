@@ -2801,7 +2801,7 @@ GROUP BY lids.""LabelId""";
 
             if (existing != null)
             {
-                await UpdateVisibleMessagesForSenderLabelAsync(cleaned, label.Name);
+                await UpdateVisibleMessagesForSenderLabelAsync(cleaned, label.Id, label.Name);
                 return true;
             }
 
@@ -2817,23 +2817,23 @@ GROUP BY lids.""LabelId""";
             }
             catch (DbUpdateException ex) when (IsUniqueViolation(ex))
             {
-                await UpdateVisibleMessagesForSenderLabelAsync(cleaned, label.Name);
+                await UpdateVisibleMessagesForSenderLabelAsync(cleaned, label.Id, label.Name);
                 return true;
             }
 
-            await UpdateVisibleMessagesForSenderLabelAsync(cleaned, label.Name);
+            await UpdateVisibleMessagesForSenderLabelAsync(cleaned, label.Id, label.Name);
         }
 
         await ReportStatusAsync($"Labeled sender {cleaned}", false);
         return true;
     }
 
-    private Task UpdateVisibleMessagesForSenderLabelAsync(string senderAddress, string labelName)
+    private Task UpdateVisibleMessagesForSenderLabelAsync(string senderAddress, int labelId, string labelName)
     {
-        return EnqueueAsync(() => ApplySenderLabelToVisibleMessages(_viewModel, senderAddress, labelName));
+        return EnqueueAsync(() => ApplySenderLabelToVisibleMessages(_viewModel, senderAddress, labelId, labelName));
     }
 
-    internal static void ApplySenderLabelToVisibleMessages(MailboxViewModel viewModel, string senderAddress, string labelName)
+    internal static void ApplySenderLabelToVisibleMessages(MailboxViewModel viewModel, string senderAddress, int labelId, string labelName)
     {
         var normalizedAddress = senderAddress?.Trim() ?? string.Empty;
         if (string.IsNullOrWhiteSpace(normalizedAddress) || string.IsNullOrWhiteSpace(labelName))
@@ -2846,6 +2846,8 @@ GROUP BY lids.""LabelId""";
             viewModel.SelectedFolder != null &&
             !viewModel.IsSearchActive &&
             viewModel.SelectedLabelId == null;
+        var selectedLabelId = viewModel.SelectedLabelId;
+        var inLabelView = selectedLabelId != null && !viewModel.IsSearchActive;
 
         if (inUnlabeledFolderView)
         {
@@ -2861,20 +2863,37 @@ GROUP BY lids.""LabelId""";
             return;
         }
 
-        foreach (var message in viewModel.Messages)
+        for (var i = viewModel.Messages.Count - 1; i >= 0; i--)
         {
+            var message = viewModel.Messages[i];
             if (!string.Equals(message.SenderAddress?.Trim(), normalizedAddress, StringComparison.OrdinalIgnoreCase))
             {
+                continue;
+            }
+
+            if (inLabelView && selectedLabelId != labelId && message.IsSuggested)
+            {
+                viewModel.Messages.RemoveAt(i);
                 continue;
             }
 
             var names = message.LabelNames ?? [];
             if (names.Any(n => string.Equals(n, labelName, StringComparison.OrdinalIgnoreCase)))
             {
+                if (inLabelView && selectedLabelId == labelId && message.IsSuggested)
+                {
+                    message.IsSuggested = false;
+                    message.SuggestionScore = Double.NegativeInfinity;
+                }
                 continue;
             }
 
             message.LabelNames = [..names, labelName];
+            if (inLabelView && selectedLabelId == labelId && message.IsSuggested)
+            {
+                message.IsSuggested = false;
+                message.SuggestionScore = Double.NegativeInfinity;
+            }
         }
     }
 
