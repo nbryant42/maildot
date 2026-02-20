@@ -915,7 +915,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             _client?.Dispose();
             _client = null;
 
-            if (!_offlineFallbackHydrated)
+            if (ShouldHydrateOfflineFallback(connectFailed: true, offlineFallbackHydrated: _offlineFallbackHydrated))
             {
                 var fallbackFolders = await LoadFoldersFromDatabaseAsync(_cts.Token);
                 var labels = await LoadLabelsAsync(_cts.Token);
@@ -3211,6 +3211,15 @@ GROUP BY lids.""LabelId""";
 
     internal static bool IsPreferredDedupUid(long imapUid) => imapUid <= 0;
 
+    internal static bool ShouldHydrateOfflineFallback(bool connectFailed, bool offlineFallbackHydrated) =>
+        connectFailed && !offlineFallbackHydrated;
+
+    internal static bool ShouldUseDbBodyFallback(bool clientIsNull, bool clientConnected, bool folderCached) =>
+        clientIsNull || !clientConnected || !folderCached;
+
+    internal static string GetOfflineBodyFallbackStatusMessage() =>
+        "Showing saved copy from PostgreSQL (offline mode).";
+
     public async Task<bool> AssignLabelToMessageAsync(int labelId, string folderId, string messageId)
     {
         var token = _cts.Token;
@@ -3571,12 +3580,12 @@ GROUP BY lids.""LabelId""";
 
             try
             {
-                if (_client == null || !_client.IsConnected)
+                if (ShouldUseDbBodyFallback(clientIsNull: _client == null, clientConnected: _client?.IsConnected == true, folderCached: true))
                 {
                     var cached = await LoadMessageBodyFromDatabaseAsync(folderId, messageId, _cts.Token);
                     if (cached != null)
                     {
-                        await ReportStatusAsync("Showing saved copy from PostgreSQL (offline mode).", false);
+                        await ReportStatusAsync(GetOfflineBodyFallbackStatusMessage(), false);
                         await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
                         return cached;
                     }
@@ -3586,12 +3595,15 @@ GROUP BY lids.""LabelId""";
 
                 if (!_folderCache.TryGetValue(folderId, out folder))
                 {
-                    var cached = await LoadMessageBodyFromDatabaseAsync(folderId, messageId, _cts.Token);
-                    if (cached != null)
+                    if (ShouldUseDbBodyFallback(clientIsNull: false, clientConnected: true, folderCached: false))
                     {
-                        await ReportStatusAsync("Showing saved copy from PostgreSQL (offline mode).", false);
-                        await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
-                        return cached;
+                        var cached = await LoadMessageBodyFromDatabaseAsync(folderId, messageId, _cts.Token);
+                        if (cached != null)
+                        {
+                            await ReportStatusAsync(GetOfflineBodyFallbackStatusMessage(), false);
+                            await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
+                            return cached;
+                        }
                     }
 
                     if (canRetry && await TryReconnectAsync())

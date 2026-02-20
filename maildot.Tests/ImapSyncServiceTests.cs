@@ -26,6 +26,33 @@ public class ImapSyncServiceTests
         Assert.False(ImapSyncService.IsPreferredDedupUid(42));
     }
 
+    [Theory]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, false)]
+    [InlineData(false, false, false)]
+    public void ShouldHydrateOfflineFallback_OnlyWhenConnectFailedAndNotHydrated(bool connectFailed, bool hydrated, bool expected)
+    {
+        var should = ImapSyncService.ShouldHydrateOfflineFallback(connectFailed, hydrated);
+        Assert.Equal(expected, should);
+    }
+
+    [Theory]
+    [InlineData(true, false, false, true)]
+    [InlineData(false, false, true, true)]
+    [InlineData(false, true, false, true)]
+    [InlineData(false, true, true, false)]
+    public void ShouldUseDbBodyFallback_WhenOfflineOrFolderMissing(bool clientIsNull, bool clientConnected, bool folderCached, bool expected)
+    {
+        var should = ImapSyncService.ShouldUseDbBodyFallback(clientIsNull, clientConnected, folderCached);
+        Assert.Equal(expected, should);
+    }
+
+    [Fact]
+    public void GetOfflineBodyFallbackStatusMessage_ReturnsExpectedText()
+    {
+        Assert.Equal("Showing saved copy from PostgreSQL (offline mode).", ImapSyncService.GetOfflineBodyFallbackStatusMessage());
+    }
+
     [Fact]
     public void ComputeNextSyntheticUid_StartsAtMinusOne_WhenNoSyntheticUidsExist()
     {
