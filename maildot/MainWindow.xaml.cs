@@ -271,6 +271,8 @@ public sealed partial class MainWindow : Window
         _dashboardView.SenderSuggestionAccepted += OnSenderSuggestionAccepted;
         _dashboardView.LabelSenderRequested -= OnLabelSenderRequested;
         _dashboardView.LabelSenderRequested += OnLabelSenderRequested;
+        _dashboardView.DeleteMessageRequested -= OnDeleteMessageRequested;
+        _dashboardView.DeleteMessageRequested += OnDeleteMessageRequested;
         _dashboardView.UnlabeledOnlyToggled -= OnUnlabeledOnlyToggled;
         _dashboardView.UnlabeledOnlyToggled += OnUnlabeledOnlyToggled;
 
@@ -385,6 +387,45 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private void OnAccountSettingsSaved(object? sender, AccountSettings settings)
+    {
+        AccountSettingsStore.AddOrUpdate(settings, makeActive: false);
+        RefreshAccounts();
+
+        if (_activeAccount?.Id == settings.Id)
+        {
+            _activeAccount = settings;
+            _mailboxViewModel?.SetAccountSummary($"{settings.AccountName} ({settings.Username})");
+        }
+    }
+
+    private async void OnTestDeleteTargetRequested(object? sender, AccountSettings settings)
+    {
+        if (sender is not SettingsView view)
+        {
+            return;
+        }
+
+        var targetFolder = settings.DeleteTargetFolderFullName?.Trim();
+        if (string.IsNullOrWhiteSpace(targetFolder))
+        {
+            view.SetDeleteTargetStatus(settings.Id, "FAIL: Enter a folder name first.");
+            return;
+        }
+
+        if (_imapService == null || _activeAccount?.Id != settings.Id)
+        {
+            view.SetDeleteTargetStatus(settings.Id, "FAIL: Switch to this account and connect before testing.");
+            return;
+        }
+
+        var exists = await _imapService.FolderExistsAsync(targetFolder);
+        view.SetDeleteTargetStatus(settings.Id,
+            exists
+                ? "PASS: Folder found on IMAP."
+                : "FAIL: Folder not found on IMAP.");
+    }
+
     private async Task ShowSettingsDialogAsync(string? postgresStatusMessage = null, bool isError = false, bool forceShowWhenNoAccounts = false)
     {
         if (_accounts.Count == 0 && !forceShowWhenNoAccounts)
@@ -403,6 +444,8 @@ public sealed partial class MainWindow : Window
             inlineView.SetActiveAccountRequested += async (_, id) => await SwitchActiveAccountAsync(id);
             inlineView.ReenterPasswordRequested += async (_, id) => await ReenterPasswordAsync(id);
             inlineView.DeleteAccountRequested += async (_, id) => await DeleteAccountAsync(id);
+            inlineView.AccountSettingsSaved += OnAccountSettingsSaved;
+            inlineView.TestDeleteTargetRequested += OnTestDeleteTargetRequested;
             inlineView.PostgresSettingsSaved += OnPostgresSettingsSaved;
             inlineView.McpSettingsSaved += OnMcpSettingsSaved;
             RootContent.Content = inlineView;
@@ -445,6 +488,8 @@ public sealed partial class MainWindow : Window
         settingsView.SetActiveAccountRequested += setActiveHandler;
         settingsView.ReenterPasswordRequested += reenterHandler;
         settingsView.DeleteAccountRequested += deleteHandler;
+        settingsView.AccountSettingsSaved += OnAccountSettingsSaved;
+        settingsView.TestDeleteTargetRequested += OnTestDeleteTargetRequested;
         settingsView.PostgresSettingsSaved += OnPostgresSettingsSaved;
         settingsView.McpSettingsSaved += OnMcpSettingsSaved;
 
@@ -454,6 +499,8 @@ public sealed partial class MainWindow : Window
         settingsView.SetActiveAccountRequested -= setActiveHandler;
         settingsView.ReenterPasswordRequested -= reenterHandler;
         settingsView.DeleteAccountRequested -= deleteHandler;
+        settingsView.AccountSettingsSaved -= OnAccountSettingsSaved;
+        settingsView.TestDeleteTargetRequested -= OnTestDeleteTargetRequested;
         settingsView.PostgresSettingsSaved -= OnPostgresSettingsSaved;
         settingsView.McpSettingsSaved -= OnMcpSettingsSaved;
     }
@@ -1119,6 +1166,42 @@ public sealed partial class MainWindow : Window
         }
 
         await _imapService.AddSenderLabelAsync(selected.Id, message.SenderAddress);
+    }
+
+    private async void OnDeleteMessageRequested(object? sender, EmailMessageViewModel message)
+    {
+        if (_imapService == null || _mailboxViewModel?.SelectedFolder is not MailFolderViewModel selectedFolder)
+        {
+            return;
+        }
+
+        var targetFolder = _activeAccount?.DeleteTargetFolderFullName?.Trim();
+        if (string.IsNullOrWhiteSpace(targetFolder))
+        {
+            _mailboxViewModel.SetStatus("Delete target folder is not configured for this account.", false);
+            return;
+        }
+
+        var sourceFolder = string.IsNullOrWhiteSpace(message.FolderId) ? selectedFolder.Id : message.FolderId;
+        if (string.IsNullOrWhiteSpace(sourceFolder))
+        {
+            return;
+        }
+
+        var moved = await _imapService.MoveMessageToFolderAsync(sourceFolder, message.Id, targetFolder);
+        if (!moved)
+        {
+            _mailboxViewModel.SetStatus("Delete failed for this message.", false);
+            return;
+        }
+
+        _mailboxViewModel.Messages.Remove(message);
+        if (ReferenceEquals(_mailboxViewModel.SelectedMessage, message))
+        {
+            _mailboxViewModel.SelectedMessage = null;
+            _ = _dashboardView?.ClearMessageContentAsync();
+            _ = _dashboardView?.ClearAttachmentsAsync();
+        }
     }
 
     private static string? ExtractAddress(EmailMessageViewModel message)

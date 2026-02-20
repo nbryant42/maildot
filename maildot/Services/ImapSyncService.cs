@@ -137,10 +137,11 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             if (messageCount == 0)
             {
                 _folderNextEndIndex[folderId] = -1;
+                var localOnlyMessages = await LoadLocalOnlyMessagesForFolderAsync(folderId, PageSize, _cts.Token);
                 await EnqueueAsync(() =>
                 {
-                    _viewModel.SetMessages(folderDisplay, []);
-                    _viewModel.SetStatus("Folder is empty.", false);
+                    _viewModel.SetMessages(folderDisplay, localOnlyMessages);
+                    _viewModel.SetStatus(localOnlyMessages.Count == 0 ? "Folder is empty." : "Mailbox is up to date.", false);
                     _viewModel.SetLoadMoreAvailability(false);
                     _viewModel.SetRetryVisible(false);
                 });
@@ -150,12 +151,20 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             var endIndex = messageCount - 1;
             var startIndex = Math.Max(0, endIndex - PageSize + 1);
             var emailItems = await FetchMessagesAsync(folder, startIndex, endIndex);
+            var localOnly = await LoadLocalOnlyMessagesForFolderAsync(folderId, PageSize, _cts.Token);
+            var mergedItems = emailItems
+                .Concat(localOnly)
+                .GroupBy(m => m.Id)
+                .Select(g => g.First())
+                .OrderByDescending(m => m.Received)
+                .Take(PageSize)
+                .ToList();
 
             _folderNextEndIndex[folderId] = startIndex - 1;
 
             await EnqueueAsync(() =>
             {
-                _viewModel.SetMessages(folderDisplay, emailItems);
+                _viewModel.SetMessages(folderDisplay, mergedItems);
                 _viewModel.SetStatus("Mailbox is up to date.", false);
                 _viewModel.SetLoadMoreAvailability(startIndex > 0);
                 _viewModel.SetRetryVisible(false);
@@ -743,6 +752,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         return new EmailMessageViewModel
         {
             Id = result.ImapUid.ToString(),
+            IsLocalOnly = result.ImapUid <= 0,
             FolderId = result.FolderFullName,
             Subject = string.IsNullOrWhiteSpace(result.Subject) ? "(No subject)" : result.Subject,
             Sender = string.IsNullOrWhiteSpace(senderDisplay) ? "(Unknown sender)" : senderDisplay,
@@ -1099,6 +1109,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 return new EmailMessageViewModel
                 {
                     Id = r.ImapUid.ToString(),
+                    IsLocalOnly = r.ImapUid <= 0,
                     FolderId = r.Folder,
                     Subject = string.IsNullOrWhiteSpace(r.Subject) ? "(No subject)" : r.Subject!,
                     Sender = senderDisplay,
@@ -1129,6 +1140,71 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 _viewModel.SetLoadMoreAvailability(emailItems.Count == PageSize && _folderNextUnlabeledImapUid[folderFullName] > 0);
                 _viewModel.SetRetryVisible(false);
             });
+        }
+    }
+
+    private async Task<List<EmailMessageViewModel>> LoadLocalOnlyMessagesForFolderAsync(string folderFullName, int limit, CancellationToken token)
+    {
+        if (_settings == null || string.IsNullOrWhiteSpace(folderFullName) || limit <= 0)
+        {
+            return [];
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return [];
+        }
+
+        await using (db)
+        {
+            var folder = await db.ImapFolders.AsNoTracking()
+                .FirstOrDefaultAsync(f => f.AccountId == _settings.Id && f.FullName == folderFullName, token);
+
+            if (folder == null)
+            {
+                return [];
+            }
+
+            var rows = await (
+                    from m in db.ImapMessages.AsNoTracking()
+                    join b in db.MessageBodies.AsNoTracking() on m.Id equals b.MessageId into bodies
+                    from b in bodies.DefaultIfEmpty()
+                    where m.FolderId == folder.Id && m.ImapUid <= 0
+                    orderby m.ReceivedUtc descending
+                    select new
+                    {
+                        m.ImapUid,
+                        m.Subject,
+                        m.FromName,
+                        m.FromAddress,
+                        m.ReceivedUtc,
+                        Preview = b != null ? b.Preview : null
+                    })
+                .Take(limit)
+                .ToListAsync(token);
+
+            return rows.Select(r =>
+            {
+                var senderDisplay = !string.IsNullOrWhiteSpace(r.FromName)
+                    ? r.FromName!
+                    : string.IsNullOrWhiteSpace(r.FromAddress) ? "(Unknown sender)" : r.FromAddress!;
+
+                var color = SenderColorHelper.GetColor(r.FromName, r.FromAddress);
+                return new EmailMessageViewModel
+                {
+                    Id = r.ImapUid.ToString(),
+                    IsLocalOnly = true,
+                    FolderId = folder.FullName,
+                    Subject = string.IsNullOrWhiteSpace(r.Subject) ? "(No subject)" : r.Subject!,
+                    Sender = senderDisplay,
+                    SenderAddress = r.FromAddress ?? string.Empty,
+                    SenderInitials = SenderInitialsHelper.From(r.FromName, r.FromAddress),
+                    SenderColor = new Color { A = 255, R = color.R, G = color.G, B = color.B },
+                    Preview = string.IsNullOrWhiteSpace(r.Preview) ? r.Subject ?? string.Empty : r.Preview!,
+                    Received = r.ReceivedUtc.LocalDateTime
+                };
+            }).ToList();
         }
     }
 
@@ -2288,6 +2364,7 @@ GROUP BY lids.""LabelId""";
         return new EmailMessageViewModel
         {
             Id = message.ImapUid.ToString(),
+            IsLocalOnly = message.ImapUid <= 0,
             FolderId = folder.FullName,
             Subject = message.Subject,
             Sender = displaySender,
@@ -2683,6 +2760,273 @@ GROUP BY lids.""LabelId""";
             await EnqueueAsync(() => _viewModel.AddLabel(vm, parentLabelId));
             await ReportStatusAsync($"Created label \"{entity.Name}\"", false);
             return vm;
+        }
+    }
+
+    public async Task<bool> MoveMessageToFolderAsync(string sourceFolderFullName, string messageId, string targetFolderFullName)
+    {
+        var token = _cts.Token;
+        if (_settings == null ||
+            string.IsNullOrWhiteSpace(sourceFolderFullName) ||
+            string.IsNullOrWhiteSpace(targetFolderFullName) ||
+            string.IsNullOrWhiteSpace(messageId))
+        {
+            return false;
+        }
+
+        if (!long.TryParse(messageId, out var sourceUid))
+        {
+            return false;
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return false;
+        }
+
+        await using (db)
+        {
+            var sourceFolder = await db.ImapFolders
+                .AsNoTracking()
+                .FirstOrDefaultAsync(f => f.AccountId == _settings.Id && f.FullName == sourceFolderFullName, token);
+
+            if (sourceFolder == null)
+            {
+                return false;
+            }
+
+            var targetFolder = await db.ImapFolders
+                .AsNoTracking()
+                .FirstOrDefaultAsync(f => f.AccountId == _settings.Id && f.FullName == targetFolderFullName, token);
+
+            if (targetFolder == null)
+            {
+                targetFolder = new Models.ImapFolder
+                {
+                    AccountId = _settings.Id,
+                    FullName = targetFolderFullName,
+                    DisplayName = targetFolderFullName
+                };
+                db.ImapFolders.Add(targetFolder);
+                await db.SaveChangesAsync(token);
+            }
+
+            var message = await db.ImapMessages
+                .FirstOrDefaultAsync(m => m.FolderId == sourceFolder.Id && m.ImapUid == sourceUid, token);
+
+            if (message == null)
+            {
+                return false;
+            }
+
+            var movedOnServer = false;
+            long? serverAssignedUid = null;
+            if (sourceUid > 0)
+            {
+                var moveResult = await TryMoveMessageOnServerAsync(sourceFolderFullName, targetFolderFullName, sourceUid, message.MessageId, token);
+                movedOnServer = moveResult.Moved;
+                serverAssignedUid = moveResult.TargetUid;
+            }
+
+            var desiredUid = serverAssignedUid ?? await GetNextSyntheticImapUidAsync(db, targetFolder.Id, token);
+            var finalUid = await EnsureUniqueImapUidAsync(db, targetFolder.Id, desiredUid, message.Id, token);
+
+            message.FolderId = targetFolder.Id;
+            message.ImapUid = finalUid;
+            message.Hash = $"{message.MessageId}:{finalUid}";
+            await db.SaveChangesAsync(token);
+
+            if (movedOnServer)
+            {
+                await ReportStatusAsync($"Moved message to {targetFolderFullName}.", false);
+            }
+            else
+            {
+                await ReportStatusAsync($"Message not found on server; moved locally to {targetFolderFullName}.", false);
+            }
+
+            return true;
+        }
+    }
+
+    public async Task<bool> FolderExistsAsync(string folderFullName)
+    {
+        if (string.IsNullOrWhiteSpace(folderFullName))
+        {
+            return false;
+        }
+
+        var token = _cts.Token;
+        if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
+        {
+            Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
+            return false;
+        }
+
+        try
+        {
+            if (_client == null)
+            {
+                return false;
+            }
+
+            if (_folderCache.ContainsKey(folderFullName))
+            {
+                return true;
+            }
+
+            var refreshed = await LoadFoldersAsync(token);
+            return refreshed.Any(f => string.Equals(f.Id, folderFullName, StringComparison.OrdinalIgnoreCase));
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    private async Task<(bool Moved, long? TargetUid)> TryMoveMessageOnServerAsync(
+        string sourceFolderFullName,
+        string targetFolderFullName,
+        long sourceUid,
+        string messageIdHeader,
+        CancellationToken token)
+    {
+        IMailFolder? sourceFolder = null;
+        IMailFolder? targetFolder = null;
+
+        if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
+        {
+            Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
+            return (false, null);
+        }
+
+        try
+        {
+            if (_client == null)
+            {
+                return (false, null);
+            }
+
+            if (!_folderCache.TryGetValue(sourceFolderFullName, out sourceFolder) ||
+                !_folderCache.TryGetValue(targetFolderFullName, out targetFolder))
+            {
+                return (false, null);
+            }
+
+            if (!sourceFolder.IsOpen)
+            {
+                await sourceFolder.OpenAsync(FolderAccess.ReadWrite, token);
+            }
+
+            await sourceFolder.MoveToAsync(new UniqueId((uint)sourceUid), targetFolder, token);
+
+            if (!targetFolder.IsOpen)
+            {
+                await targetFolder.OpenAsync(FolderAccess.ReadOnly, token);
+            }
+
+            if (!string.IsNullOrWhiteSpace(messageIdHeader))
+            {
+                var matching = await targetFolder.SearchAsync(
+                    SearchQuery.HeaderContains("Message-Id", messageIdHeader),
+                    token);
+
+                var resolvedUid = matching.Count > 0
+                    ? matching.Max(uid => (long)uid.Id)
+                    : (long?)null;
+
+                return (true, resolvedUid);
+            }
+
+            return (true, null);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return (false, null);
+        }
+        finally
+        {
+            try
+            {
+                if (sourceFolder?.IsOpen == true)
+                {
+                    await sourceFolder.CloseAsync(false, token);
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (targetFolder?.IsOpen == true)
+                {
+                    await targetFolder.CloseAsync(false, token);
+                }
+            }
+            catch
+            {
+            }
+
+            _semaphore.Release();
+        }
+    }
+
+    private static async Task<long> GetNextSyntheticImapUidAsync(MailDbContext db, int folderId, CancellationToken token)
+    {
+        var existingUids = await db.ImapMessages
+            .Where(m => m.FolderId == folderId && m.ImapUid <= 0)
+            .Select(m => m.ImapUid)
+            .ToListAsync(token);
+
+        return ComputeNextSyntheticUid(existingUids);
+    }
+
+    private static async Task<long> EnsureUniqueImapUidAsync(
+        MailDbContext db,
+        int folderId,
+        long desiredUid,
+        int currentMessageId,
+        CancellationToken token)
+    {
+        var usedUids = await db.ImapMessages
+            .Where(m => m.FolderId == folderId && m.Id != currentMessageId)
+            .Select(m => m.ImapUid)
+            .ToHashSetAsync(token);
+
+        return EnsureUniqueUidCandidate(desiredUid, usedUids);
+    }
+
+    internal static long ComputeNextSyntheticUid(IEnumerable<long> existingFolderUids)
+    {
+        var minExisting = existingFolderUids
+            .Where(uid => uid <= 0)
+            .DefaultIfEmpty(1)
+            .Min();
+
+        return minExisting <= 0 ? minExisting - 1 : -1;
+    }
+
+    internal static long EnsureUniqueUidCandidate(long desiredUid, ISet<long> usedUids)
+    {
+        var uid = desiredUid;
+        while (true)
+        {
+            if (!usedUids.Contains(uid))
+            {
+                return uid;
+            }
+
+            uid = uid <= 0 ? uid - 1 : -1;
         }
     }
 

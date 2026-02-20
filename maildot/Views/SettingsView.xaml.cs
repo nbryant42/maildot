@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Linq;
 using System.Threading.Tasks;
 using maildot.Models;
 using Microsoft.UI.Xaml;
@@ -21,6 +22,8 @@ public sealed partial class SettingsView : UserControl
     public event EventHandler<int>? SetActiveAccountRequested;
     public event EventHandler<int>? ReenterPasswordRequested;
     public event EventHandler<int>? DeleteAccountRequested;
+    public event EventHandler<AccountSettings>? AccountSettingsSaved;
+    public event EventHandler<AccountSettings>? TestDeleteTargetRequested;
     public event EventHandler<PostgresSettingsSavedEventArgs>? PostgresSettingsSaved;
     public event EventHandler<McpSettingsSavedEventArgs>? McpSettingsSaved;
 
@@ -81,6 +84,37 @@ public sealed partial class SettingsView : UserControl
         {
             DeleteAccountRequested?.Invoke(this, account.Id);
         }
+    }
+
+    private void OnSaveAccountSettingsClicked(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement element && element.DataContext is AccountSettings account)
+        {
+            account.DeleteTargetFolderFullName = account.DeleteTargetFolderFullName?.Trim() ?? string.Empty;
+            account.DeleteTargetStatus = "Saved.";
+            Bindings.Update();
+            AccountSettingsSaved?.Invoke(this, account);
+        }
+    }
+
+    private void OnTestDeleteTargetClicked(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement element && element.DataContext is AccountSettings account)
+        {
+            account.DeleteTargetStatus = "Testing delete target...";
+            TestDeleteTargetRequested?.Invoke(this, account);
+        }
+    }
+
+    public void SetDeleteTargetStatus(int accountId, string status)
+    {
+        var account = Accounts.FirstOrDefault(a => a.Id == accountId);
+        if (account == null)
+        {
+            return;
+        }
+
+        account.DeleteTargetStatus = status ?? string.Empty;
     }
 
     private void OnSavePostgresClicked(object sender, RoutedEventArgs e)

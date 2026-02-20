@@ -6,6 +6,34 @@ namespace maildot.Tests;
 public class ImapSyncServiceTests
 {
     [Fact]
+    public void ComputeNextSyntheticUid_StartsAtMinusOne_WhenNoSyntheticUidsExist()
+    {
+        var next = ImapSyncService.ComputeNextSyntheticUid([55, 12, 1]);
+        Assert.Equal(-1, next);
+    }
+
+    [Fact]
+    public void ComputeNextSyntheticUid_DecrementsBelowLowestSyntheticUid()
+    {
+        var next = ImapSyncService.ComputeNextSyntheticUid([-1, -2, -7, 11]);
+        Assert.Equal(-8, next);
+    }
+
+    [Fact]
+    public void EnsureUniqueUidCandidate_UsesNextNegative_WhenDesiredUidCollides()
+    {
+        var next = ImapSyncService.EnsureUniqueUidCandidate(-1, new HashSet<long> { -1, -2, -3 });
+        Assert.Equal(-4, next);
+    }
+
+    [Fact]
+    public void EnsureUniqueUidCandidate_FallsBackToNegative_WhenPositiveUidCollides()
+    {
+        var next = ImapSyncService.EnsureUniqueUidCandidate(44, new HashSet<long> { 44, -1, -2 });
+        Assert.Equal(-3, next);
+    }
+
+    [Fact]
     public void ApplySenderLabelToVisibleMessages_RemovesMatchingMessages_InUnlabeledFolderView()
     {
         var vm = new MailboxViewModel

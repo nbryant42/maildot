@@ -24,14 +24,27 @@
                                 <TextBlock Text="{x:Bind AccountName}" FontWeight="SemiBold" />
                                 <TextBlock Text="{x:Bind Username}" />
                                 <TextBlock Text="{x:Bind Server}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                <StackPanel Orientation="Horizontal" Spacing="8">
-                                    <Button Content="Set active"
-                                            Click="OnSetActiveClicked" />
-                                    <Button Content="Re-enter password"
-                                            Click="OnReenterPasswordClicked" />
-                                    <Button Content="Delete"
-                                            Click="OnDeleteAccountClicked"
-                                            Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+                                <TextBox Header="Delete target folder (IMAP full name)"
+                                         Text="{x:Bind DeleteTargetFolderFullName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                <TextBlock Text="{x:Bind DeleteTargetStatus, Mode=OneWay}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           TextWrapping="Wrap" />
+                                <StackPanel Spacing="8">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <Button Content="Save account settings"
+                                                Click="OnSaveAccountSettingsClicked" />
+                                        <Button Content="Test delete target"
+                                                Click="OnTestDeleteTargetClicked" />
+                                    </StackPanel>
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <Button Content="Set active"
+                                                Click="OnSetActiveClicked" />
+                                        <Button Content="Re-enter password"
+                                                Click="OnReenterPasswordClicked" />
+                                        <Button Content="Delete"
+                                                Click="OnDeleteAccountClicked"
+                                                Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+                                    </StackPanel>
                                 </StackPanel>
                             </StackPanel>
                         </DataTemplate>

@@ -200,6 +200,7 @@
                               SelectedItem="{Binding SelectedMessage, Mode=TwoWay}"
                               CanDragItems="True"
                               DragItemsStarting="OnMessagesDragItemsStarting"
+                              KeyDown="OnMessagesListKeyDown"
                               SelectionChanged="OnMessagesSelectionChanged"
                               Loaded="OnMessagesListLoaded"
                               ContextRequested="OnMessagesContextRequested">
@@ -236,17 +237,28 @@
                                             </StackPanel>
                                         </StackPanel>
 
-                                        <Border Grid.Column="2"
-                                                Visibility="{Binding IsSuggested, Converter={StaticResource BoolToVisibilityConverter}}"
-                                                Background="{ThemeResource LayerFillColorDefaultBrush}"
-                                                CornerRadius="4"
-                                                Padding="6,2"
-                                                VerticalAlignment="Top"
-                                                HorizontalAlignment="Right">
-                                            <TextBlock Text="Suggested"
-                                                       FontSize="12"
-                                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                        </Border>
+                                        <StackPanel Grid.Column="2"
+                                                    Spacing="4"
+                                                    VerticalAlignment="Top"
+                                                    HorizontalAlignment="Right">
+                                            <Border Visibility="{Binding IsSuggested, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                    Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                                    CornerRadius="4"
+                                                    Padding="6,2">
+                                                <TextBlock Text="Suggested"
+                                                           FontSize="12"
+                                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                            </Border>
+                                            <Border Visibility="{Binding IsLocalOnly, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                    Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                                    CornerRadius="4"
+                                                    Padding="6,2"
+                                                    ToolTipService.ToolTip="Local archive only (not on IMAP server)">
+                                                <TextBlock Text="Local"
+                                                           FontSize="12"
+                                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                            </Border>
+                                        </StackPanel>
 
                                         <FontIcon Grid.Column="2"
                                                   Glyph="&#xE932;"

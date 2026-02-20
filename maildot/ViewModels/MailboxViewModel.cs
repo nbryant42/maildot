@@ -439,6 +439,7 @@ public sealed class EmailMessageViewModel : INotifyPropertyChanged
     private string? _cc;
     private string? _bcc;
     private bool _isSuggested;
+    private bool _isLocalOnly;
     private double _suggestionScore = Double.NegativeInfinity;
     private List<string> _labelNames = [];
 
@@ -540,6 +541,12 @@ public sealed class EmailMessageViewModel : INotifyPropertyChanged
     {
         get => _suggestionScore;
         set => SetProperty(ref _suggestionScore, value, nameof(SuggestionScore));
+    }
+
+    public bool IsLocalOnly
+    {
+        get => _isLocalOnly;
+        set => SetProperty(ref _isLocalOnly, value, nameof(IsLocalOnly));
     }
 
     public List<string> LabelNames

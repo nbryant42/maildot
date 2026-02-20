@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Input;
 using Windows.ApplicationModel.DataTransfer;
+using Windows.System;
 
 namespace maildot.Views;
 
@@ -41,6 +42,7 @@ public sealed partial class ImapDashboardView : UserControl
     public event EventHandler<EmailMessageViewModel>? SuggestionAccepted;
     public event EventHandler<EmailMessageViewModel>? SenderSuggestionAccepted;
     public event EventHandler<EmailMessageViewModel>? LabelSenderRequested;
+    public event EventHandler<EmailMessageViewModel>? DeleteMessageRequested;
     public event EventHandler<bool>? UnlabeledOnlyToggled;
 
     public void BindViewModel(MailboxViewModel viewModel)
@@ -120,6 +122,25 @@ public sealed partial class ImapDashboardView : UserControl
         if (MessagesList.SelectedItem is EmailMessageViewModel message)
         {
             MessageSelected?.Invoke(this, message);
+        }
+    }
+
+    private void OnMessagesListKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != VirtualKey.Delete)
+        {
+            return;
+        }
+
+        if (DataContext is not MailboxViewModel vm || vm.SelectedFolder == null || vm.SelectedLabelId != null || vm.IsSearchActive)
+        {
+            return;
+        }
+
+        if (MessagesList.SelectedItem is EmailMessageViewModel message)
+        {
+            DeleteMessageRequested?.Invoke(this, message);
+            e.Handled = true;
         }
     }
 
@@ -345,7 +366,24 @@ public sealed partial class ImapDashboardView : UserControl
             return;
         }
 
+        var vm = DataContext as MailboxViewModel;
+        var inFolderView = vm?.SelectedFolder != null && vm.SelectedLabelId == null && !vm.IsSearchActive;
         var flyout = new MenuFlyout();
+
+        if (inFolderView)
+        {
+            var deleteItem = new MenuFlyoutItem { Text = "Delete" };
+            deleteItem.Click += (_, __) =>
+            {
+                if (_contextMenuMessage != null)
+                {
+                    DeleteMessageRequested?.Invoke(this, _contextMenuMessage);
+                }
+            };
+            flyout.Items.Add(deleteItem);
+            flyout.Items.Add(new MenuFlyoutSeparator());
+        }
+
         var labelSender = new MenuFlyoutItem { Text = "Label sender..." };
         labelSender.Click += (_, __) =>
         {

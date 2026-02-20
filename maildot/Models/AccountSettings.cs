@@ -1,25 +1,42 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text.Json.Serialization;
 using maildot.Data;
 using maildot.Services;
 using Microsoft.EntityFrameworkCore;
 using System.IO;
+using System.Text.Json;
 
 namespace maildot.Models;
 
 /// <summary>
 /// Captures the IMAP endpoint details needed to connect, excluding sensitive secrets.
 /// </summary>
-public sealed class AccountSettings
+public sealed class AccountSettings : INotifyPropertyChanged
 {
+    private string _deleteTargetFolderFullName = string.Empty;
+    private string _deleteTargetStatus = string.Empty;
+
     public int Id { get; set; }
     public string AccountName { get; set; } = string.Empty;
     public string Server { get; set; } = string.Empty;
     public int Port { get; set; } = 993;
     public bool UseSsl { get; set; } = true;
     public string Username { get; set; } = string.Empty;
+    public string DeleteTargetFolderFullName
+    {
+        get => _deleteTargetFolderFullName;
+        set => SetProperty(ref _deleteTargetFolderFullName, value ?? string.Empty);
+    }
+    [JsonIgnore]
+    public string DeleteTargetStatus
+    {
+        get => _deleteTargetStatus;
+        set => SetProperty(ref _deleteTargetStatus, value ?? string.Empty);
+    }
     [JsonIgnore]
     public bool IsActive { get; set; }
 
@@ -27,6 +44,20 @@ public sealed class AccountSettings
         !string.IsNullOrWhiteSpace(Server) &&
         !string.IsNullOrWhiteSpace(Username) &&
         Port > 0;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
+    {
+        if (EqualityComparer<T>.Default.Equals(field, value))
+        {
+            return false;
+        }
+
+        field = value;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        return true;
+    }
 }
 
 internal static class AccountSettingsStore
@@ -36,17 +67,22 @@ internal static class AccountSettingsStore
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "maildot",
             "active_account.txt");
+    private static readonly string DeleteTargetsPath =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "maildot",
+            "delete_targets.json");
 
     public static IReadOnlyList<AccountSettings> GetAllAccounts()
     {
         using var db = ResolveDbContext();
         var activeId = GetActiveAccountId();
+        var deleteTargets = LoadDeleteTargets();
 
         return db.ImapAccounts
             .AsNoTracking()
             .OrderBy(a => a.DisplayName)
             .ThenBy(a => a.Username)
-            .Select(MapToSettings)
+            .Select(a => MapToSettings(a, deleteTargets))
             .ToList()
             .Select(a =>
             {
@@ -60,20 +96,21 @@ internal static class AccountSettingsStore
     {
         using var db = ResolveDbContext();
         var activeId = GetActiveAccountId();
+        var deleteTargets = LoadDeleteTargets();
         var query = db.ImapAccounts.AsNoTracking();
         if (activeId.HasValue)
         {
             var match = query.FirstOrDefault(a => a.Id == activeId.Value);
             if (match != null)
             {
-                var mapped = MapToSettings(match);
+                var mapped = MapToSettings(match, deleteTargets);
                 mapped.IsActive = true;
                 return mapped;
             }
         }
 
         var first = query.OrderBy(a => a.DisplayName).ThenBy(a => a.Username).FirstOrDefault();
-        return first != null ? MapToSettings(first) : null;
+        return first != null ? MapToSettings(first, deleteTargets) : null;
     }
 
     public static void AddOrUpdate(AccountSettings settings, bool makeActive = true)
@@ -94,6 +131,7 @@ internal static class AccountSettingsStore
 
         db.SaveChanges();
         settings.Id = entity.Id;
+        SaveDeleteTarget(settings.Id, settings.DeleteTargetFolderFullName);
 
         if (makeActive)
         {
@@ -130,6 +168,7 @@ internal static class AccountSettingsStore
 
         db.ImapAccounts.Remove(entity);
         db.SaveChanges();
+        RemoveDeleteTarget(accountId);
 
         var activeId = GetActiveAccountId();
         if (activeId == accountId)
@@ -158,7 +197,7 @@ internal static class AccountSettingsStore
         return MailDbContextFactory.CreateDbContext(settings, passwordResponse.Password);
     }
 
-    private static AccountSettings MapToSettings(ImapAccount entity) =>
+    private static AccountSettings MapToSettings(ImapAccount entity, IReadOnlyDictionary<int, string> deleteTargets) =>
         new()
         {
             Id = entity.Id,
@@ -166,7 +205,8 @@ internal static class AccountSettingsStore
             Server = entity.Server,
             Port = entity.Port,
             UseSsl = entity.UseSsl,
-            Username = entity.Username
+            Username = entity.Username,
+            DeleteTargetFolderFullName = deleteTargets.TryGetValue(entity.Id, out var target) ? target : string.Empty
         };
 
     private static void Apply(AccountSettings settings, ImapAccount entity)
@@ -197,5 +237,68 @@ internal static class AccountSettingsStore
         }
 
         return null;
+    }
+
+    private static Dictionary<int, string> LoadDeleteTargets()
+    {
+        try
+        {
+            if (!File.Exists(DeleteTargetsPath))
+            {
+                return new Dictionary<int, string>();
+            }
+
+            var json = File.ReadAllText(DeleteTargetsPath);
+            var parsed = JsonSerializer.Deserialize<Dictionary<int, string>>(json);
+            return parsed ?? new Dictionary<int, string>();
+        }
+        catch
+        {
+            return new Dictionary<int, string>();
+        }
+    }
+
+    private static void SaveDeleteTargets(Dictionary<int, string> targets)
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(DeleteTargetsPath);
+            if (!string.IsNullOrEmpty(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            var json = JsonSerializer.Serialize(targets);
+            File.WriteAllText(DeleteTargetsPath, json);
+        }
+        catch
+        {
+            // Ignore failures; settings can be re-entered.
+        }
+    }
+
+    private static void SaveDeleteTarget(int accountId, string? folderFullName)
+    {
+        var targets = LoadDeleteTargets();
+        var cleaned = folderFullName?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(cleaned))
+        {
+            targets.Remove(accountId);
+        }
+        else
+        {
+            targets[accountId] = cleaned;
+        }
+
+        SaveDeleteTargets(targets);
+    }
+
+    private static void RemoveDeleteTarget(int accountId)
+    {
+        var targets = LoadDeleteTargets();
+        if (targets.Remove(accountId))
+        {
+            SaveDeleteTargets(targets);
+        }
     }
 }
