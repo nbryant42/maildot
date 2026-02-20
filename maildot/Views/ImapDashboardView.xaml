@@ -166,8 +166,8 @@
                                FontSize="20"
                                FontWeight="SemiBold" />
                     <ProgressRing Width="24" Height="24" IsActive="{Binding IsBusy}" />
-                    <CheckBox Content="Unlabeled only"
-                          IsChecked="{Binding UnlabeledOnly, Mode=TwoWay}"
+                    <CheckBox Content="{Binding ActiveFilterLabel}"
+                          IsChecked="{Binding ActiveFilterOnly, Mode=TwoWay}"
                           Checked="OnUnlabeledOnlyToggled"
                           Unchecked="OnUnlabeledOnlyToggled"/>
                 </StackPanel>

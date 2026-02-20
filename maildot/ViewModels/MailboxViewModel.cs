@@ -25,6 +25,7 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
     private EmailMessageViewModel? _selectedMessage;
     private int? _selectedLabelId;
     private bool _unlabeledOnly;
+    private bool _suggestionsOnly;
 
     public ObservableCollection<MailFolderViewModel> Folders { get; } = new();
     public ObservableCollection<EmailMessageViewModel> Messages { get; } = new();
@@ -165,9 +166,42 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
             {
                 _unlabeledOnly = value;
                 OnPropertyChanged(nameof(UnlabeledOnly));
+                OnPropertyChanged(nameof(ActiveFilterOnly));
             }
         }
     }
+
+    public bool SuggestionsOnly
+    {
+        get => _suggestionsOnly;
+        set
+        {
+            if (_suggestionsOnly != value)
+            {
+                _suggestionsOnly = value;
+                OnPropertyChanged(nameof(SuggestionsOnly));
+                OnPropertyChanged(nameof(ActiveFilterOnly));
+            }
+        }
+    }
+
+    public bool ActiveFilterOnly
+    {
+        get => _selectedLabelId != null ? _suggestionsOnly : _unlabeledOnly;
+        set
+        {
+            if (_selectedLabelId != null)
+            {
+                SuggestionsOnly = value;
+            }
+            else
+            {
+                UnlabeledOnly = value;
+            }
+        }
+    }
+
+    public string ActiveFilterLabel => _selectedLabelId != null ? "Suggestions only" : "Unlabeled only";
 
     public void SetFolders(IEnumerable<MailFolderViewModel> folders)
     {
@@ -221,6 +255,9 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
         {
             SelectedFolder = null;
         }
+
+        OnPropertyChanged(nameof(ActiveFilterOnly));
+        OnPropertyChanged(nameof(ActiveFilterLabel));
     }
 
     public int? SelectedLabelId => _selectedLabelId;

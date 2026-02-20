@@ -193,13 +193,13 @@ public sealed partial class ImapDashboardView : UserControl
 
         if (sender is ToggleSwitch ts)
         {
-            vm.UnlabeledOnly = ts.IsOn;
+            vm.ActiveFilterOnly = ts.IsOn;
             UnlabeledOnlyToggled?.Invoke(this, ts.IsOn);
         }
         else if (sender is CheckBox cb)
         {
             var isOn = cb.IsChecked == true;
-            vm.UnlabeledOnly = isOn;
+            vm.ActiveFilterOnly = isOn;
             UnlabeledOnlyToggled?.Invoke(this, isOn);
         }
     }

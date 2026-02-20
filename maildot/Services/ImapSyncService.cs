@@ -2861,6 +2861,13 @@ GROUP BY lids.""LabelId""";
                     .OrderByDescending(m => m.Received)
                     .ToList();
 
+                if (_viewModel.SuggestionsOnly)
+                {
+                    ordered = ordered
+                        .Where(m => m.IsSuggested)
+                        .ToList();
+                }
+
                 await EnqueueAsync(() =>
                 {
                     _viewModel.SetMessages($"Label: {label.Name}", ordered);

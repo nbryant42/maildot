@@ -314,14 +314,23 @@ public sealed partial class MainWindow : Window
 
     private void OnUnlabeledOnlyToggled(object? sender, bool isOn)
     {
-        _mailboxViewModel?.UnlabeledOnly = isOn;
-
-        if (_imapService == null || _mailboxViewModel?.SelectedFolder is not MailFolderViewModel folder)
+        if (_imapService == null || _mailboxViewModel == null || _mailboxViewModel.IsSearchActive)
         {
             return;
         }
 
-        _ = _imapService.LoadFolderAsync(folder.Id);
+        if (_mailboxViewModel.SelectedLabelId is int labelId)
+        {
+            _mailboxViewModel.SuggestionsOnly = isOn;
+            _ = _imapService.LoadLabelMessagesAsync(labelId, _searchSinceUtc);
+            return;
+        }
+
+        _mailboxViewModel.UnlabeledOnly = isOn;
+        if (_mailboxViewModel.SelectedFolder is MailFolderViewModel folder)
+        {
+            _ = _imapService.LoadFolderAsync(folder.Id);
+        }
     }
 
     private void OnLoadMoreRequested(object? sender, EventArgs e)
