@@ -36,6 +36,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
     private readonly Dictionary<string, IMailFolder> _folderCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _folderNextEndIndex = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, long?> _folderNextUnlabeledImapUid = new(StringComparer.OrdinalIgnoreCase);
+    private bool _offlineFallbackHydrated;
 
     private ImapClient? _client;
     private AccountSettings? _settings;
@@ -105,7 +106,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         {
             if (_client == null)
             {
-                throw new ServiceNotConnectedException();
+                await LoadFolderFromDatabaseFallbackAsync(folderId, _cts.Token);
+                return;
             }
 
             if (!_folderCache.TryGetValue(folderId, out folder))
@@ -899,6 +901,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
             _backgroundTask ??= Task.Run(() => BackgroundFetchLoopAsync(_cts.Token), _cts.Token);
             _embeddingTask ??= Task.Run(() => BackgroundEmbeddingLoopAsync(_cts.Token), _cts.Token);
+            _offlineFallbackHydrated = false;
 
             return true;
         }
@@ -908,6 +911,23 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         }
         catch (Exception ex)
         {
+            // Enter explicit offline mode so folder loads use DB fallback instead of reconnect loops.
+            _client?.Dispose();
+            _client = null;
+
+            if (!_offlineFallbackHydrated)
+            {
+                var fallbackFolders = await LoadFoldersFromDatabaseAsync(_cts.Token);
+                var labels = await LoadLabelsAsync(_cts.Token);
+                await EnqueueAsync(() =>
+                {
+                    _viewModel.SetFolders(fallbackFolders);
+                    _viewModel.SetLabels(labels);
+                    _viewModel.SetRetryVisible(true);
+                });
+                _offlineFallbackHydrated = true;
+            }
+
             await ReportStatusAsync($"IMAP connection failed: {ex.Message}", false);
             await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
             return false;
@@ -961,6 +981,35 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         }
 
         return folders;
+    }
+
+    private async Task<IReadOnlyList<MailFolderViewModel>> LoadFoldersFromDatabaseAsync(CancellationToken token)
+    {
+        if (_settings == null)
+        {
+            return [];
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return [];
+        }
+
+        await using (db)
+        {
+            var folders = await db.ImapFolders
+                .AsNoTracking()
+                .Where(f => f.AccountId == _settings.Id)
+                .Select(f => new { f.FullName, f.DisplayName })
+                .ToListAsync(token);
+
+            return folders
+                .OrderBy(f => GetFolderPriority(f.FullName))
+                .ThenBy(f => f.FullName, StringComparer.OrdinalIgnoreCase)
+                .Select(f => new MailFolderViewModel(f.FullName, string.IsNullOrWhiteSpace(f.DisplayName) ? f.FullName : f.DisplayName))
+                .ToList();
+        }
     }
 
     private async Task<List<LabelViewModel>> LoadLabelsAsync(CancellationToken token)
@@ -1100,18 +1149,10 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 .Take(PageSize)
                 .ToListAsync(token);
 
-            static string BuildDedupKey(string? messageId, long imapUid)
-            {
-                var cleaned = messageId?.Trim();
-                return string.IsNullOrWhiteSpace(cleaned)
-                    ? $"uid:{imapUid}"
-                    : $"mid:{cleaned}";
-            }
-
             var dedupedRows = rows
-                .GroupBy(r => BuildDedupKey(r.MessageId, r.ImapUid))
+                .GroupBy(r => BuildMessageDedupKey(r.MessageId, r.ImapUid))
                 .Select(g => g
-                    .OrderByDescending(x => x.ImapUid <= 0 ? 1 : 0)
+                    .OrderByDescending(x => IsPreferredDedupUid(x.ImapUid))
                     .ThenByDescending(x => x.ImapUid)
                     .First())
                 .ToList();
@@ -1222,6 +1263,119 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     Received = r.ReceivedUtc.LocalDateTime
                 };
             }).ToList();
+        }
+    }
+
+    private async Task LoadFolderFromDatabaseFallbackAsync(string folderFullName, CancellationToken token)
+    {
+        if (_settings == null || string.IsNullOrWhiteSpace(folderFullName))
+        {
+            return;
+        }
+
+        if (_viewModel.UnlabeledOnly)
+        {
+            _folderNextUnlabeledImapUid[folderFullName] = null;
+            await LoadUnlabeledFolderPageAsync(folderFullName, null, append: false, token);
+            await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
+            return;
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
+            return;
+        }
+
+        await using (db)
+        {
+            var folder = await db.ImapFolders
+                .AsNoTracking()
+                .FirstOrDefaultAsync(f => f.AccountId == _settings.Id && f.FullName == folderFullName, token);
+
+            if (folder == null)
+            {
+                await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
+                return;
+            }
+
+            var rows = await (
+                    from m in db.ImapMessages.AsNoTracking()
+                    join b in db.MessageBodies.AsNoTracking() on m.Id equals b.MessageId into bodies
+                    from b in bodies.DefaultIfEmpty()
+                    where m.FolderId == folder.Id
+                    orderby m.ImapUid descending
+                    select new
+                    {
+                        m.Id,
+                        m.ImapUid,
+                        m.Subject,
+                        m.FromName,
+                        m.FromAddress,
+                        m.ReceivedUtc,
+                        Preview = b != null ? b.Preview : null
+                    })
+                .Take(PageSize)
+                .ToListAsync(token);
+
+            var messageIds = rows.Select(r => r.Id).ToList();
+            var explicitLabels = await (
+                    from ml in db.MessageLabels.AsNoTracking()
+                    join l in db.Labels.AsNoTracking() on ml.LabelId equals l.Id
+                    where messageIds.Contains(ml.MessageId)
+                    select new { ml.MessageId, l.Name })
+                .ToListAsync(token);
+
+            var senderLabels = await (
+                    from m in db.ImapMessages.AsNoTracking()
+                    where messageIds.Contains(m.Id)
+                    join sl in db.SenderLabels.AsNoTracking() on m.FromAddress.ToLower() equals sl.FromAddress
+                    join l in db.Labels.AsNoTracking() on sl.LabelId equals l.Id
+                    select new { m.Id, l.Name })
+                .ToListAsync(token);
+
+            var labelMap = explicitLabels
+                .Select(x => new { MessageId = x.MessageId, x.Name })
+                .Concat(senderLabels.Select(x => new { MessageId = x.Id, x.Name }))
+                .GroupBy(x => x.MessageId)
+                .ToDictionary(g => g.Key, g => g.Select(x => x.Name).Distinct().ToList());
+
+            var messages = rows.Select(r =>
+            {
+                var senderDisplay = !string.IsNullOrWhiteSpace(r.FromName)
+                    ? r.FromName!
+                    : string.IsNullOrWhiteSpace(r.FromAddress) ? "(Unknown sender)" : r.FromAddress!;
+                var color = SenderColorHelper.GetColor(r.FromName, r.FromAddress);
+                var vm = new EmailMessageViewModel
+                {
+                    Id = r.ImapUid.ToString(),
+                    IsLocalOnly = r.ImapUid <= 0,
+                    FolderId = folder.FullName,
+                    Subject = string.IsNullOrWhiteSpace(r.Subject) ? "(No subject)" : r.Subject!,
+                    Sender = senderDisplay,
+                    SenderAddress = r.FromAddress ?? string.Empty,
+                    SenderInitials = SenderInitialsHelper.From(r.FromName, r.FromAddress),
+                    SenderColor = new Color { A = 255, R = color.R, G = color.G, B = color.B },
+                    Preview = string.IsNullOrWhiteSpace(r.Preview) ? r.Subject ?? string.Empty : r.Preview!,
+                    Received = r.ReceivedUtc.LocalDateTime
+                };
+
+                if (labelMap.TryGetValue(r.Id, out var names))
+                {
+                    vm.LabelNames = names;
+                }
+
+                return vm;
+            }).ToList();
+
+            _folderNextEndIndex[folderFullName] = -1;
+            await EnqueueAsync(() =>
+            {
+                _viewModel.SetMessages(string.IsNullOrWhiteSpace(folder.DisplayName) ? folder.FullName : folder.DisplayName, messages);
+                _viewModel.SetLoadMoreAvailability(false);
+                _viewModel.SetRetryVisible(true);
+            });
         }
     }
 
@@ -3047,6 +3201,16 @@ GROUP BY lids.""LabelId""";
         }
     }
 
+    internal static string BuildMessageDedupKey(string? messageId, long imapUid)
+    {
+        var cleaned = messageId?.Trim();
+        return string.IsNullOrWhiteSpace(cleaned)
+            ? $"uid:{imapUid}"
+            : $"mid:{cleaned}";
+    }
+
+    internal static bool IsPreferredDedupUid(long imapUid) => imapUid <= 0;
+
     public async Task<bool> AssignLabelToMessageAsync(int labelId, string folderId, string messageId)
     {
         var token = _cts.Token;
@@ -3407,13 +3571,29 @@ GROUP BY lids.""LabelId""";
 
             try
             {
-                if (_client == null)
+                if (_client == null || !_client.IsConnected)
                 {
+                    var cached = await LoadMessageBodyFromDatabaseAsync(folderId, messageId, _cts.Token);
+                    if (cached != null)
+                    {
+                        await ReportStatusAsync("Showing saved copy from PostgreSQL (offline mode).", false);
+                        await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
+                        return cached;
+                    }
+
                     throw new ServiceNotConnectedException();
                 }
 
                 if (!_folderCache.TryGetValue(folderId, out folder))
                 {
+                    var cached = await LoadMessageBodyFromDatabaseAsync(folderId, messageId, _cts.Token);
+                    if (cached != null)
+                    {
+                        await ReportStatusAsync("Showing saved copy from PostgreSQL (offline mode).", false);
+                        await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
+                        return cached;
+                    }
+
                     if (canRetry && await TryReconnectAsync())
                     {
                         canRetry = false;

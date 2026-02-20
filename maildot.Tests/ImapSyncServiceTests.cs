@@ -6,6 +6,27 @@ namespace maildot.Tests;
 public class ImapSyncServiceTests
 {
     [Fact]
+    public void BuildMessageDedupKey_UsesMessageId_WhenPresent()
+    {
+        var key = ImapSyncService.BuildMessageDedupKey(" <abc@id> ", 123);
+        Assert.Equal("mid:<abc@id>", key);
+    }
+
+    [Fact]
+    public void BuildMessageDedupKey_FallsBackToUid_WhenMessageIdMissing()
+    {
+        var key = ImapSyncService.BuildMessageDedupKey("  ", -3);
+        Assert.Equal("uid:-3", key);
+    }
+
+    [Fact]
+    public void IsPreferredDedupUid_PrefersLocalOnlyNegativeUid()
+    {
+        Assert.True(ImapSyncService.IsPreferredDedupUid(-1));
+        Assert.False(ImapSyncService.IsPreferredDedupUid(42));
+    }
+
+    [Fact]
     public void ComputeNextSyntheticUid_StartsAtMinusOne_WhenNoSyntheticUidsExist()
     {
         var next = ImapSyncService.ComputeNextSyntheticUid([55, 12, 1]);
