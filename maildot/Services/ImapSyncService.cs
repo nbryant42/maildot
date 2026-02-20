@@ -1089,6 +1089,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     select new
                     {
                         m.ImapUid,
+                        m.MessageId,
                         m.Subject,
                         m.FromName,
                         m.FromAddress,
@@ -1099,7 +1100,23 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 .Take(PageSize)
                 .ToListAsync(token);
 
-            var emailItems = rows.Select(r =>
+            static string BuildDedupKey(string? messageId, long imapUid)
+            {
+                var cleaned = messageId?.Trim();
+                return string.IsNullOrWhiteSpace(cleaned)
+                    ? $"uid:{imapUid}"
+                    : $"mid:{cleaned}";
+            }
+
+            var dedupedRows = rows
+                .GroupBy(r => BuildDedupKey(r.MessageId, r.ImapUid))
+                .Select(g => g
+                    .OrderByDescending(x => x.ImapUid <= 0 ? 1 : 0)
+                    .ThenByDescending(x => x.ImapUid)
+                    .First())
+                .ToList();
+
+            var emailItems = dedupedRows.Select(r =>
             {
                 var senderDisplay = !string.IsNullOrWhiteSpace(r.FromName)
                     ? r.FromName!
