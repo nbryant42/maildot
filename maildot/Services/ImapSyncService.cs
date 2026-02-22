@@ -2526,10 +2526,39 @@ GROUP BY lids.""LabelId""";
 
             var labelId = reader.GetInt32(0);
             var vec = reader.GetFieldValue<float[]>(1);
-            map[labelId] = vec;
+            map[labelId] = NormalizeCentroid(vec);
         }
 
         return map;
+    }
+
+    private static float[] NormalizeCentroid(float[] source)
+    {
+        if (source.Length == 0)
+        {
+            return source;
+        }
+
+        var normalized = (float[])source.Clone();
+        double sumSquares = 0.0d;
+        for (var i = 0; i < normalized.Length; i++)
+        {
+            var value = normalized[i];
+            sumSquares += value * value;
+        }
+
+        if (sumSquares <= 1e-20d)
+        {
+            return normalized;
+        }
+
+        var invNorm = (float)(1.0d / Math.Sqrt(sumSquares));
+        for (var i = 0; i < normalized.Length; i++)
+        {
+            normalized[i] *= invNorm;
+        }
+
+        return normalized;
     }
 
     private static EmailMessageViewModel CreateEmailViewModel(ImapMessage message, Models.ImapFolder folder, MessageBody? body)
