@@ -2378,7 +2378,10 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
     private async Task<List<SuggestedResult>> GetSuggestedMessagesAsync(MailDbContext db, int labelId,
         DateTimeOffset? sinceUtc, CancellationToken token)
     {
-        const int limit = 20;
+        const int finalLimit = 20;
+        const int candidateLimit = 120;
+        const double postDominanceGrace = 0.03d;
+        const double dominatedNearTopRankDelta = 0.12d;
         var folderPriorAlpha = DefaultFolderPriorAlpha;
 
         var connString = BuildConnectionString(db);
@@ -2394,7 +2397,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         var folderPriorLambda = await GetLearnedFolderPriorLambdaAsync(conn, _settings.Id, labelId, centroidArr, folderPriorAlpha, token);
 
         var centroidLiteral = BuildVectorLiteral(centroidArr);
-        var scoreExpr = $@"ml.""Vector"" <#> '{centroidLiteral}'";
+        var scoreExpr = $@"(ml.""Vector"" <#> '{centroidLiteral}')";
         var sinceClause = sinceUtc != null ? @"AND m.""ReceivedUtc"" >= @p0" : string.Empty;
 
         var otherCentroids = new List<float[]>();
@@ -2411,14 +2414,19 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             }
         }
 
-        var betterFilters = new List<string>();
+        var otherScoreExprs = new List<string>();
         foreach (var other in otherCentroids)
         {
             var otherLiteral = BuildVectorLiteral(other);
-            betterFilters.Add($@"{scoreExpr} <= ml.""Vector"" <#> '{otherLiteral}'");
+            otherScoreExprs.Add($@"(ml.""Vector"" <#> '{otherLiteral}')");
         }
 
-        var dominanceClause = betterFilters.Count > 0 ? "AND " + string.Join(" AND ", betterFilters) : string.Empty;
+        var bestOtherScoreExpr = otherScoreExprs.Count switch
+        {
+            0 => "NULL::double precision",
+            1 => otherScoreExprs[0],
+            _ => $"least({string.Join(", ", otherScoreExprs)})"
+        };
 
         var sql = $@"
 WITH label_ids AS (
@@ -2482,7 +2490,8 @@ SELECT
     m.""FolderId"",
     m.""ReceivedUtc"",
     {scoreExpr} AS score,
-    (-({scoreExpr}) + (@priorLambda * coalesce(ps.prior_lift, 0.0))) AS rank
+    (-({scoreExpr}) + (@priorLambda * coalesce(ps.prior_lift, 0.0))) AS rank,
+    ({bestOtherScoreExpr} - {scoreExpr}) AS dominance_gap
 FROM ""message_embeddings"" ml
 JOIN ""imap_messages"" m ON m.""Id"" = ml.""MessageId""
 JOIN ""imap_folders"" f ON f.""id"" = m.""FolderId""
@@ -2497,9 +2506,8 @@ WHERE NOT EXISTS (SELECT 1 FROM ""message_labels"" ml2 WHERE ml2.""MessageId"" =
   AND f.""AccountId"" = @accountId
   AND {scoreExpr} < 0.0
 {sinceClause}
-{dominanceClause}
 ORDER BY rank DESC, score ASC
-LIMIT {limit}";
+LIMIT {candidateLimit}";
 
         var results = new List<SuggestedResult>();
 
@@ -2515,23 +2523,75 @@ LIMIT {limit}";
             }
 
             await using var reader = await cmd.ExecuteReaderAsync(token);
-            var folderIds = new HashSet<int>();
-            var messageIds = new List<int>();
-            var scoreMap = new Dictionary<int, double>();
+            var scoreOrdinal = reader.GetOrdinal("score");
+            var rankOrdinal = reader.GetOrdinal("rank");
+            var dominanceGapOrdinal = reader.GetOrdinal("dominance_gap");
+
+            var candidateByMessageId = new Dictionary<int, (int FolderId, double Score, double Rank, double? DominanceGap)>();
 
             while (await reader.ReadAsync(token))
             {
-                var score = reader.GetDouble(reader.GetOrdinal("score"));
                 var id = reader.GetInt32(0);
                 var folderId = reader.GetInt32(2);
-                messageIds.Add(id);
-                folderIds.Add(folderId);
-                scoreMap[id] = score;
+                var score = reader.GetDouble(scoreOrdinal);
+                var rank = reader.GetDouble(rankOrdinal);
+                double? dominanceGap = reader.IsDBNull(dominanceGapOrdinal)
+                    ? null
+                    : reader.GetDouble(dominanceGapOrdinal);
+
+                if (candidateByMessageId.TryGetValue(id, out var existing))
+                {
+                    var replace = rank > existing.Rank ||
+                                  (Math.Abs(rank - existing.Rank) < 1e-9 && score < existing.Score);
+                    if (!replace)
+                    {
+                        continue;
+                    }
+                }
+
+                candidateByMessageId[id] = (folderId, score, rank, dominanceGap);
             }
 
-            if (messageIds.Count == 0)
+            if (candidateByMessageId.Count == 0)
             {
                 return [];
+            }
+
+            var candidateRows = candidateByMessageId
+                .Select(kvp => new
+                {
+                    MessageId = kvp.Key,
+                    kvp.Value.FolderId,
+                    kvp.Value.Score,
+                    kvp.Value.Rank,
+                    kvp.Value.DominanceGap
+                })
+                .OrderByDescending(c => c.Rank)
+                .ThenBy(c => c.Score)
+                .ToList();
+
+            var bestRank = candidateRows[0].Rank;
+            var filteredRows = candidateRows
+                .Where(c =>
+                    c.DominanceGap is null ||
+                    c.DominanceGap.Value >= -postDominanceGrace ||
+                    c.Rank >= bestRank - dominatedNearTopRankDelta)
+                .Take(finalLimit)
+                .ToList();
+
+            if (filteredRows.Count == 0)
+            {
+                filteredRows = candidateRows.Take(finalLimit).ToList();
+            }
+
+            var folderIds = new HashSet<int>();
+            var messageIds = new List<int>();
+            var scoreMap = new Dictionary<int, double>();
+            foreach (var row in filteredRows)
+            {
+                messageIds.Add(row.MessageId);
+                folderIds.Add(row.FolderId);
+                scoreMap[row.MessageId] = row.Score;
             }
 
             var folders = await db.ImapFolders
@@ -2544,14 +2604,20 @@ LIMIT {limit}";
                 .AsNoTracking()
                 .Where(m => messageIds.Contains(m.Id))
                 .ToListAsync(token);
+            var messageMap = messages.ToDictionary(m => m.Id, m => m);
             var bodies = await db.MessageBodies
                 .AsNoTracking()
                 .Where(b => messageIds.Contains(b.MessageId))
                 .ToListAsync(token);
             var bodyMap = bodies.ToDictionary(b => b.MessageId, b => b);
 
-            foreach (var message in messages)
+            foreach (var row in filteredRows)
             {
+                if (!messageMap.TryGetValue(row.MessageId, out var message))
+                {
+                    continue;
+                }
+
                 if (!folderMap.TryGetValue(message.FolderId, out var folder))
                 {
                     continue;
