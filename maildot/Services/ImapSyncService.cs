@@ -36,6 +36,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
     private readonly Dictionary<string, IMailFolder> _folderCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _folderNextEndIndex = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, long?> _folderNextUnlabeledImapUid = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<(int AccountId, int LabelId), LearnedLambdaEntry> _folderPriorLambdaCache = [];
+    private readonly object _folderPriorLambdaCacheGate = new();
     private bool _offlineFallbackHydrated;
 
     private ImapClient? _client;
@@ -50,6 +52,9 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
     private static readonly TimeSpan EmbeddingIdleDelay = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan EmbeddingActiveDelay = TimeSpan.FromSeconds(5);
     private const int EmbeddingDim = 1024;
+    private const double DefaultFolderPriorAlpha = 24.0d;
+    private const double DefaultFolderPriorLambda = 0.35d;
+    private static readonly TimeSpan FolderPriorLambdaCacheTtl = TimeSpan.FromMinutes(30);
 
     public async Task StartAsync(AccountSettings settings, string password)
     {
@@ -2367,13 +2372,14 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
     private sealed record SuggestedResult(ImapMessage Message, Models.ImapFolder Folder, MessageBody? Body,
         double Score);
+    private sealed record LearnedLambdaEntry(double Value, DateTimeOffset LearnedAtUtc);
+    private readonly record struct FolderPriorTrainingExample(double SemanticScore, double PriorLift, bool IsPositive);
 
     private async Task<List<SuggestedResult>> GetSuggestedMessagesAsync(MailDbContext db, int labelId,
         DateTimeOffset? sinceUtc, CancellationToken token)
     {
         const int limit = 20;
-        const double folderPriorAlpha = 24.0d;
-        const double folderPriorLambda = 0.35d;
+        var folderPriorAlpha = DefaultFolderPriorAlpha;
 
         var connString = BuildConnectionString(db);
         await using var conn = new NpgsqlConnection(connString);
@@ -2384,6 +2390,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         {
             return [];
         }
+
+        var folderPriorLambda = await GetLearnedFolderPriorLambdaAsync(conn, _settings.Id, labelId, centroidArr, folderPriorAlpha, token);
 
         var centroidLiteral = BuildVectorLiteral(centroidArr);
         var scoreExpr = $@"ml.""Vector"" <#> '{centroidLiteral}'";
@@ -2556,6 +2564,221 @@ LIMIT {limit}";
         }
 
         return results;
+    }
+
+    private async Task<double> GetLearnedFolderPriorLambdaAsync(
+        NpgsqlConnection conn,
+        int accountId,
+        int labelId,
+        float[] centroid,
+        double priorAlpha,
+        CancellationToken token)
+    {
+        var cacheKey = (accountId, labelId);
+        var now = DateTimeOffset.UtcNow;
+
+        lock (_folderPriorLambdaCacheGate)
+        {
+            if (_folderPriorLambdaCache.TryGetValue(cacheKey, out var cached) &&
+                now - cached.LearnedAtUtc <= FolderPriorLambdaCacheTtl)
+            {
+                return cached.Value;
+            }
+        }
+
+        var examples = await LoadFolderPriorTrainingExamplesAsync(conn, accountId, labelId, centroid, priorAlpha, token);
+        var learned = LearnFolderPriorLambda(examples, DefaultFolderPriorLambda);
+
+        lock (_folderPriorLambdaCacheGate)
+        {
+            _folderPriorLambdaCache[cacheKey] = new LearnedLambdaEntry(learned, now);
+        }
+
+        return learned;
+    }
+
+    private static async Task<List<FolderPriorTrainingExample>> LoadFolderPriorTrainingExamplesAsync(
+        NpgsqlConnection conn,
+        int accountId,
+        int labelId,
+        float[] centroid,
+        double priorAlpha,
+        CancellationToken token)
+    {
+        const int trainLimit = 4000;
+        var sql = @"
+WITH label_ids AS (
+    SELECT ml0.""LabelId"", ml0.""MessageId""
+    FROM ""message_labels"" ml0
+    JOIN ""imap_messages"" m0 ON m0.""Id"" = ml0.""MessageId""
+    JOIN ""imap_folders"" f0 ON f0.""id"" = m0.""FolderId""
+    WHERE f0.""AccountId"" = @accountId
+    UNION
+    SELECT sl0.""LabelId"", m0.""Id""
+    FROM ""sender_labels"" sl0
+    JOIN ""labels"" l0 ON l0.""Id"" = sl0.""LabelId""
+    JOIN ""imap_messages"" m0 ON sl0.""from_address"" = lower(m0.""FromAddress"")
+    JOIN ""imap_folders"" f0 ON f0.""id"" = m0.""FolderId""
+    WHERE l0.""AccountId"" = @accountId
+      AND f0.""AccountId"" = @accountId
+),
+message_targets AS (
+    SELECT li.""MessageId"", bool_or(li.""LabelId"" = @labelId) AS is_positive
+    FROM label_ids li
+    GROUP BY li.""MessageId""
+),
+global_stats AS (
+    SELECT
+        count(*)::double precision AS total_count,
+        count(*) FILTER (WHERE mt.is_positive)::double precision AS label_count
+    FROM message_targets mt
+),
+folder_stats AS (
+    SELECT
+        m0.""FolderId"" AS folder_id,
+        count(*)::double precision AS total_count,
+        count(*) FILTER (WHERE mt.is_positive)::double precision AS label_count
+    FROM message_targets mt
+    JOIN ""imap_messages"" m0 ON m0.""Id"" = mt.""MessageId""
+    GROUP BY m0.""FolderId""
+),
+prior_scores AS (
+    SELECT
+        fs.folder_id,
+        CASE
+            WHEN gs.total_count <= 0 OR fs.total_count <= 0 THEN 0.0
+            ELSE
+                ln(
+                    greatest(1e-6, least(1.0 - 1e-6,
+                        ((fs.label_count + (@priorAlpha * (gs.label_count / gs.total_count))) / (fs.total_count + @priorAlpha))
+                    ))
+                    /
+                    greatest(1e-6, 1.0 - least(1.0 - 1e-6,
+                        ((fs.label_count + (@priorAlpha * (gs.label_count / gs.total_count))) / (fs.total_count + @priorAlpha))
+                    ))
+                )
+                -
+                ln(
+                    greatest(1e-6, least(1.0 - 1e-6, gs.label_count / gs.total_count))
+                    /
+                    greatest(1e-6, 1.0 - least(1.0 - 1e-6, gs.label_count / gs.total_count))
+                )
+        END AS prior_lift
+    FROM folder_stats fs
+    CROSS JOIN global_stats gs
+),
+ranked_messages AS (
+    SELECT
+        mt.""MessageId"" AS message_id,
+        m.""FolderId"" AS folder_id,
+        mt.is_positive
+    FROM message_targets mt
+    JOIN ""imap_messages"" m ON m.""Id"" = mt.""MessageId""
+    JOIN ""imap_folders"" f ON f.""id"" = m.""FolderId""
+    WHERE f.""AccountId"" = @accountId
+    ORDER BY m.""ReceivedUtc"" DESC
+    LIMIT @trainLimit
+),
+semantic_scores AS (
+    SELECT
+        rm.message_id,
+        rm.folder_id,
+        rm.is_positive,
+        min(me.""Vector"" <#> @centroid::halfvec) AS score
+    FROM ranked_messages rm
+    JOIN ""message_embeddings"" me ON me.""MessageId"" = rm.message_id
+    GROUP BY rm.message_id, rm.folder_id, rm.is_positive
+)
+SELECT
+    -(ss.score) AS semantic_score,
+    coalesce(ps.prior_lift, 0.0) AS prior_lift,
+    ss.is_positive
+FROM semantic_scores ss
+LEFT JOIN prior_scores ps ON ps.folder_id = ss.folder_id
+WHERE ss.score < 0.0";
+
+        var examples = new List<FolderPriorTrainingExample>();
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("accountId", accountId);
+        cmd.Parameters.AddWithValue("labelId", labelId);
+        cmd.Parameters.AddWithValue("priorAlpha", priorAlpha);
+        cmd.Parameters.AddWithValue("trainLimit", trainLimit);
+        cmd.Parameters.AddWithValue("centroid", BuildVectorLiteral(centroid));
+
+        await using var reader = await cmd.ExecuteReaderAsync(token);
+        while (await reader.ReadAsync(token))
+        {
+            var semantic = reader.GetDouble(0);
+            var priorLift = reader.GetDouble(1);
+            var isPositive = reader.GetBoolean(2);
+            if (!double.IsFinite(semantic) || !double.IsFinite(priorLift))
+            {
+                continue;
+            }
+
+            examples.Add(new FolderPriorTrainingExample(semantic, priorLift, isPositive));
+        }
+
+        return examples;
+    }
+
+    private static double LearnFolderPriorLambda(
+        List<FolderPriorTrainingExample> examples,
+        double fallbackLambda)
+    {
+        if (examples.Count < 200)
+        {
+            return fallbackLambda;
+        }
+
+        var positives = examples.Count(e => e.IsPositive);
+        if (positives < 10 || positives >= examples.Count)
+        {
+            return fallbackLambda;
+        }
+
+        var lambdaGrid = new[] { 0.0d, 0.10d, 0.20d, 0.35d, 0.50d, 0.75d, 1.00d, 1.50d, 2.00d, 3.00d };
+
+        var bestLambda = fallbackLambda;
+        var bestLoss = double.PositiveInfinity;
+
+        foreach (var lambda in lambdaGrid)
+        {
+            var loss = 0.0d;
+            foreach (var ex in examples)
+            {
+                var z = ex.SemanticScore + (lambda * ex.PriorLift);
+                var p = Sigmoid(z);
+                var y = ex.IsPositive ? 1.0d : 0.0d;
+                var clamped = Math.Min(1.0d - 1e-12, Math.Max(1e-12, p));
+                loss += -(y * Math.Log(clamped) + ((1.0d - y) * Math.Log(1.0d - clamped)));
+            }
+
+            // Small regularizer so we do not over-weight folder prior when training signal is weak.
+            loss += 0.02d * lambda * lambda * examples.Count;
+
+            if (loss < bestLoss)
+            {
+                bestLoss = loss;
+                bestLambda = lambda;
+            }
+        }
+
+        return bestLambda;
+    }
+
+    private static double Sigmoid(double x)
+    {
+        var clamped = Math.Max(-40.0d, Math.Min(40.0d, x));
+        return 1.0d / (1.0d + Math.Exp(-clamped));
+    }
+
+    private void ClearFolderPriorLambdaCache()
+    {
+        lock (_folderPriorLambdaCacheGate)
+        {
+            _folderPriorLambdaCache.Clear();
+        }
     }
 
     private static async Task<Dictionary<int, float[]>> GetCentroidsAsync(NpgsqlConnection conn, int accountId, CancellationToken token)
@@ -3413,6 +3636,7 @@ GROUP BY lids.""LabelId""";
                 return true;
             }
 
+            ClearFolderPriorLambdaCache();
             await ReportStatusAsync($"Applied label \"{label.Name}\"", false);
             return true;
         }
@@ -3476,6 +3700,7 @@ GROUP BY lids.""LabelId""";
                 return true;
             }
 
+            ClearFolderPriorLambdaCache();
             await UpdateVisibleMessagesForSenderLabelAsync(cleaned, label.Id, label.Name);
         }
 
