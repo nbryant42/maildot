@@ -2374,6 +2374,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         double Score);
     private sealed record LearnedLambdaEntry(double Value, DateTimeOffset LearnedAtUtc);
     private readonly record struct FolderPriorTrainingExample(double SemanticScore, double PriorLift, bool IsPositive);
+    private readonly record struct SuggestedCandidate(int MessageId, int FolderId, double Score, double Rank, double? DominanceGap);
 
     private async Task<List<SuggestedResult>> GetSuggestedMessagesAsync(MailDbContext db, int labelId,
         DateTimeOffset? sinceUtc, CancellationToken token)
@@ -2510,6 +2511,7 @@ ORDER BY rank DESC, score ASC
 LIMIT {candidateLimit}";
 
         var results = new List<SuggestedResult>();
+        var dominanceRows = new List<SuggestedCandidate>();
 
         await using (var cmd = new NpgsqlCommand(sql, conn))
         {
@@ -2571,65 +2573,339 @@ LIMIT {candidateLimit}";
                 .ToList();
 
             var bestRank = candidateRows[0].Rank;
-            var filteredRows = candidateRows
+            dominanceRows = candidateRows
                 .Where(c =>
                     c.DominanceGap is null ||
                     c.DominanceGap.Value >= -postDominanceGrace ||
                     c.Rank >= bestRank - dominatedNearTopRankDelta)
-                .Take(finalLimit)
+                .Select(c => new SuggestedCandidate(c.MessageId, c.FolderId, c.Score, c.Rank, c.DominanceGap))
                 .ToList();
 
-            if (filteredRows.Count == 0)
+            if (dominanceRows.Count == 0)
             {
-                filteredRows = candidateRows.Take(finalLimit).ToList();
-            }
-
-            var folderIds = new HashSet<int>();
-            var messageIds = new List<int>();
-            var scoreMap = new Dictionary<int, double>();
-            foreach (var row in filteredRows)
-            {
-                messageIds.Add(row.MessageId);
-                folderIds.Add(row.FolderId);
-                scoreMap[row.MessageId] = row.Score;
-            }
-
-            var folders = await db.ImapFolders
-                .AsNoTracking()
-                .Where(f => folderIds.Contains(f.Id))
-                .ToListAsync(token);
-            var folderMap = folders.ToDictionary(f => f.Id, f => f);
-
-            var messages = await db.ImapMessages
-                .AsNoTracking()
-                .Where(m => messageIds.Contains(m.Id))
-                .ToListAsync(token);
-            var messageMap = messages.ToDictionary(m => m.Id, m => m);
-            var bodies = await db.MessageBodies
-                .AsNoTracking()
-                .Where(b => messageIds.Contains(b.MessageId))
-                .ToListAsync(token);
-            var bodyMap = bodies.ToDictionary(b => b.MessageId, b => b);
-
-            foreach (var row in filteredRows)
-            {
-                if (!messageMap.TryGetValue(row.MessageId, out var message))
-                {
-                    continue;
-                }
-
-                if (!folderMap.TryGetValue(message.FolderId, out var folder))
-                {
-                    continue;
-                }
-
-                var score = scoreMap.TryGetValue(message.Id, out var s) ? s : 0.0;
-                bodyMap.TryGetValue(message.Id, out var body);
-                results.Add(new SuggestedResult(message, folder, body, score));
+                dominanceRows = candidateRows
+                    .Select(c => new SuggestedCandidate(c.MessageId, c.FolderId, c.Score, c.Rank, c.DominanceGap))
+                    .ToList();
             }
         }
 
+        if (dominanceRows.Count == 0)
+        {
+            return [];
+        }
+
+        var uniqueRows = await KeepOnlyWinningLabelCandidatesAsync(
+            conn,
+            _settings.Id,
+            labelId,
+            folderPriorLambda,
+            centroids,
+            folderPriorAlpha,
+            dominanceRows,
+            token);
+
+        var filteredRows = uniqueRows
+            .Take(finalLimit)
+            .ToList();
+
+        if (filteredRows.Count == 0)
+        {
+            return [];
+        }
+
+        var folderIds = new HashSet<int>();
+        var messageIds = new List<int>();
+        var scoreMap = new Dictionary<int, double>();
+        foreach (var row in filteredRows)
+        {
+            messageIds.Add(row.MessageId);
+            folderIds.Add(row.FolderId);
+            scoreMap[row.MessageId] = row.Score;
+        }
+
+        var folders = await db.ImapFolders
+            .AsNoTracking()
+            .Where(f => folderIds.Contains(f.Id))
+            .ToListAsync(token);
+        var folderMap = folders.ToDictionary(f => f.Id, f => f);
+
+        var messages = await db.ImapMessages
+            .AsNoTracking()
+            .Where(m => messageIds.Contains(m.Id))
+            .ToListAsync(token);
+        var messageMap = messages.ToDictionary(m => m.Id, m => m);
+        var bodies = await db.MessageBodies
+            .AsNoTracking()
+            .Where(b => messageIds.Contains(b.MessageId))
+            .ToListAsync(token);
+        var bodyMap = bodies.ToDictionary(b => b.MessageId, b => b);
+
+        foreach (var row in filteredRows)
+        {
+            if (!messageMap.TryGetValue(row.MessageId, out var message))
+            {
+                continue;
+            }
+
+            if (!folderMap.TryGetValue(message.FolderId, out var folder))
+            {
+                continue;
+            }
+
+            var score = scoreMap.TryGetValue(message.Id, out var s) ? s : 0.0;
+            bodyMap.TryGetValue(message.Id, out var body);
+            results.Add(new SuggestedResult(message, folder, body, score));
+        }
+
         return results;
+    }
+
+    private async Task<List<SuggestedCandidate>> KeepOnlyWinningLabelCandidatesAsync(
+        NpgsqlConnection conn,
+        int accountId,
+        int targetLabelId,
+        double targetLabelLambda,
+        Dictionary<int, float[]> centroids,
+        double priorAlpha,
+        List<SuggestedCandidate> candidates,
+        CancellationToken token)
+    {
+        if (candidates.Count == 0 || centroids.Count <= 1)
+        {
+            return candidates;
+        }
+
+        var messageIds = candidates.Select(c => c.MessageId).Distinct().ToArray();
+        var folderIds = candidates.Select(c => c.FolderId).Distinct().ToArray();
+        var labelIds = centroids.Keys.OrderBy(id => id).ToArray();
+
+        var embeddingsByMessage = await LoadMessageEmbeddingVectorsAsync(conn, messageIds, token);
+        var priorLiftMap = await LoadPriorLiftMapAsync(conn, accountId, folderIds, labelIds, priorAlpha, token);
+
+        var lambdaByLabel = new Dictionary<int, double>(labelIds.Length);
+        foreach (var labelId in labelIds)
+        {
+            if (!centroids.TryGetValue(labelId, out var labelCentroid) || labelCentroid.Length == 0)
+            {
+                continue;
+            }
+
+            // Use the same learned/cached lambda resolution for every competing label
+            // so winner selection is symmetric across label views.
+            var learned = labelId == targetLabelId
+                ? targetLabelLambda
+                : await GetLearnedFolderPriorLambdaAsync(conn, accountId, labelId, labelCentroid, priorAlpha, token);
+            lambdaByLabel[labelId] = learned;
+        }
+
+        var winners = new List<SuggestedCandidate>(candidates.Count);
+
+        foreach (var candidate in candidates)
+        {
+            if (!embeddingsByMessage.TryGetValue(candidate.MessageId, out var vectors) || vectors.Count == 0)
+            {
+                continue;
+            }
+
+            var winnerLabelId = targetLabelId;
+            var winnerScore = double.NegativeInfinity;
+
+            foreach (var labelId in labelIds)
+            {
+                if (!centroids.TryGetValue(labelId, out var centroid) || centroid.Length == 0)
+                {
+                    continue;
+                }
+
+                var bestSemantic = double.NegativeInfinity;
+                foreach (var embedding in vectors)
+                {
+                    var semantic = DotProduct(embedding, centroid);
+                    if (semantic > bestSemantic)
+                    {
+                        bestSemantic = semantic;
+                    }
+                }
+
+                var priorLift = priorLiftMap.TryGetValue((labelId, candidate.FolderId), out var lift)
+                    ? lift
+                    : 0.0d;
+                var lambda = lambdaByLabel.TryGetValue(labelId, out var cachedLambda)
+                    ? cachedLambda
+                    : DefaultFolderPriorLambda;
+                var combined = bestSemantic + (lambda * priorLift);
+
+                if (combined > winnerScore ||
+                    (Math.Abs(combined - winnerScore) < 1e-9 && labelId < winnerLabelId))
+                {
+                    winnerScore = combined;
+                    winnerLabelId = labelId;
+                }
+            }
+
+            if (winnerLabelId == targetLabelId)
+            {
+                winners.Add(candidate);
+            }
+        }
+
+        return winners;
+    }
+
+    private static async Task<Dictionary<int, List<float[]>>> LoadMessageEmbeddingVectorsAsync(
+        NpgsqlConnection conn,
+        int[] messageIds,
+        CancellationToken token)
+    {
+        var map = new Dictionary<int, List<float[]>>();
+        if (messageIds.Length == 0)
+        {
+            return map;
+        }
+
+        const string sql = @"
+SELECT me.""MessageId"", me.""Vector""::real[] AS vec
+FROM ""message_embeddings"" me
+WHERE me.""MessageId"" = ANY(@messageIds)";
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("messageIds", messageIds);
+
+        await using var reader = await cmd.ExecuteReaderAsync(token);
+        while (await reader.ReadAsync(token))
+        {
+            var messageId = reader.GetInt32(0);
+            var vec = reader.GetFieldValue<float[]>(1);
+            if (!map.TryGetValue(messageId, out var list))
+            {
+                list = [];
+                map[messageId] = list;
+            }
+
+            list.Add(vec);
+        }
+
+        return map;
+    }
+
+    private static async Task<Dictionary<(int LabelId, int FolderId), double>> LoadPriorLiftMapAsync(
+        NpgsqlConnection conn,
+        int accountId,
+        int[] folderIds,
+        int[] labelIds,
+        double priorAlpha,
+        CancellationToken token)
+    {
+        var map = new Dictionary<(int LabelId, int FolderId), double>();
+        if (folderIds.Length == 0 || labelIds.Length == 0)
+        {
+            return map;
+        }
+
+        var sql = @"
+WITH label_ids AS (
+    SELECT ml0.""LabelId"", ml0.""MessageId""
+    FROM ""message_labels"" ml0
+    JOIN ""imap_messages"" m0 ON m0.""Id"" = ml0.""MessageId""
+    JOIN ""imap_folders"" f0 ON f0.""id"" = m0.""FolderId""
+    WHERE f0.""AccountId"" = @accountId
+    UNION
+    SELECT sl0.""LabelId"", m0.""Id""
+    FROM ""sender_labels"" sl0
+    JOIN ""labels"" l0 ON l0.""Id"" = sl0.""LabelId""
+    JOIN ""imap_messages"" m0 ON sl0.""from_address"" = lower(m0.""FromAddress"")
+    JOIN ""imap_folders"" f0 ON f0.""id"" = m0.""FolderId""
+    WHERE l0.""AccountId"" = @accountId
+      AND f0.""AccountId"" = @accountId
+),
+global_total AS (
+    SELECT count(*)::double precision AS total_count
+    FROM label_ids li
+),
+global_counts AS (
+    SELECT li.""LabelId"", count(*)::double precision AS label_count
+    FROM label_ids li
+    GROUP BY li.""LabelId""
+),
+folder_counts AS (
+    SELECT m0.""FolderId"" AS folder_id, li.""LabelId"", count(*)::double precision AS label_count
+    FROM label_ids li
+    JOIN ""imap_messages"" m0 ON m0.""Id"" = li.""MessageId""
+    WHERE m0.""FolderId"" = ANY(@folderIds)
+    GROUP BY m0.""FolderId"", li.""LabelId""
+),
+folder_totals AS (
+    SELECT m0.""FolderId"" AS folder_id, count(*)::double precision AS total_count
+    FROM label_ids li
+    JOIN ""imap_messages"" m0 ON m0.""Id"" = li.""MessageId""
+    WHERE m0.""FolderId"" = ANY(@folderIds)
+    GROUP BY m0.""FolderId""
+),
+grid AS (
+    SELECT l.""Id"" AS label_id, f.folder_id
+    FROM ""labels"" l
+    CROSS JOIN (SELECT unnest(@folderIds)::integer AS folder_id) f
+    WHERE l.""AccountId"" = @accountId
+      AND l.""Id"" = ANY(@labelIds)
+)
+SELECT
+    g.label_id,
+    g.folder_id,
+    CASE
+        WHEN gt.total_count <= 0 OR ft.total_count <= 0 THEN 0.0
+        ELSE
+            ln(
+                greatest(1e-6, least(1.0 - 1e-6,
+                    ((coalesce(fc.label_count, 0.0) + (@priorAlpha * (coalesce(gc.label_count, 0.0) / gt.total_count)))
+                    / (ft.total_count + @priorAlpha))
+                ))
+                /
+                greatest(1e-6, 1.0 - least(1.0 - 1e-6,
+                    ((coalesce(fc.label_count, 0.0) + (@priorAlpha * (coalesce(gc.label_count, 0.0) / gt.total_count)))
+                    / (ft.total_count + @priorAlpha))
+                ))
+            )
+            -
+            ln(
+                greatest(1e-6, least(1.0 - 1e-6, coalesce(gc.label_count, 0.0) / gt.total_count))
+                /
+                greatest(1e-6, 1.0 - least(1.0 - 1e-6, coalesce(gc.label_count, 0.0) / gt.total_count))
+            )
+    END AS prior_lift
+FROM grid g
+JOIN folder_totals ft ON ft.folder_id = g.folder_id
+CROSS JOIN global_total gt
+LEFT JOIN global_counts gc ON gc.""LabelId"" = g.label_id
+LEFT JOIN folder_counts fc ON fc.folder_id = g.folder_id AND fc.""LabelId"" = g.label_id";
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("accountId", accountId);
+        cmd.Parameters.AddWithValue("folderIds", folderIds);
+        cmd.Parameters.AddWithValue("labelIds", labelIds);
+        cmd.Parameters.AddWithValue("priorAlpha", priorAlpha);
+
+        await using var reader = await cmd.ExecuteReaderAsync(token);
+        while (await reader.ReadAsync(token))
+        {
+            var labelId = reader.GetInt32(0);
+            var folderId = reader.GetInt32(1);
+            var priorLift = reader.GetDouble(2);
+            map[(labelId, folderId)] = priorLift;
+        }
+
+        return map;
+    }
+
+    private static double DotProduct(float[] a, float[] b)
+    {
+        var len = Math.Min(a.Length, b.Length);
+        double sum = 0.0d;
+        for (var i = 0; i < len; i++)
+        {
+            sum += a[i] * b[i];
+        }
+
+        return sum;
     }
 
     private async Task<double> GetLearnedFolderPriorLambdaAsync(
