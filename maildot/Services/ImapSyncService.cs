@@ -2372,6 +2372,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         DateTimeOffset? sinceUtc, CancellationToken token)
     {
         const int limit = 20;
+        const double folderPriorAlpha = 24.0d;
+        const double folderPriorLambda = 0.35d;
 
         var connString = BuildConnectionString(db);
         await using var conn = new NpgsqlConnection(connString);
@@ -2384,6 +2386,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         }
 
         var centroidLiteral = BuildVectorLiteral(centroidArr);
+        var scoreExpr = $@"ml.""Vector"" <#> '{centroidLiteral}'";
         var sinceClause = sinceUtc != null ? @"AND m.""ReceivedUtc"" >= @p0" : string.Empty;
 
         var otherCentroids = new List<float[]>();
@@ -2404,16 +2407,78 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         foreach (var other in otherCentroids)
         {
             var otherLiteral = BuildVectorLiteral(other);
-            betterFilters.Add($@"ml.""Vector"" <#> '{centroidLiteral}' <= ml.""Vector"" <#> '{otherLiteral}'");
+            betterFilters.Add($@"{scoreExpr} <= ml.""Vector"" <#> '{otherLiteral}'");
         }
 
         var dominanceClause = betterFilters.Count > 0 ? "AND " + string.Join(" AND ", betterFilters) : string.Empty;
 
         var sql = $@"
-SELECT m.""Id"", m.""ImapUid"", m.""FolderId"", m.""ReceivedUtc"", ml.""Vector"" <#> '{centroidLiteral}' AS score
+WITH label_ids AS (
+    SELECT ml0.""LabelId"", ml0.""MessageId""
+    FROM ""message_labels"" ml0
+    JOIN ""imap_messages"" m0 ON m0.""Id"" = ml0.""MessageId""
+    JOIN ""imap_folders"" f0 ON f0.""id"" = m0.""FolderId""
+    WHERE f0.""AccountId"" = @accountId
+    UNION
+    SELECT sl0.""LabelId"", m0.""Id""
+    FROM ""sender_labels"" sl0
+    JOIN ""labels"" l0 ON l0.""Id"" = sl0.""LabelId""
+    JOIN ""imap_messages"" m0 ON sl0.""from_address"" = lower(m0.""FromAddress"")
+    JOIN ""imap_folders"" f0 ON f0.""id"" = m0.""FolderId""
+    WHERE l0.""AccountId"" = @accountId
+      AND f0.""AccountId"" = @accountId
+),
+global_stats AS (
+    SELECT
+        count(*)::double precision AS total_count,
+        count(*) FILTER (WHERE li.""LabelId"" = @labelId)::double precision AS label_count
+    FROM label_ids li
+),
+folder_stats AS (
+    SELECT
+        m0.""FolderId"" AS folder_id,
+        count(*)::double precision AS total_count,
+        count(*) FILTER (WHERE li.""LabelId"" = @labelId)::double precision AS label_count
+    FROM label_ids li
+    JOIN ""imap_messages"" m0 ON m0.""Id"" = li.""MessageId""
+    GROUP BY m0.""FolderId""
+),
+prior_scores AS (
+    SELECT
+        fs.folder_id,
+        CASE
+            WHEN gs.total_count <= 0 OR fs.total_count <= 0 THEN 0.0
+            ELSE
+                ln(
+                    greatest(1e-6, least(1.0 - 1e-6,
+                        ((fs.label_count + (@priorAlpha * (gs.label_count / gs.total_count))) / (fs.total_count + @priorAlpha))
+                    ))
+                    /
+                    greatest(1e-6, 1.0 - least(1.0 - 1e-6,
+                        ((fs.label_count + (@priorAlpha * (gs.label_count / gs.total_count))) / (fs.total_count + @priorAlpha))
+                    ))
+                )
+                -
+                ln(
+                    greatest(1e-6, least(1.0 - 1e-6, gs.label_count / gs.total_count))
+                    /
+                    greatest(1e-6, 1.0 - least(1.0 - 1e-6, gs.label_count / gs.total_count))
+                )
+        END AS prior_lift
+    FROM folder_stats fs
+    CROSS JOIN global_stats gs
+)
+SELECT
+    m.""Id"",
+    m.""ImapUid"",
+    m.""FolderId"",
+    m.""ReceivedUtc"",
+    {scoreExpr} AS score,
+    (-({scoreExpr}) + (@priorLambda * coalesce(ps.prior_lift, 0.0))) AS rank
 FROM ""message_embeddings"" ml
 JOIN ""imap_messages"" m ON m.""Id"" = ml.""MessageId""
 JOIN ""imap_folders"" f ON f.""id"" = m.""FolderId""
+LEFT JOIN prior_scores ps ON ps.folder_id = m.""FolderId""
 WHERE NOT EXISTS (SELECT 1 FROM ""message_labels"" ml2 WHERE ml2.""MessageId"" = m.""Id"")
   AND NOT EXISTS (
       SELECT 1
@@ -2422,9 +2487,10 @@ WHERE NOT EXISTS (SELECT 1 FROM ""message_labels"" ml2 WHERE ml2.""MessageId"" =
       WHERE lower(sl.""from_address"") = lower(m.""FromAddress"")
         AND l.""AccountId"" = @accountId)
   AND f.""AccountId"" = @accountId
+  AND {scoreExpr} < 0.0
 {sinceClause}
 {dominanceClause}
-ORDER BY score
+ORDER BY rank DESC, score ASC
 LIMIT {limit}";
 
         var results = new List<SuggestedResult>();
@@ -2432,6 +2498,9 @@ LIMIT {limit}";
         await using (var cmd = new NpgsqlCommand(sql, conn))
         {
             cmd.Parameters.AddWithValue("accountId", _settings.Id);
+            cmd.Parameters.AddWithValue("labelId", labelId);
+            cmd.Parameters.AddWithValue("priorAlpha", folderPriorAlpha);
+            cmd.Parameters.AddWithValue("priorLambda", folderPriorLambda);
             if (sinceUtc != null)
             {
                 cmd.Parameters.AddWithValue("p0", sinceUtc);
@@ -2445,7 +2514,6 @@ LIMIT {limit}";
             while (await reader.ReadAsync(token))
             {
                 var score = reader.GetDouble(reader.GetOrdinal("score"));
-                if (score >= 0.0d) break;
                 var id = reader.GetInt32(0);
                 var folderId = reader.GetInt32(2);
                 messageIds.Add(id);
