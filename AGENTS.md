@@ -13,4 +13,7 @@ long-running background fetch runs with a per-call semaphore (don’t hold it).
 - Avoid destructive git operations unless explicitly requested (no `reset --hard`, no reverting user changes).
 - The `maildot` MCP server at http://localhost:3001 is tools-only.
 - Expected tools: list_accounts, list_folders, list_labels, search_messages, get_message_body, list_attachments, get_schema_snapshot.
-- when probing for MCP features here, skip resources/list and go straight to tool calls (or a tools/list endpoint if present).
+- when probing for MCP features here, skip resources/list and go straight to tool calls
+(or a tools/list endpoint if present).
+- Commit message format: short header line, body with a bit more detail,
+end with `Co-authored-by: Codex (GPT-5.3-codex) <codex@openai.com>`
