@@ -2377,7 +2377,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         await using var conn = new NpgsqlConnection(connString);
         await conn.OpenAsync(token);
 
-        var centroids = await GetCentroidsAsync(conn, token);
+        var centroids = await GetCentroidsAsync(conn, _settings!.Id, token);
         if (!centroids.TryGetValue(labelId, out var centroidArr) || centroidArr.Length == 0)
         {
             return [];
@@ -2413,8 +2413,15 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 SELECT m.""Id"", m.""ImapUid"", m.""FolderId"", m.""ReceivedUtc"", ml.""Vector"" <#> '{centroidLiteral}' AS score
 FROM ""message_embeddings"" ml
 JOIN ""imap_messages"" m ON m.""Id"" = ml.""MessageId""
+JOIN ""imap_folders"" f ON f.""id"" = m.""FolderId""
 WHERE NOT EXISTS (SELECT 1 FROM ""message_labels"" ml2 WHERE ml2.""MessageId"" = m.""Id"")
-  AND NOT EXISTS (SELECT 1 FROM ""sender_labels"" sl WHERE lower(sl.""from_address"") = lower(m.""FromAddress""))
+  AND NOT EXISTS (
+      SELECT 1
+      FROM ""sender_labels"" sl
+      JOIN ""labels"" l ON l.""Id"" = sl.""LabelId""
+      WHERE lower(sl.""from_address"") = lower(m.""FromAddress"")
+        AND l.""AccountId"" = @accountId)
+  AND f.""AccountId"" = @accountId
 {sinceClause}
 {dominanceClause}
 ORDER BY score
@@ -2424,6 +2431,7 @@ LIMIT {limit}";
 
         await using (var cmd = new NpgsqlCommand(sql, conn))
         {
+            cmd.Parameters.AddWithValue("accountId", _settings.Id);
             if (sinceUtc != null)
             {
                 cmd.Parameters.AddWithValue("p0", sinceUtc);
@@ -2482,15 +2490,23 @@ LIMIT {limit}";
         return results;
     }
 
-    private static async Task<Dictionary<int, float[]>> GetCentroidsAsync(NpgsqlConnection conn, CancellationToken token)
+    private static async Task<Dictionary<int, float[]>> GetCentroidsAsync(NpgsqlConnection conn, int accountId, CancellationToken token)
     {
         var sql = @"
 WITH label_ids AS (
-    SELECT ""LabelId"", ""MessageId"" FROM ""message_labels""
+    SELECT ml.""LabelId"", ml.""MessageId""
+    FROM ""message_labels"" ml
+    JOIN ""imap_messages"" m ON m.""Id"" = ml.""MessageId""
+    JOIN ""imap_folders"" f ON f.""id"" = m.""FolderId""
+    WHERE f.""AccountId"" = @accountId
     UNION
     SELECT sl.""LabelId"", m.""Id""
     FROM ""sender_labels"" sl
+    JOIN ""labels"" l ON l.""Id"" = sl.""LabelId""
     JOIN ""imap_messages"" m ON sl.""from_address"" = lower(m.""FromAddress"")
+    JOIN ""imap_folders"" f ON f.""id"" = m.""FolderId""
+    WHERE l.""AccountId"" = @accountId
+      AND f.""AccountId"" = @accountId
 )
 SELECT lids.""LabelId"", avg(e.""Vector"")::real[] AS centroid
 FROM ""message_embeddings"" e
@@ -2499,6 +2515,7 @@ GROUP BY lids.""LabelId""";
 
         var map = new Dictionary<int, float[]>();
         await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("accountId", accountId);
         await using var reader = await cmd.ExecuteReaderAsync(token);
         while (await reader.ReadAsync(token))
         {
