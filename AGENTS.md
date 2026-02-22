@@ -9,6 +9,8 @@ DB access assumes credentials are in the Windows credential vault.
 - Background IMAP sync writes headers to `imap_messages` and bodies/headers to `message_bodies`;
 long-running background fetch runs with a per-call semaphore (don’t hold it).
 - Tokenizer/embedding downloads cache under `%LocalAppData%\maildot\hf\` using the HuggingFace helper.
+- In Codex VS Code plugin (`Default permissions`) environments with NuGet sandboxing, offline build works with:
+  `dotnet build maildot\maildot.csproj -c Debug --no-restore /p:Restore=false /p:RestorePackages=false /p:NuGetAudit=false -v minimal`
 - Do not add Linux/macOS-only commands or bash scripts; stay PowerShell-compatible.
 - Avoid destructive git operations unless explicitly requested (no `reset --hard`, no reverting user changes).
 - The `maildot` MCP server at http://localhost:3001 is tools-only.
