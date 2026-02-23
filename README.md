@@ -7,9 +7,9 @@ This project should be regarded as proof-of-concept level. There are few feature
 ## Project priorities
 
 - **Robust, archive-quality data persistence:** We will default to PostgreSQL (rather than SQLite) to isolate our
-persistence engine from process crashes.
+  persistence engine from process crashes.
 - **No forced cloud storage:** This project will never force the user to store their emails "in the cloud."
-(PostgreSQL could be cloud-hosted if the user chooses, but we default to `localhost`.)
+  (PostgreSQL could be cloud-hosted if the user chooses, but we default to `localhost`.)
 - **Testbed for local AI inference:** I'm building out vector embeddings as a search and categorization mechanism.
 - **AI tooling connectivity**: via Model Context Protocol (MCP) to connect to local or cloud-hosted AI models.
 
@@ -28,7 +28,11 @@ persistence engine from process crashes.
 - Search: semantic search via vector embeddings, and simple sender/subject filters over archived emails.
 - Email sending (Reply, Forward) is a kludge, which delegates to the system default mailer via mailto: links,
   which have length limits and no attachments.
-- Labelling/categorization via vector embeddings centroids: works, but suggestions are a bit underwhelming.
+- Labelling/categorization, with label suggestions implemented via vector embeddings centroids, plus a learned Bayesian
+  prior lift based on the server-side folder assignment (e.g. if it's in the Junk folder, it's more likely to have the
+  Spam label)
+    * This seems fairly accurate, but there may be room for improvement (e.g. cache multiple centroids per label via
+    k-means)
 - Installer/packaging: not yet implemented. Visual Studio publish profiles for an unpackaged, framework-dependent
   deployment exist, and should work, but are mostly untested.
 - Basic MCP functionality: implemented, but needs richer message-listing and -labeling functionality at minimum
@@ -104,7 +108,7 @@ are emulated as folders when viewed via IMAP. But if your workflow is like mine,
   - If no tokenizer path is provided, it auto-downloads `onnx-community/Qwen3-Embedding-0.6B-ONNX/tokenizer.json` into
 	`%LocalAppData%\maildot\hf\`.
   - Requires PostgreSQL credentials in the vault; reads all `message_bodies`, tokenizes subject+body, and prints
-	min/mean/median/max/stddev token counts.
+	  min/mean/median/max/stddev token counts.
 - **ImapBackfill**: Console utility to re-download bodies and/or attachments from the IMAP server when local copies look
   incomplete.
   - Run: `dotnet run --project tools/ImapBackfill/ImapBackfill.csproj -p:Platform=x64 [--bodies] [--attachments] [--envelope] [--id <imapUid>]`
