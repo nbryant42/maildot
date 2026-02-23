@@ -117,3 +117,8 @@ are emulated as folders when viewed via IMAP. But if your workflow is like mine,
     downloaded, falling back to IMAP INTERNALDATE when headers are unavailable. Use `--bodies` when you need the
     `Received:` timestamps corrected. `--id` (or `--uid`) limits processing to a single IMAP UID. Requires IMAP +
     PostgreSQL credentials to be set in the Windows credential vault.
+- **SuggestionEval**: Console utility for apples-to-apples suggestion scoring accuracy on recent labeled data.
+  - Run: `dotnet run --project tools/SuggestionEval/SuggestionEval.csproj -p:Platform=x64 [--account-id <id>] [--days <n>] [--limit <n>] [--alpha <n>] [--lambda <n>] [--topk <n>] [--include-multilabel] [--sweep-lambda <v1,v2,...>]`
+  - Defaults: `--days 30`, `--limit 2000`, `--alpha 24`, `--lambda 0.35`, `--topk 3`, single-label messages only.
+  - Reports top-1/top-k accuracy, macro-F1, per-predicted-label precision, per-label precision/recall/F1/support, and top confusion pairs.
+  - `--sweep-lambda` runs a compact comparison table (top-1/top-k/macro-F1) across multiple lambda values in one pass.

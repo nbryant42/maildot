@@ -53,7 +53,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
     private static readonly TimeSpan EmbeddingActiveDelay = TimeSpan.FromSeconds(5);
     private const int EmbeddingDim = 1024;
     private const double DefaultFolderPriorAlpha = 24.0d;
-    private const double DefaultFolderPriorLambda = 0.35d;
+    private const double DefaultFolderPriorLambda = 0.10d;
     private static readonly TimeSpan FolderPriorLambdaCacheTtl = TimeSpan.FromMinutes(30);
 
     public async Task StartAsync(AccountSettings settings, string password)
