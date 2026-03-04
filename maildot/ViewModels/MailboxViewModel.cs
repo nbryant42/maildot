@@ -479,6 +479,7 @@ public sealed class EmailMessageViewModel : INotifyPropertyChanged
     private bool _isLocalOnly;
     private double _suggestionScore = Double.NegativeInfinity;
     private List<string> _labelNames = [];
+    private bool _isRead = true;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -592,6 +593,14 @@ public sealed class EmailMessageViewModel : INotifyPropertyChanged
         set => SetProperty(ref _labelNames, value ?? new List<string>(), nameof(LabelNames));
     }
 
+    public bool IsRead
+    {
+        get => _isRead;
+        set => SetProperty(ref _isRead, value, nameof(IsRead), nameof(IsUnread));
+    }
+
+    public bool IsUnread => !_isRead;
+
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 
@@ -632,6 +641,7 @@ public sealed class LabelViewModel : INotifyPropertyChanged
 {
     private string _name;
     private bool _isSelected;
+    private int _unreadCount;
 
     public LabelViewModel(int id, string name, int? parentId)
     {
@@ -655,6 +665,12 @@ public sealed class LabelViewModel : INotifyPropertyChanged
     {
         get => _isSelected;
         set => SetProperty(ref _isSelected, value);
+    }
+
+    public int UnreadCount
+    {
+        get => _unreadCount;
+        set => SetProperty(ref _unreadCount, value);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

@@ -15,6 +15,7 @@
         <conv:SuggestionToBrushConverter x:Key="SuggestionToBrushConverter" />
         <conv:LabelNamesTooltipConverter x:Key="LabelNamesTooltipConverter" />
         <conv:LabelCountToVisibilityConverter x:Key="LabelCountToVisibilityConverter" />
+        <conv:UnreadCountToFontWeightConverter x:Key="UnreadCountToFontWeightConverter" />
     </UserControl.Resources>
 
     <Grid MinWidth="1050"
@@ -79,12 +80,15 @@
                 <ListView x:Name="FoldersList"
                         ItemsSource="{Binding Folders}"
                         SelectedItem="{Binding SelectedFolder, Mode=TwoWay}"
-                        SelectionChanged="OnFolderSelectionChanged">
+                        SelectionChanged="OnFolderSelectionChanged"
+                        ContextRequested="OnFoldersContextRequested">
                     <ListView.ItemTemplate>
                         <DataTemplate x:DataType="viewModels:MailFolderViewModel">
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Stretch" Spacing="8">
                                 <TextBlock Text="{x:Bind DisplayName}" Width="150" TextTrimming="CharacterEllipsis" />
-                                <TextBlock Text="{x:Bind UnreadCount}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="{x:Bind UnreadCount}"
+                                           Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                                           FontWeight="{x:Bind UnreadCount, Converter={StaticResource UnreadCountToFontWeightConverter}}" />
                             </StackPanel>
                         </DataTemplate>
                     </ListView.ItemTemplate>
@@ -108,6 +112,7 @@
                       ItemsSource="{Binding Labels}"
                       SelectionMode="Single"
                       ItemInvoked="OnLabelInvoked"
+                      ContextRequested="OnLabelsContextRequested"
                       Margin="-16,0,0,0"
                       AllowDrop="True"
                       DragEnter="OnLabelDragEnter"
@@ -137,6 +142,10 @@
                                     <TextBlock Text="{x:Bind Name}"
                                            TextTrimming="CharacterEllipsis"
                                            HorizontalAlignment="Stretch" />
+                                    <TextBlock Text="{x:Bind UnreadCount}"
+                                           Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                                           FontWeight="SemiBold"
+                                           Visibility="{x:Bind UnreadCount, Converter={StaticResource LabelCountToVisibilityConverter}}" />
                                     <Button Click="OnAddChildLabelClicked"
                                         Tag="{x:Bind Id}"
                                         Background="Transparent"
@@ -212,10 +221,18 @@
                                     <Grid Padding="4" ColumnSpacing="12">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
-                                        <Grid Width="36" Height="36">
+                                        <Ellipse Grid.Column="0"
+                                                 Width="10"
+                                                 Height="10"
+                                                 Fill="{ThemeResource AccentFillColorDefaultBrush}"
+                                                 VerticalAlignment="Center"
+                                                 Visibility="{Binding IsUnread, Converter={StaticResource BoolToVisibilityConverter}}" />
+
+                                        <Grid Grid.Column="1" Width="36" Height="36">
                                             <Ellipse>
                                                 <Ellipse.Fill>
                                                     <SolidColorBrush Color="{x:Bind SenderColor}" />
@@ -228,7 +245,7 @@
                                                        FontWeight="SemiBold" />
                                         </Grid>
 
-                                        <StackPanel Grid.Column="1" Spacing="4">
+                                        <StackPanel Grid.Column="2" Spacing="4">
                                             <TextBlock Text="{x:Bind Subject}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                                             <TextBlock Text="{x:Bind Sender}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                             <StackPanel Orientation="Horizontal" Spacing="12">
@@ -237,7 +254,7 @@
                                             </StackPanel>
                                         </StackPanel>
 
-                                        <StackPanel Grid.Column="2"
+                                        <StackPanel Grid.Column="3"
                                                     Spacing="4"
                                                     VerticalAlignment="Top"
                                                     HorizontalAlignment="Right">
@@ -260,7 +277,7 @@
                                             </Border>
                                         </StackPanel>
 
-                                        <FontIcon Grid.Column="2"
+                                        <FontIcon Grid.Column="3"
                                                   Glyph="&#xE932;"
                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                                   VerticalAlignment="Top"

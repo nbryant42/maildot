@@ -275,6 +275,12 @@ public sealed partial class MainWindow : Window
         _dashboardView.DeleteMessageRequested += OnDeleteMessageRequested;
         _dashboardView.UnlabeledOnlyToggled -= OnUnlabeledOnlyToggled;
         _dashboardView.UnlabeledOnlyToggled += OnUnlabeledOnlyToggled;
+        _dashboardView.MessageReadStateChangeRequested -= OnMessageReadStateChangeRequested;
+        _dashboardView.MessageReadStateChangeRequested += OnMessageReadStateChangeRequested;
+        _dashboardView.FolderMarkAllReadRequested -= OnFolderMarkAllReadRequested;
+        _dashboardView.FolderMarkAllReadRequested += OnFolderMarkAllReadRequested;
+        _dashboardView.LabelMarkAllReadRequested -= OnLabelMarkAllReadRequested;
+        _dashboardView.LabelMarkAllReadRequested += OnLabelMarkAllReadRequested;
 
         _dashboardView.BindViewModel(_mailboxViewModel);
         RootContent.Content = _dashboardView;
@@ -666,6 +672,29 @@ public sealed partial class MainWindow : Window
         var attachmentsTask = _imapService.LoadImageAttachmentsAsync(folderId, messageId);
 
         var body = await bodyTask;
+
+        if (body?.Headers != null)
+        {
+            ApplyMessageHeaders(messageId, body.Headers);
+        }
+
+        if (body != null)
+        {
+            await _dashboardView.DisplayMessageContentAsync(body.Html);
+
+            if (_mailboxViewModel?.SelectedMessage is { } selected &&
+                string.Equals(selected.Id, messageId, StringComparison.Ordinal) &&
+                string.Equals(selected.FolderId, folderId, StringComparison.OrdinalIgnoreCase) &&
+                selected.IsUnread)
+            {
+                await _imapService.SetMessageReadStateAsync(folderId, messageId, true);
+            }
+        }
+        else
+        {
+            await _dashboardView.ClearMessageContentAsync();
+        }
+
         List<ImapSyncService.AttachmentContent> attachments = [];
         try
         {
@@ -676,20 +705,6 @@ public sealed partial class MainWindow : Window
             System.Diagnostics.Debug.WriteLine($"Attachment load failed: {ex}");
         }
 
-        if (body?.Headers != null)
-        {
-            ApplyMessageHeaders(messageId, body.Headers);
-        }
-
-        if (body != null)
-        {
-            await _dashboardView.DisplayMessageContentAsync(body.Html);
-        }
-        else
-        {
-            await _dashboardView.ClearMessageContentAsync();
-        }
-
         if (attachments.Count > 0)
         {
             var attachmentsHtml = BuildAttachmentsHtml(attachments);
@@ -698,6 +713,53 @@ public sealed partial class MainWindow : Window
         else
         {
             await _dashboardView.ClearAttachmentsAsync();
+        }
+    }
+
+    private async void OnMessageReadStateChangeRequested(object? sender, MessageReadStateRequest request)
+    {
+        if (_imapService == null)
+        {
+            return;
+        }
+
+        var folderId = string.IsNullOrWhiteSpace(request.Message.FolderId)
+            ? _mailboxViewModel?.SelectedFolder?.Id
+            : request.Message.FolderId;
+        if (string.IsNullOrWhiteSpace(folderId))
+        {
+            return;
+        }
+
+        await _imapService.SetMessageReadStateAsync(folderId, request.Message.Id, request.IsRead);
+    }
+
+    private async void OnFolderMarkAllReadRequested(object? sender, MailFolderViewModel folder)
+    {
+        if (_imapService == null)
+        {
+            return;
+        }
+
+        await _imapService.MarkAllReadInFolderAsync(folder.Id);
+        if (_mailboxViewModel?.SelectedFolder != null &&
+            string.Equals(_mailboxViewModel.SelectedFolder.Id, folder.Id, StringComparison.OrdinalIgnoreCase))
+        {
+            await _imapService.LoadFolderAsync(folder.Id);
+        }
+    }
+
+    private async void OnLabelMarkAllReadRequested(object? sender, LabelViewModel label)
+    {
+        if (_imapService == null)
+        {
+            return;
+        }
+
+        await _imapService.MarkAllReadInLabelAsync(label.Id);
+        if (_mailboxViewModel?.SelectedLabelId == label.Id && !_mailboxViewModel.IsSearchActive)
+        {
+            await _imapService.LoadLabelMessagesAsync(label.Id, _searchSinceUtc);
         }
     }
 

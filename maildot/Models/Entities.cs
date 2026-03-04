@@ -43,6 +43,7 @@ public sealed class ImapMessage
     public string FromAddress { get; set; } = string.Empty;
     public DateTimeOffset ReceivedUtc { get; set; }
     public string Hash { get; set; } = string.Empty;
+    public bool IsRead { get; set; } = true;
 
     public ImapFolder Folder { get; set; } = default!;
     public MessageBody Body { get; set; } = default!;

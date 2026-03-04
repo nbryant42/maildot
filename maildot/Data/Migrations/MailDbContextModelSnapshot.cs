@@ -126,6 +126,11 @@ namespace maildot.Data.Migrations
                     b.Property<long>("ImapUid")
                         .HasColumnType("bigint");
 
+                    b.Property<bool>("IsRead")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true);
+
                     b.Property<string>("MessageId")
                         .IsRequired()
                         .HasColumnType("text");

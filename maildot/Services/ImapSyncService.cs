@@ -480,7 +480,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         var subjectPattern = $"%{query}%";
         var sql = new StringBuilder();
         sql.Append("SELECT m.\"Id\", m.\"ImapUid\", m.\"Subject\", m.\"FromName\", m.\"FromAddress\", m.\"ReceivedUtc\", ");
-        sql.Append("COALESCE(b.\"Preview\", ''), f.\"FullName\" ");
+        sql.Append("COALESCE(b.\"Preview\", ''), f.\"FullName\", m.\"IsRead\" ");
         sql.Append("FROM imap_messages m ");
         sql.Append("JOIN imap_folders f ON f.id = m.\"FolderId\" ");
         sql.Append("LEFT JOIN message_bodies b ON b.\"MessageId\" = m.\"Id\" ");
@@ -509,6 +509,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             var fromAddress = TextCleaner.CleanNullable(reader.GetString(4)) ?? string.Empty;
             var preview = TextCleaner.CleanNullable(reader.IsDBNull(6) ? string.Empty : reader.GetString(6)) ?? string.Empty;
             var folderFullName = TextCleaner.CleanNullable(reader.GetString(7)) ?? string.Empty;
+            var isRead = reader.GetBoolean(8);
 
             results.Add(new SearchResult(
                 MessageId: reader.GetInt32(0),
@@ -519,6 +520,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 ReceivedUtc: reader.GetFieldValue<DateTimeOffset>(5),
                 Preview: preview,
                 FolderFullName: folderFullName,
+                IsRead: isRead,
                 Score: 0,
                 Priority: SubjectPriority));
         }
@@ -546,7 +548,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
         var sql = new StringBuilder();
         sql.Append("SELECT m.\"Id\", m.\"ImapUid\", m.\"Subject\", m.\"FromName\", m.\"FromAddress\", m.\"ReceivedUtc\", ");
-        sql.Append("COALESCE(b.\"Preview\", ''), f.\"FullName\" ");
+        sql.Append("COALESCE(b.\"Preview\", ''), f.\"FullName\", m.\"IsRead\" ");
         sql.Append("FROM imap_messages m ");
         sql.Append("JOIN imap_folders f ON f.id = m.\"FolderId\" ");
         sql.Append("LEFT JOIN message_bodies b ON b.\"MessageId\" = m.\"Id\" ");
@@ -600,6 +602,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             var fromAddress = TextCleaner.CleanNullable(reader.GetString(4)) ?? string.Empty;
             var preview = TextCleaner.CleanNullable(reader.IsDBNull(6) ? string.Empty : reader.GetString(6)) ?? string.Empty;
             var folderFullName = TextCleaner.CleanNullable(reader.GetString(7)) ?? string.Empty;
+            var isRead = reader.GetBoolean(8);
 
             results.Add(new SearchResult(
                 MessageId: reader.GetInt32(0),
@@ -610,6 +613,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 ReceivedUtc: reader.GetFieldValue<DateTimeOffset>(5),
                 Preview: preview,
                 FolderFullName: folderFullName,
+                IsRead: isRead,
                 Score: 0,
                 Priority: SenderPriority));
         }
@@ -645,12 +649,12 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         // but for now it's performing adequately.
         var vectorSql = new StringBuilder();
         vectorSql.Append("SELECT ranked.\"MessageId\", ranked.\"ImapUid\", ranked.\"Subject\", ranked.\"FromName\", ranked.\"FromAddress\", ");
-        vectorSql.Append("ranked.\"ReceivedUtc\", ranked.\"Preview\", ranked.\"FullName\", ranked.negative_inner_product ");
+        vectorSql.Append("ranked.\"ReceivedUtc\", ranked.\"Preview\", ranked.\"FullName\", ranked.\"IsRead\", ranked.negative_inner_product ");
         vectorSql.Append("FROM ( ");
         vectorSql.Append("    SELECT DISTINCT ON (me.\"MessageId\") ");
         vectorSql.Append("           me.\"MessageId\", ");
         vectorSql.Append("           me.\"Vector\" <#> @queryVec::halfvec AS negative_inner_product, ");
-        vectorSql.Append("           m.\"ImapUid\", m.\"Subject\", m.\"FromName\", m.\"FromAddress\", m.\"ReceivedUtc\", ");
+        vectorSql.Append("           m.\"ImapUid\", m.\"Subject\", m.\"FromName\", m.\"FromAddress\", m.\"ReceivedUtc\", m.\"IsRead\", ");
         vectorSql.Append("           COALESCE(b.\"Preview\", '') AS \"Preview\", f.\"FullName\" ");
         vectorSql.Append("    FROM message_embeddings me ");
         vectorSql.Append("    JOIN imap_messages m ON m.\"Id\" = me.\"MessageId\" ");
@@ -684,7 +688,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             var fromAddress = TextCleaner.CleanNullable(reader.GetString(4)) ?? string.Empty;
             var preview = TextCleaner.CleanNullable(reader.GetString(6)) ?? string.Empty;
             var folderFullName = TextCleaner.CleanNullable(reader.GetString(7)) ?? string.Empty;
-            var negativeInnerProduct = reader.IsDBNull(8) ? double.MaxValue : reader.GetDouble(8);
+            var isRead = reader.GetBoolean(8);
+            var negativeInnerProduct = reader.IsDBNull(9) ? double.MaxValue : reader.GetDouble(9);
 
             results.Add(new SearchResult(
                 MessageId: reader.GetInt32(0),
@@ -695,6 +700,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 ReceivedUtc: reader.GetFieldValue<DateTimeOffset>(5),
                 Preview: preview,
                 FolderFullName: folderFullName,
+                IsRead: isRead,
                 Score: negativeInnerProduct,
                 Priority: VectorPriority));
         }
@@ -768,6 +774,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             SenderColor = senderColor,
             Preview = preview ?? string.Empty,
             Received = result.ReceivedUtc.LocalDateTime,
+            IsRead = result.IsRead,
             To = string.Empty,
             Cc = null,
             Bcc = null
@@ -1003,16 +1010,26 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
         await using (db)
         {
-            var folders = await db.ImapFolders
-                .AsNoTracking()
-                .Where(f => f.AccountId == _settings.Id)
-                .Select(f => new { f.FullName, f.DisplayName })
+            var folders = await (
+                    from f in db.ImapFolders.AsNoTracking()
+                    where f.AccountId == _settings.Id
+                    select new
+                    {
+                        f.FullName,
+                        f.DisplayName,
+                        UnreadCount = db.ImapMessages.Count(m => m.FolderId == f.Id && !m.IsRead)
+                    })
                 .ToListAsync(token);
 
             return folders
                 .OrderBy(f => GetFolderPriority(f.FullName))
                 .ThenBy(f => f.FullName, StringComparer.OrdinalIgnoreCase)
-                .Select(f => new MailFolderViewModel(f.FullName, string.IsNullOrWhiteSpace(f.DisplayName) ? f.FullName : f.DisplayName))
+                .Select(f => new MailFolderViewModel(
+                    f.FullName,
+                    string.IsNullOrWhiteSpace(f.DisplayName) ? f.FullName : f.DisplayName)
+                {
+                    UnreadCount = f.UnreadCount
+                })
                 .ToList();
         }
     }
@@ -1037,15 +1054,38 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 .Where(l => l.AccountId == _settings.Id)
                 .OrderBy(l => l.Name)
                 .ToListAsync(token);
+            var labelIds = entities.Select(e => e.Id).ToArray();
 
-            return BuildLabelTree(entities);
+            var explicitUnread = await (
+                    from ml in db.MessageLabels.AsNoTracking()
+                    where labelIds.Contains(ml.LabelId)
+                    join m in db.ImapMessages.AsNoTracking() on ml.MessageId equals m.Id
+                    where !m.IsRead
+                    select new { ml.LabelId, m.Id })
+                .ToListAsync(token);
+
+            var senderUnread = await (
+                    from sl in db.SenderLabels.AsNoTracking()
+                    where labelIds.Contains(sl.LabelId)
+                    join m in db.ImapMessages.AsNoTracking() on sl.FromAddress equals m.FromAddress.ToLower()
+                    join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
+                    where f.AccountId == _settings.Id && !m.IsRead
+                    select new { sl.LabelId, m.Id })
+                .ToListAsync(token);
+
+            var unreadCounts = explicitUnread
+                .Concat(senderUnread)
+                .GroupBy(x => x.LabelId)
+                .ToDictionary(g => g.Key, g => g.Select(x => x.Id).Distinct().Count());
+
+            return BuildLabelTree(entities, unreadCounts);
         }
     }
 
     private async Task<List<EmailMessageViewModel>> FetchMessagesAsync(IMailFolder folder, int startIndex, int endIndex)
     {
         var summaries = await folder.FetchAsync(startIndex, endIndex,
-            MessageSummaryItems.Envelope | MessageSummaryItems.UniqueId | MessageSummaryItems.InternalDate,
+            MessageSummaryItems.Envelope | MessageSummaryItems.UniqueId | MessageSummaryItems.InternalDate | MessageSummaryItems.Flags,
             _cts.Token);
 
         await PersistMessagesAsync(folder, summaries);
@@ -1087,6 +1127,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     SenderColor = messageColor,
                     Preview = summary.Envelope?.Subject ?? string.Empty,
                     Received = summary.InternalDate?.LocalDateTime ?? DateTimeOffset.UtcNow.LocalDateTime,
+                    IsRead = summary.Flags?.HasFlag(MessageFlags.Seen) == true,
                     To = toList,
                     Cc = string.IsNullOrWhiteSpace(ccList) ? null : ccList,
                     Bcc = string.IsNullOrWhiteSpace(bccList) ? null : bccList
@@ -1144,6 +1185,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     {
                         m.ImapUid,
                         m.MessageId,
+                        m.IsRead,
                         m.Subject,
                         m.FromName,
                         m.FromAddress,
@@ -1181,6 +1223,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     SenderColor = new Color { A = 255, R = color.R, G = color.G, B = color.B },
                     Preview = string.IsNullOrWhiteSpace(r.Preview) ? r.Subject ?? string.Empty : r.Preview!,
                     Received = r.ReceivedUtc.LocalDateTime,
+                    IsRead = r.IsRead,
                     LabelNames = []
                 };
             }).ToList();
@@ -1238,6 +1281,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     select new
                     {
                         m.ImapUid,
+                        m.IsRead,
                         m.Subject,
                         m.FromName,
                         m.FromAddress,
@@ -1265,7 +1309,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     SenderInitials = SenderInitialsHelper.From(r.FromName, r.FromAddress),
                     SenderColor = new Color { A = 255, R = color.R, G = color.G, B = color.B },
                     Preview = string.IsNullOrWhiteSpace(r.Preview) ? r.Subject ?? string.Empty : r.Preview!,
-                    Received = r.ReceivedUtc.LocalDateTime
+                    Received = r.ReceivedUtc.LocalDateTime,
+                    IsRead = r.IsRead
                 };
             }).ToList();
         }
@@ -1315,6 +1360,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     {
                         m.Id,
                         m.ImapUid,
+                        m.IsRead,
                         m.Subject,
                         m.FromName,
                         m.FromAddress,
@@ -1363,7 +1409,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     SenderInitials = SenderInitialsHelper.From(r.FromName, r.FromAddress),
                     SenderColor = new Color { A = 255, R = color.R, G = color.G, B = color.B },
                     Preview = string.IsNullOrWhiteSpace(r.Preview) ? r.Subject ?? string.Empty : r.Preview!,
-                    Received = r.ReceivedUtc.LocalDateTime
+                    Received = r.ReceivedUtc.LocalDateTime,
+                    IsRead = r.IsRead
                 };
 
                 if (labelMap.TryGetValue(r.Id, out var names))
@@ -1405,18 +1452,14 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 return;
             }
 
-            var existingUids = await db.ImapMessages
+            var existingByUid = await db.ImapMessages
                 .Where(m => m.FolderId == folderEntity.Id)
-                .Select(m => m.ImapUid)
-                .ToHashSetAsync(_cts.Token);
+                .ToDictionaryAsync(m => m.ImapUid, _cts.Token);
 
             foreach (var summary in summaries)
             {
                 var uid = (long)summary.UniqueId.Id;
-                if (existingUids.Contains(uid))
-                {
-                    continue;
-                }
+                var isRead = summary.Flags?.HasFlag(MessageFlags.Seen) == true;
 
                 var mailbox = summary.Envelope?.From?.OfType<MailboxAddress>().FirstOrDefault();
                 var senderName = TextCleaner.CleanNullable(mailbox?.Name) ?? string.Empty;
@@ -1431,6 +1474,17 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
                 var received = summary.InternalDate?.ToUniversalTime() ?? DateTimeOffset.UtcNow;
 
+                if (existingByUid.TryGetValue(uid, out var existing))
+                {
+                    existing.Subject = TextCleaner.CleanNullable(summary.Envelope?.Subject) ?? string.Empty;
+                    existing.FromName = senderName;
+                    existing.FromAddress = senderAddress;
+                    existing.ReceivedUtc = received;
+                    existing.IsRead = isRead;
+                    existing.Hash = $"{messageId}:{uid}";
+                    continue;
+                }
+
                 db.ImapMessages.Add(new ImapMessage
                 {
                     FolderId = folderEntity.Id,
@@ -1440,7 +1494,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     FromName = senderName,
                     FromAddress = senderAddress,
                     ReceivedUtc = received,
-                    Hash = $"{messageId}:{uid}"
+                    Hash = $"{messageId}:{uid}",
+                    IsRead = isRead
                 });
             }
 
@@ -1617,6 +1672,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         DateTimeOffset ReceivedUtc,
         string Preview,
         string FolderFullName,
+        bool IsRead,
         double Score,
         int Priority);
 
@@ -2162,7 +2218,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             FromName = senderName,
             FromAddress = senderAddress,
             ReceivedUtc = receivedUtc,
-            Hash = $"{messageId}:{uid}"
+            Hash = $"{messageId}:{uid}",
+            IsRead = true
         };
     }
 
@@ -2350,9 +2407,14 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         return result;
     }
 
-    private static List<LabelViewModel> BuildLabelTree(IEnumerable<Label> labels)
+    private static List<LabelViewModel> BuildLabelTree(IEnumerable<Label> labels, IReadOnlyDictionary<int, int>? unreadCounts = null)
     {
-        var map = labels.ToDictionary(l => l.Id, l => new LabelViewModel(l.Id, l.Name, l.ParentLabelId));
+        var map = labels.ToDictionary(l => l.Id, l =>
+        {
+            var vm = new LabelViewModel(l.Id, l.Name, l.ParentLabelId);
+            vm.UnreadCount = unreadCounts != null && unreadCounts.TryGetValue(l.Id, out var count) ? count : 0;
+            return vm;
+        });
         var roots = new List<LabelViewModel>();
 
         foreach (var label in labels)
@@ -3222,7 +3284,8 @@ GROUP BY lids.""LabelId""";
             SenderInitials = SenderInitialsHelper.From(message.FromName, message.FromAddress),
             SenderColor = messageColor,
             Preview = BuildPreview(previewSource),
-            Received = message.ReceivedUtc.LocalDateTime
+            Received = message.ReceivedUtc.LocalDateTime,
+            IsRead = message.IsRead
         };
     }
 
@@ -3707,6 +3770,212 @@ GROUP BY lids.""LabelId""";
         }
     }
 
+    public async Task<bool> SetMessageReadStateAsync(string folderFullName, string messageId, bool isRead)
+        => await SetMessageReadStateInternalAsync(folderFullName, messageId, isRead, refreshCounts: true);
+
+    private async Task<bool> SetMessageReadStateInternalAsync(string folderFullName, string messageId, bool isRead, bool refreshCounts)
+    {
+        var token = _cts.Token;
+        if (_settings == null || string.IsNullOrWhiteSpace(folderFullName) || string.IsNullOrWhiteSpace(messageId))
+        {
+            return false;
+        }
+
+        if (!long.TryParse(messageId, out var uid))
+        {
+            return false;
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return false;
+        }
+
+        var updated = false;
+
+        await using (db)
+        {
+            var folder = await db.ImapFolders
+                .AsNoTracking()
+                .FirstOrDefaultAsync(f => f.AccountId == _settings.Id && f.FullName == folderFullName, token);
+            if (folder == null)
+            {
+                return false;
+            }
+
+            var message = await db.ImapMessages
+                .FirstOrDefaultAsync(m => m.FolderId == folder.Id && m.ImapUid == uid, token);
+            if (message == null)
+            {
+                return false;
+            }
+
+            if (message.ImapUid > 0)
+            {
+                var serverResult = await TrySetMessageReadStateOnServerAsync(folderFullName, message.ImapUid, isRead, token);
+                if (serverResult == ServerReadWriteResult.Failed)
+                {
+                    return false;
+                }
+            }
+
+            if (message.IsRead != isRead)
+            {
+                message.IsRead = isRead;
+                await db.SaveChangesAsync(token);
+                updated = true;
+            }
+        }
+
+        if (updated)
+        {
+            await EnqueueAsync(() =>
+            {
+                if (_viewModel.SelectedMessage != null &&
+                    string.Equals(_viewModel.SelectedMessage.FolderId, folderFullName, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(_viewModel.SelectedMessage.Id, messageId, StringComparison.Ordinal))
+                {
+                    _viewModel.SelectedMessage.IsRead = isRead;
+                }
+
+                foreach (var visible in _viewModel.Messages)
+                {
+                    if (string.Equals(visible.FolderId, folderFullName, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(visible.Id, messageId, StringComparison.Ordinal))
+                    {
+                        visible.IsRead = isRead;
+                    }
+                }
+            });
+        }
+
+        if (refreshCounts)
+        {
+            await RefreshNavigationCountsAsync(token);
+        }
+
+        return true;
+    }
+
+    public async Task<int> MarkAllReadInFolderAsync(string folderFullName)
+    {
+        var token = _cts.Token;
+        if (_settings == null || string.IsNullOrWhiteSpace(folderFullName))
+        {
+            return 0;
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return 0;
+        }
+
+        List<long> unreadUids;
+        await using (db)
+        {
+            var folder = await db.ImapFolders
+                .AsNoTracking()
+                .FirstOrDefaultAsync(f => f.AccountId == _settings.Id && f.FullName == folderFullName, token);
+            if (folder == null)
+            {
+                return 0;
+            }
+
+            unreadUids = await db.ImapMessages
+                .AsNoTracking()
+                .Where(m => m.FolderId == folder.Id && !m.IsRead)
+                .Select(m => m.ImapUid)
+                .ToListAsync(token);
+        }
+
+        var updatedCount = 0;
+        foreach (var uid in unreadUids)
+        {
+            var updated = await SetMessageReadStateInternalAsync(
+                folderFullName,
+                uid.ToString(CultureInfo.InvariantCulture),
+                true,
+                refreshCounts: false);
+            if (updated)
+            {
+                updatedCount++;
+            }
+        }
+
+        await RefreshNavigationCountsAsync(token);
+        return updatedCount;
+    }
+
+    public async Task<int> MarkAllReadInLabelAsync(int labelId)
+    {
+        var token = _cts.Token;
+        if (_settings == null)
+        {
+            return 0;
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return 0;
+        }
+
+        List<(string FolderFullName, long ImapUid)> targets;
+        await using (db)
+        {
+            var label = await db.Labels
+                .AsNoTracking()
+                .FirstOrDefaultAsync(l => l.Id == labelId && l.AccountId == _settings.Id, token);
+            if (label == null)
+            {
+                return 0;
+            }
+
+            var explicitTargets = await (
+                    from ml in db.MessageLabels.AsNoTracking()
+                    where ml.LabelId == labelId
+                    join m in db.ImapMessages.AsNoTracking() on ml.MessageId equals m.Id
+                    join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
+                    where f.AccountId == _settings.Id && !m.IsRead
+                    select new { f.FullName, m.ImapUid })
+                .ToListAsync(token);
+
+            var senderTargets = await (
+                    from sl in db.SenderLabels.AsNoTracking()
+                    where sl.LabelId == labelId
+                    join m in db.ImapMessages.AsNoTracking() on sl.FromAddress equals m.FromAddress.ToLower()
+                    join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
+                    where f.AccountId == _settings.Id && !m.IsRead
+                    select new { f.FullName, m.ImapUid })
+                .ToListAsync(token);
+
+            targets = explicitTargets
+                .Concat(senderTargets)
+                .GroupBy(x => (x.FullName, x.ImapUid))
+                .Select(g => g.Key)
+                .ToList();
+        }
+
+        var updatedCount = 0;
+        foreach (var target in targets)
+        {
+            var updated = await SetMessageReadStateInternalAsync(
+                target.FolderFullName,
+                target.ImapUid.ToString(CultureInfo.InvariantCulture),
+                true,
+                refreshCounts: false);
+            if (updated)
+            {
+                updatedCount++;
+            }
+        }
+
+        await RefreshNavigationCountsAsync(token);
+        return updatedCount;
+    }
+
     public async Task<bool> FolderExistsAsync(string folderFullName)
     {
         if (string.IsNullOrWhiteSpace(folderFullName))
@@ -3744,6 +4013,109 @@ GROUP BY lids.""LabelId""";
         {
             _semaphore.Release();
         }
+    }
+
+    private enum ServerReadWriteResult
+    {
+        Success,
+        NotFound,
+        Failed
+    }
+
+    private async Task<ServerReadWriteResult> TrySetMessageReadStateOnServerAsync(
+        string folderFullName,
+        long uid,
+        bool isRead,
+        CancellationToken token)
+    {
+        IMailFolder? folder = null;
+
+        if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
+        {
+            Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
+            return ServerReadWriteResult.Failed;
+        }
+
+        try
+        {
+            if (_client == null)
+            {
+                return ServerReadWriteResult.Failed;
+            }
+
+            if (!_folderCache.TryGetValue(folderFullName, out folder))
+            {
+                return ServerReadWriteResult.Failed;
+            }
+
+            if (!folder.IsOpen)
+            {
+                await folder.OpenAsync(FolderAccess.ReadWrite, token);
+            }
+
+            var uniqueId = new UniqueId((uint)uid);
+            if (isRead)
+            {
+                await folder.AddFlagsAsync(uniqueId, MessageFlags.Seen, true, token);
+            }
+            else
+            {
+                await folder.RemoveFlagsAsync(uniqueId, MessageFlags.Seen, true, token);
+            }
+
+            return ServerReadWriteResult.Success;
+        }
+        catch (MessageNotFoundException)
+        {
+            return ServerReadWriteResult.NotFound;
+        }
+        catch (ImapCommandException ex) when (
+            ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase) ||
+            ex.Message.Contains("no such message", StringComparison.OrdinalIgnoreCase))
+        {
+            return ServerReadWriteResult.NotFound;
+        }
+        catch
+        {
+            return ServerReadWriteResult.Failed;
+        }
+        finally
+        {
+            try
+            {
+                if (folder?.IsOpen == true)
+                {
+                    await folder.CloseAsync(false, token);
+                }
+            }
+            catch
+            {
+            }
+
+            _semaphore.Release();
+        }
+    }
+
+    private async Task RefreshNavigationCountsAsync(CancellationToken token)
+    {
+        IReadOnlyList<MailFolderViewModel> folders;
+        try
+        {
+            folders = _client != null && _client.IsConnected
+                ? await LoadFoldersAsync(token)
+                : await LoadFoldersFromDatabaseAsync(token);
+        }
+        catch
+        {
+            folders = await LoadFoldersFromDatabaseAsync(token);
+        }
+        var labels = await LoadLabelsAsync(token);
+
+        await EnqueueAsync(() =>
+        {
+            _viewModel.SetFolders(folders);
+            _viewModel.SetLabels(labels);
+        });
     }
 
     private async Task<(bool Moved, long? TargetUid)> TryMoveMessageOnServerAsync(

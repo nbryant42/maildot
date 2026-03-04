@@ -17,6 +17,8 @@ public sealed partial class ImapDashboardView : UserControl
     private bool _hasRequestedMore;
     private bool _attachmentsInitialized;
     private EmailMessageViewModel? _contextMenuMessage;
+    private MailFolderViewModel? _contextMenuFolder;
+    private LabelViewModel? _contextMenuLabel;
 
     public TreeView LabelsTreeControl => LabelsTree;
 
@@ -44,6 +46,9 @@ public sealed partial class ImapDashboardView : UserControl
     public event EventHandler<EmailMessageViewModel>? LabelSenderRequested;
     public event EventHandler<EmailMessageViewModel>? DeleteMessageRequested;
     public event EventHandler<bool>? UnlabeledOnlyToggled;
+    public event EventHandler<MessageReadStateRequest>? MessageReadStateChangeRequested;
+    public event EventHandler<MailFolderViewModel>? FolderMarkAllReadRequested;
+    public event EventHandler<LabelViewModel>? LabelMarkAllReadRequested;
 
     public void BindViewModel(MailboxViewModel viewModel)
     {
@@ -384,6 +389,40 @@ public sealed partial class ImapDashboardView : UserControl
             flyout.Items.Add(new MenuFlyoutSeparator());
         }
 
+        if (_contextMenuMessage.IsRead)
+        {
+            var markUnread = new MenuFlyoutItem { Text = "Mark as unread" };
+            markUnread.Click += (_, __) =>
+            {
+                if (_contextMenuMessage != null)
+                {
+                        MessageReadStateChangeRequested?.Invoke(
+                            this,
+                            new MessageReadStateRequest(_contextMenuMessage, IsRead: false));
+                }
+            };
+            flyout.Items.Add(markUnread);
+        }
+        else
+        {
+            var markRead = new MenuFlyoutItem { Text = "Mark as read" };
+            markRead.Click += (_, __) =>
+            {
+                if (_contextMenuMessage != null)
+                {
+                    MessageReadStateChangeRequested?.Invoke(
+                        this,
+                        new MessageReadStateRequest(_contextMenuMessage, IsRead: true));
+                }
+            };
+            flyout.Items.Add(markRead);
+        }
+
+        if (inFolderView)
+        {
+            flyout.Items.Add(new MenuFlyoutSeparator());
+        }
+
         var labelSender = new MenuFlyoutItem { Text = "Label sender..." };
         labelSender.Click += (_, __) =>
         {
@@ -417,6 +456,69 @@ public sealed partial class ImapDashboardView : UserControl
         e.Handled = true;
     }
 
+    private void OnFoldersContextRequested(object sender, ContextRequestedEventArgs e)
+    {
+        _contextMenuFolder = (e.OriginalSource as FrameworkElement)?.DataContext as MailFolderViewModel
+                             ?? FoldersList.SelectedItem as MailFolderViewModel;
+        if (_contextMenuFolder == null)
+        {
+            return;
+        }
+
+        var flyout = new MenuFlyout();
+        var markAllRead = new MenuFlyoutItem { Text = "Mark all as read" };
+        markAllRead.Click += (_, __) =>
+        {
+            if (_contextMenuFolder != null)
+            {
+                FolderMarkAllReadRequested?.Invoke(this, _contextMenuFolder);
+            }
+        };
+        flyout.Items.Add(markAllRead);
+
+        if (e.TryGetPosition(FoldersList, out var point))
+        {
+            flyout.ShowAt(FoldersList, point);
+        }
+        else
+        {
+            flyout.ShowAt(FoldersList);
+        }
+
+        e.Handled = true;
+    }
+
+    private void OnLabelsContextRequested(object sender, ContextRequestedEventArgs e)
+    {
+        _contextMenuLabel = (e.OriginalSource as FrameworkElement)?.DataContext as LabelViewModel;
+        if (_contextMenuLabel == null)
+        {
+            return;
+        }
+
+        var flyout = new MenuFlyout();
+        var markAllRead = new MenuFlyoutItem { Text = "Mark all as read" };
+        markAllRead.Click += (_, __) =>
+        {
+            if (_contextMenuLabel != null)
+            {
+                LabelMarkAllReadRequested?.Invoke(this, _contextMenuLabel);
+            }
+        };
+        flyout.Items.Add(markAllRead);
+
+        if (e.TryGetPosition(LabelsTree, out var point))
+        {
+            flyout.ShowAt(LabelsTree, point);
+        }
+        else
+        {
+            flyout.ShowAt(LabelsTree);
+        }
+
+        e.Handled = true;
+    }
+
     private static void SetLabelDragOperation(DragEventArgs e)
     {
         if (e.DataView.Contains(StandardDataFormats.Text))
@@ -431,3 +533,4 @@ public sealed partial class ImapDashboardView : UserControl
 }
 
 public sealed record LabelDropRequest(int LabelId, string? MessageId, string? FolderId);
+public sealed record MessageReadStateRequest(EmailMessageViewModel Message, bool IsRead);
