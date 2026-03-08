@@ -957,6 +957,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
     private async Task<IReadOnlyList<MailFolderViewModel>> LoadFoldersAsync(CancellationToken token)
     {
         var folders = new List<MailFolderViewModel>();
+        var seenFolderNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (_client == null)
         {
             return folders;
@@ -966,6 +967,11 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
         async Task AddFolderAsync(IMailFolder folder)
         {
+            if (!seenFolderNames.Add(folder.FullName))
+            {
+                return;
+            }
+
             await folder.StatusAsync(StatusItems.Unread | StatusItems.Count, token);
             _folderCache[folder.FullName] = folder;
 
@@ -3852,7 +3858,7 @@ GROUP BY lids.""LabelId""";
 
         if (refreshCounts)
         {
-            await RefreshNavigationCountsAsync(token);
+            await RefreshUnreadCountsForReadStateChangeAsync(folderFullName, token);
         }
 
         return true;
@@ -3902,7 +3908,7 @@ GROUP BY lids.""LabelId""";
         Debug.WriteLine($"[MarkAllRead][Service] batch-start folder={folderFullName} serverUnreadCount={serverUnreadUids.Count}");
         var updatedCount = await MarkEntireFolderReadBatchAsync(folderFullName, folderId, serverUnreadUids, token);
         Debug.WriteLine($"[MarkAllRead][Service] batch-finished folder={folderFullName} updatedCount={updatedCount}");
-        await RefreshNavigationCountsAsync(token);
+        await RefreshUnreadCountsForReadStateChangeAsync(folderFullName, token);
         Debug.WriteLine($"[MarkAllRead][Service] refresh-finished folder={folderFullName}");
         return updatedCount;
     }
@@ -3958,6 +3964,11 @@ GROUP BY lids.""LabelId""";
         }
 
         var updatedCount = 0;
+        var affectedFolderNames = targets
+            .Select(t => t.FolderFullName)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
         foreach (var folderGroup in targets.GroupBy(t => (t.FolderId, t.FolderFullName)))
         {
             var batchCount = await MarkMessagesReadBatchAsync(
@@ -3968,7 +3979,8 @@ GROUP BY lids.""LabelId""";
             updatedCount += batchCount;
         }
 
-        await RefreshNavigationCountsAsync(token);
+        await RefreshFolderUnreadCountsAsync(affectedFolderNames, token);
+        await RefreshLabelUnreadCountsAsync(token);
         return updatedCount;
     }
 
@@ -4401,6 +4413,116 @@ GROUP BY lids.""LabelId""";
             _viewModel.SetFolders(folders);
             _viewModel.SetLabels(labels);
         });
+    }
+
+    private async Task RefreshUnreadCountsForReadStateChangeAsync(string? folderFullName, CancellationToken token)
+    {
+        if (!string.IsNullOrWhiteSpace(folderFullName))
+        {
+            await RefreshFolderUnreadCountAsync(folderFullName, token);
+        }
+
+        await RefreshLabelUnreadCountsAsync(token);
+    }
+
+    private async Task RefreshFolderUnreadCountsAsync(IEnumerable<string> folderFullNames, CancellationToken token)
+    {
+        var names = folderFullNames
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var name in names)
+        {
+            await RefreshFolderUnreadCountAsync(name, token);
+        }
+    }
+
+    private async Task RefreshFolderUnreadCountAsync(string folderFullName, CancellationToken token)
+    {
+        if (_settings == null || string.IsNullOrWhiteSpace(folderFullName))
+        {
+            return;
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return;
+        }
+
+        await using (db)
+        {
+            var folderCount = await (
+                    from f in db.ImapFolders.AsNoTracking()
+                    where f.AccountId == _settings.Id && f.FullName == folderFullName
+                    select db.ImapMessages.Count(m => m.FolderId == f.Id && !m.IsRead))
+                .FirstOrDefaultAsync(token);
+
+            await EnqueueAsync(() => _viewModel.UpdateFolderCounts(folderFullName, folderCount));
+        }
+    }
+
+    private async Task RefreshLabelUnreadCountsAsync(CancellationToken token)
+    {
+        if (_settings == null)
+        {
+            return;
+        }
+
+        var counts = await LoadLabelUnreadCountsAsync(token);
+        await EnqueueAsync(() => _viewModel.UpdateAllLabelUnreadCounts(counts));
+    }
+
+    private async Task<Dictionary<int, int>> LoadLabelUnreadCountsAsync(CancellationToken token)
+    {
+        var result = new Dictionary<int, int>();
+        if (_settings == null)
+        {
+            return result;
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return result;
+        }
+
+        await using (db)
+        {
+            var labelIds = await db.Labels
+                .AsNoTracking()
+                .Where(l => l.AccountId == _settings.Id)
+                .Select(l => l.Id)
+                .ToArrayAsync(token);
+
+            if (labelIds.Length == 0)
+            {
+                return result;
+            }
+
+            var explicitUnread = await (
+                    from ml in db.MessageLabels.AsNoTracking()
+                    where labelIds.Contains(ml.LabelId)
+                    join m in db.ImapMessages.AsNoTracking() on ml.MessageId equals m.Id
+                    where !m.IsRead
+                    select new { ml.LabelId, m.Id })
+                .ToListAsync(token);
+
+            var senderUnread = await (
+                    from sl in db.SenderLabels.AsNoTracking()
+                    where labelIds.Contains(sl.LabelId)
+                    join m in db.ImapMessages.AsNoTracking() on sl.FromAddress equals m.FromAddress.ToLower()
+                    join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
+                    where f.AccountId == _settings.Id && !m.IsRead
+                    select new { sl.LabelId, m.Id })
+                .ToListAsync(token);
+
+            return explicitUnread
+                .Concat(senderUnread)
+                .GroupBy(x => x.LabelId)
+                .ToDictionary(g => g.Key, g => g.Select(x => x.Id).Distinct().Count());
+        }
     }
 
     private async Task<(bool Moved, long? TargetUid)> TryMoveMessageOnServerAsync(

@@ -16,6 +16,7 @@
         <conv:LabelNamesTooltipConverter x:Key="LabelNamesTooltipConverter" />
         <conv:LabelCountToVisibilityConverter x:Key="LabelCountToVisibilityConverter" />
         <conv:UnreadCountToFontWeightConverter x:Key="UnreadCountToFontWeightConverter" />
+        <conv:BoolToOpacityConverter x:Key="BoolToOpacityConverter" />
     </UserControl.Resources>
 
     <Grid MinWidth="1050"
@@ -86,9 +87,9 @@
                         <DataTemplate x:DataType="viewModels:MailFolderViewModel">
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Stretch" Spacing="8">
                                 <TextBlock Text="{x:Bind DisplayName}" Width="150" TextTrimming="CharacterEllipsis" />
-                                <TextBlock Text="{x:Bind UnreadCount}"
+                                <TextBlock Text="{x:Bind UnreadCount, Mode=OneWay}"
                                            Foreground="{ThemeResource TextFillColorPrimaryBrush}"
-                                           FontWeight="{x:Bind UnreadCount, Converter={StaticResource UnreadCountToFontWeightConverter}}" />
+                                           FontWeight="{x:Bind UnreadCount, Mode=OneWay, Converter={StaticResource UnreadCountToFontWeightConverter}}" />
                             </StackPanel>
                         </DataTemplate>
                     </ListView.ItemTemplate>
@@ -142,10 +143,10 @@
                                     <TextBlock Text="{x:Bind Name}"
                                            TextTrimming="CharacterEllipsis"
                                            HorizontalAlignment="Stretch" />
-                                    <TextBlock Text="{x:Bind UnreadCount}"
+                                    <TextBlock Text="{x:Bind UnreadCount, Mode=OneWay}"
                                            Foreground="{ThemeResource TextFillColorPrimaryBrush}"
                                            FontWeight="SemiBold"
-                                           Visibility="{x:Bind UnreadCount, Converter={StaticResource LabelCountToVisibilityConverter}}" />
+                                           Visibility="{x:Bind UnreadCount, Mode=OneWay, Converter={StaticResource LabelCountToVisibilityConverter}}" />
                                     <Button Click="OnAddChildLabelClicked"
                                         Tag="{x:Bind Id}"
                                         Background="Transparent"
@@ -230,7 +231,7 @@
                                                  Height="10"
                                                  Fill="{ThemeResource AccentFillColorDefaultBrush}"
                                                  VerticalAlignment="Center"
-                                                 Visibility="{Binding IsUnread, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                                 Opacity="{Binding IsUnread, Converter={StaticResource BoolToOpacityConverter}}" />
 
                                         <Grid Grid.Column="1" Width="36" Height="36">
                                             <Ellipse>

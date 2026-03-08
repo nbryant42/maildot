@@ -418,10 +418,36 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
 
     public void UpdateFolderCounts(string folderId, int unreadCount)
     {
-        var folder = Folders.FirstOrDefault(f => f.Id == folderId);
-        if (folder != null)
+        foreach (var folder in Folders.Where(f => f.Id == folderId))
         {
             folder.UnreadCount = unreadCount;
+        }
+    }
+
+    public void UpdateLabelUnreadCount(int labelId, int unreadCount)
+    {
+        var label = FindLabel(labelId);
+        if (label != null)
+        {
+            label.UnreadCount = unreadCount;
+        }
+    }
+
+    public void UpdateAllLabelUnreadCounts(IReadOnlyDictionary<int, int> counts)
+    {
+        foreach (var root in Labels)
+        {
+            UpdateLabelUnreadCountsRecursive(root, counts);
+        }
+    }
+
+    private static void UpdateLabelUnreadCountsRecursive(LabelViewModel label, IReadOnlyDictionary<int, int> counts)
+    {
+        label.UnreadCount = counts.TryGetValue(label.Id, out var unreadCount) ? unreadCount : 0;
+
+        foreach (var child in label.Children)
+        {
+            UpdateLabelUnreadCountsRecursive(child, counts);
         }
     }
 
