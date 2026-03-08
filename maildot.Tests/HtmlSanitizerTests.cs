@@ -101,6 +101,17 @@ public class HtmlSanitizerTests
     }
 
     [Fact]
+    public void RemovesBackgroundImageSetValues()
+    {
+        var html = "<div style=\"color:#222; background:image-set('https://example.com/tracker.png' 1x)\">Hello</div>";
+        var result = HtmlSanitizer.Sanitize(html);
+
+        Assert.Contains("style=\"color:#222\"", result.Html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("image-set", result.Html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("example.com", result.Html, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void RemovesStyleAttributeWhenAllDeclarationsAreUnsafe()
     {
         var html = "<div style=\"background:url(https://example.com/tracker.png)\">Hello</div>";

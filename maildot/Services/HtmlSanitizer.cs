@@ -107,7 +107,6 @@ public static class HtmlSanitizer
             "border-collapse",
             "border-spacing",
             "vertical-align",
-            "background",
             "background-repeat",
             "background-position",
             "background-size"
@@ -291,6 +290,8 @@ public static class HtmlSanitizer
         }
 
         if (ContainsCssToken(value, "url(") ||
+            ContainsCssToken(value, "image-set(") ||
+            ContainsCssToken(value, "image(") ||
             ContainsCssToken(value, "@import") ||
             ContainsCssToken(value, "expression(") ||
             ContainsCssToken(value, "behavior(") ||
