@@ -51,7 +51,7 @@ public class MailboxViewModelReadStateTests
     {
         var converter = new BoolToOpacityConverter();
 
-        Assert.Equal(1.0d, converter.Convert(true, typeof(double), null, string.Empty));
-        Assert.Equal(0.0d, converter.Convert(false, typeof(double), null, string.Empty));
+        Assert.Equal(1.0d, converter.Convert(true, typeof(double), string.Empty, string.Empty));
+        Assert.Equal(0.0d, converter.Convert(false, typeof(double), string.Empty, string.Empty));
     }
 }

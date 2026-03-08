@@ -108,7 +108,7 @@ public class ClusteringTests : IClassFixture<Fixture>
             .Where(m => m.Folder.FullName == "INBOX")
             .OrderByDescending(m => m.ReceivedUtc)
             //.Take(1000)
-            .ToListAsync();
+            .ToListAsync(TestContext.Current.CancellationToken);
 
         if (messages.Count == 0)
         {
