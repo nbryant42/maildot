@@ -56,9 +56,9 @@ public sealed partial class ImapDashboardView : UserControl
         DataContext = viewModel;
     }
 
-    private void OnFolderSelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void OnFolderInvoked(TreeView sender, TreeViewItemInvokedEventArgs args)
     {
-        if (FoldersList.SelectedItem is MailFolderViewModel folder)
+        if (args.InvokedItem is MailFolderViewModel folder)
         {
             FolderSelected?.Invoke(this, folder);
             _hasRequestedMore = false;
@@ -460,7 +460,7 @@ public sealed partial class ImapDashboardView : UserControl
     private void OnFoldersContextRequested(object sender, ContextRequestedEventArgs e)
     {
         _contextMenuFolder = (e.OriginalSource as FrameworkElement)?.DataContext as MailFolderViewModel
-                             ?? FoldersList.SelectedItem as MailFolderViewModel;
+                             ?? FoldersTree.SelectedItem as MailFolderViewModel;
         if (_contextMenuFolder == null)
         {
             return;
@@ -478,13 +478,13 @@ public sealed partial class ImapDashboardView : UserControl
         };
         flyout.Items.Add(markAllRead);
 
-        if (e.TryGetPosition(FoldersList, out var point))
+        if (e.TryGetPosition(FoldersTree, out var point))
         {
-            flyout.ShowAt(FoldersList, point);
+            flyout.ShowAt(FoldersTree, point);
         }
         else
         {
-            flyout.ShowAt(FoldersList);
+            flyout.ShowAt(FoldersTree);
         }
 
         e.Handled = true;
@@ -536,3 +536,4 @@ public sealed partial class ImapDashboardView : UserControl
 
 public sealed record LabelDropRequest(int LabelId, string? MessageId, string? FolderId);
 public sealed record MessageReadStateRequest(EmailMessageViewModel Message, bool IsRead);
+

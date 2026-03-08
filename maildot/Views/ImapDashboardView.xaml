@@ -78,22 +78,39 @@
                     </ListView>
                 </StackPanel>
                 <TextBlock Text="Folders" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,12" />
-                <ListView x:Name="FoldersList"
-                        ItemsSource="{Binding Folders}"
-                        SelectedItem="{Binding SelectedFolder, Mode=TwoWay}"
-                        SelectionChanged="OnFolderSelectionChanged"
-                        ContextRequested="OnFoldersContextRequested">
-                    <ListView.ItemTemplate>
+                <TreeView x:Name="FoldersTree"
+                      ItemsSource="{Binding Folders}"
+                      SelectionMode="Single"
+                      ItemInvoked="OnFolderInvoked"
+                      ContextRequested="OnFoldersContextRequested">
+                    <TreeView.ItemContainerStyle>
+                        <Style TargetType="TreeViewItem">
+                            <Setter Property="Padding" Value="0" />
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                        </Style>
+                    </TreeView.ItemContainerStyle>
+                    <TreeView.ItemTemplate>
                         <DataTemplate x:DataType="viewModels:MailFolderViewModel">
-                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Stretch" Spacing="8">
-                                <TextBlock Text="{x:Bind DisplayName}" Width="150" TextTrimming="CharacterEllipsis" />
-                                <TextBlock Text="{x:Bind UnreadCount, Mode=OneWay}"
+                            <TreeViewItem>
+                                <Grid ColumnSpacing="8" HorizontalAlignment="Stretch">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0"
+                                           Text="{x:Bind DisplayName}"
+                                           TextTrimming="CharacterEllipsis"
+                                           HorizontalAlignment="Stretch" />
+                                    <TextBlock Grid.Column="1"
+                                           Text="{x:Bind UnreadCount, Mode=OneWay}"
                                            Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                                           HorizontalAlignment="Right"
                                            FontWeight="{x:Bind UnreadCount, Mode=OneWay, Converter={StaticResource UnreadCountToFontWeightConverter}}" />
-                            </StackPanel>
+                                </Grid>
+                            </TreeViewItem>
                         </DataTemplate>
-                    </ListView.ItemTemplate>
-                </ListView>
+                    </TreeView.ItemTemplate>
+                </TreeView>
 
                 <Grid Margin="0,16,0,8" ColumnSpacing="8" VerticalAlignment="Center">
                     <Grid.ColumnDefinitions>
@@ -114,7 +131,6 @@
                       SelectionMode="Single"
                       ItemInvoked="OnLabelInvoked"
                       ContextRequested="OnLabelsContextRequested"
-                      Margin="-16,0,0,0"
                       AllowDrop="True"
                       DragEnter="OnLabelDragEnter"
                       DragOver="OnLabelDragOver"
@@ -123,6 +139,7 @@
                     <TreeView.ItemContainerStyle>
                         <Style TargetType="TreeViewItem">
                             <Setter Property="Padding" Value="0" />
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
                         </Style>
                     </TreeView.ItemContainerStyle>
                     <TreeView.ItemTemplate>
@@ -133,21 +150,30 @@
                                       DragLeave="OnLabelDragLeave"
                                       DragOver="OnLabelDragOver"
                                       Drop="OnLabelDrop">
-                                <StackPanel Orientation="Horizontal"
-                                        Spacing="6"
-                                        AllowDrop="True"
-                                        DragEnter="OnLabelDragEnter"
-                                        DragOver="OnLabelDragOver"
-                                        DragLeave="OnLabelDragLeave"
-                                        Drop="OnLabelDrop">
-                                    <TextBlock Text="{x:Bind Name}"
+                                <Grid ColumnSpacing="8"
+                                      HorizontalAlignment="Stretch"
+                                      AllowDrop="True"
+                                      DragEnter="OnLabelDragEnter"
+                                      DragOver="OnLabelDragOver"
+                                      DragLeave="OnLabelDragLeave"
+                                      Drop="OnLabelDrop">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0"
+                                           Text="{x:Bind Name}"
                                            TextTrimming="CharacterEllipsis"
                                            HorizontalAlignment="Stretch" />
-                                    <TextBlock Text="{x:Bind UnreadCount, Mode=OneWay}"
+                                    <TextBlock Grid.Column="1"
+                                           Text="{x:Bind UnreadCount, Mode=OneWay}"
                                            Foreground="{ThemeResource TextFillColorPrimaryBrush}"
                                            FontWeight="SemiBold"
+                                           HorizontalAlignment="Right"
                                            Visibility="{x:Bind UnreadCount, Mode=OneWay, Converter={StaticResource LabelCountToVisibilityConverter}}" />
-                                    <Button Click="OnAddChildLabelClicked"
+                                    <Button Grid.Column="2"
+                                        Click="OnAddChildLabelClicked"
                                         Tag="{x:Bind Id}"
                                         Background="Transparent"
                                         BorderThickness="0"
@@ -155,7 +181,7 @@
                                         ToolTipService.ToolTip="Add child label">
                                         <FontIcon Glyph="&#xE710;" FontSize="14"/>
                                     </Button>
-                                </StackPanel>
+                                </Grid>
                             </TreeViewItem>
                         </DataTemplate>
                     </TreeView.ItemTemplate>
@@ -354,3 +380,4 @@
         </Grid>
     </Grid>
 </UserControl>
+
