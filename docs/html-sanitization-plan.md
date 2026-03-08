@@ -34,6 +34,7 @@ Improve HTML email fidelity incrementally without weakening the current privacy 
    - `cellpadding`, `cellspacing`, `colspan`, `rowspan`, `bgcolor`, `border`
    - `class`, `lang`, `dir`
 5. Keep blocked-resource accounting in place.
+6. Persist a sanitizer policy version with each cached body so archived messages can be lazily re-sanitized and re-persisted when the policy changes.
 
 ## Deferred work
 

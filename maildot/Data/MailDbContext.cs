@@ -65,6 +65,7 @@ public sealed class MailDbContext : DbContext
             entity.ToTable("message_bodies");
             entity.HasKey(b => b.MessageId);
             entity.Property(b => b.Headers).HasColumnType("jsonb");
+            entity.Property(b => b.SanitizedHtmlVersion).HasDefaultValue(1);
         });
 
         modelBuilder.Entity<MessageAttachment>(entity =>

@@ -182,7 +182,6 @@ public static class McpTools
         }
 
         var message = await db.ImapMessages
-            .AsNoTracking()
             .Include(m => m.Body)
             .Where(m => m.FolderId == folder.Id && m.ImapUid == imapUid)
             .FirstOrDefaultAsync(cancellationToken);
@@ -199,7 +198,7 @@ public static class McpTools
             Cc: null,
             Bcc: null);
 
-        var html = BuildFallbackHtml(message.Body);
+        var html = await BuildFallbackHtmlAsync(db, message.Body, cancellationToken);
         return new MessageBodyResult(html, headers);
     }
 
@@ -1052,8 +1051,23 @@ public static class McpTools
         return string.IsNullOrWhiteSpace(cleanedAddress) ? cleanedName : cleanedAddress;
     }
 
-    private static string BuildFallbackHtml(MessageBody body)
+    private static async Task<string> BuildFallbackHtmlAsync(MailDbContext db, MessageBody body, CancellationToken cancellationToken)
     {
+        if (HtmlSanitizer.NeedsResanitization(body.SanitizedHtmlVersion, body.HtmlText))
+        {
+            body.SanitizedHtml = HtmlSanitizer.SanitizeNullable(body.HtmlText);
+            body.SanitizedHtmlVersion = HtmlSanitizer.CurrentPolicyVersion;
+
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Failed to persist refreshed sanitized HTML for message {body.MessageId}: {ex}");
+            }
+        }
+
         if (!string.IsNullOrWhiteSpace(body.SanitizedHtml))
         {
             return body.SanitizedHtml;

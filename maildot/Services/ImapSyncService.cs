@@ -2101,7 +2101,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
                 var plain = TextCleaner.CleanNullable(message.TextBody);
                 var html = TextCleaner.CleanNullable(message.HtmlBody);
-                var sanitized = string.IsNullOrWhiteSpace(html) ? null : TextCleaner.CleanNullable(HtmlSanitizer.Sanitize(html).Html);
+                var sanitized = HtmlSanitizer.SanitizeNullable(html);
                 var previewSource = string.IsNullOrWhiteSpace(plain) ? message.Subject ?? string.Empty : plain;
                 var preview = BuildPreview(previewSource);
 
@@ -2111,6 +2111,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     PlainText = plain,
                     HtmlText = html,
                     SanitizedHtml = sanitized,
+                    SanitizedHtmlVersion = HtmlSanitizer.CurrentPolicyVersion,
                     Headers = headers,
                     Preview = preview
                 };
@@ -4924,7 +4925,6 @@ GROUP BY lids.""LabelId""";
             }
 
             var message = await db.ImapMessages
-                .AsNoTracking()
                 .Include(m => m.Body)
                 .Where(m => m.FolderId == folderEntity.Id && m.ImapUid == uid)
                 .FirstOrDefaultAsync(token);
@@ -4934,15 +4934,30 @@ GROUP BY lids.""LabelId""";
                 return null;
             }
 
-            var html = BuildFallbackHtml(message.Body);
+            var html = await BuildFallbackHtmlAsync(db, message.Body, token);
             var headers = BuildHeaderInfo(message, message.Body);
 
             return new MessageBodyResult(html, headers);
         }
     }
 
-    private static string BuildFallbackHtml(MessageBody body)
+    private static async Task<string> BuildFallbackHtmlAsync(MailDbContext db, MessageBody body, CancellationToken token)
     {
+        if (HtmlSanitizer.NeedsResanitization(body.SanitizedHtmlVersion, body.HtmlText))
+        {
+            body.SanitizedHtml = HtmlSanitizer.SanitizeNullable(body.HtmlText);
+            body.SanitizedHtmlVersion = HtmlSanitizer.CurrentPolicyVersion;
+
+            try
+            {
+                await db.SaveChangesAsync(token);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to persist refreshed sanitized HTML for message {body.MessageId}: {ex}");
+            }
+        }
+
         if (!string.IsNullOrWhiteSpace(body.SanitizedHtml))
         {
             return body.SanitizedHtml;

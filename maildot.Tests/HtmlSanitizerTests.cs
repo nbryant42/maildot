@@ -152,4 +152,17 @@ public class HtmlSanitizerTests
         Assert.Contains("text-align:center", result.Html, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("font-family:Arial, sans-serif", result.Html, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public void NeedsResanitization_WhenStoredVersionIsBehind()
+    {
+        Assert.True(HtmlSanitizer.NeedsResanitization(1, "<div>Hello</div>"));
+    }
+
+    [Fact]
+    public void NeedsResanitization_WhenVersionIsCurrentOrHtmlMissing_ReturnsFalse()
+    {
+        Assert.False(HtmlSanitizer.NeedsResanitization(HtmlSanitizer.CurrentPolicyVersion, "<div>Hello</div>"));
+        Assert.False(HtmlSanitizer.NeedsResanitization(1, null));
+    }
 }

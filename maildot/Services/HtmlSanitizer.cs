@@ -22,6 +22,8 @@ public enum BlockedResourceReason
 
 public static class HtmlSanitizer
 {
+    public const int CurrentPolicyVersion = 2;
+
     private static readonly HashSet<string> DisallowedElements =
         new(StringComparer.OrdinalIgnoreCase)
         {
@@ -128,6 +130,14 @@ public static class HtmlSanitizer
         var sanitized = doc.DocumentNode.InnerHtml;
         return new SanitizedHtmlResult(sanitized, blockedResources);
     }
+
+    public static string? SanitizeNullable(string? html) =>
+        string.IsNullOrWhiteSpace(html)
+            ? null
+            : TextCleaner.CleanNullable(Sanitize(html).Html);
+
+    public static bool NeedsResanitization(int sanitizedHtmlVersion, string? htmlText) =>
+        !string.IsNullOrWhiteSpace(htmlText) && sanitizedHtmlVersion < CurrentPolicyVersion;
 
     private static void CleanNode(HtmlNode node, ICollection<BlockedResource> blocked)
     {
