@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
-using System.Text.RegularExpressions;
 using HtmlAgilityPack;
 
 namespace maildot.Services;
@@ -23,7 +22,7 @@ public enum BlockedResourceReason
 
 public static class HtmlSanitizer
 {
-    private static readonly HashSet<string> DangerousElements =
+    private static readonly HashSet<string> DisallowedElements =
         new(StringComparer.OrdinalIgnoreCase)
         {
             "script", "style", "iframe", "frame", "frameset", "object", "embed", "link",
@@ -33,19 +32,86 @@ public static class HtmlSanitizer
     private static readonly HashSet<string> ExternalContentElements =
         new(StringComparer.OrdinalIgnoreCase) { "img", "video", "audio", "iframe", "frame", "source", "link" };
 
-    private static readonly Dictionary<string, HashSet<string>> AllowedAttributes =
+    private static readonly HashSet<string> GlobalAttributes =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "title", "class", "lang", "dir"
+        };
+
+    private static readonly Dictionary<string, HashSet<string>> AllowedAttributesByElement =
         new(StringComparer.OrdinalIgnoreCase)
         {
             ["a"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "href", "title", "target", "rel" },
-            ["img"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "src", "alt", "title" },
-            ["p"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "title" },
-            ["div"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "title" },
-            ["span"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "title" },
-            ["*"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "title" }
+            ["img"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "src", "alt", "width", "height" },
+            ["table"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "width", "height", "align", "bgcolor", "border", "cellpadding", "cellspacing" },
+            ["thead"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "align", "valign" },
+            ["tbody"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "align", "valign" },
+            ["tfoot"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "align", "valign" },
+            ["tr"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "align", "valign", "bgcolor" },
+            ["td"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "align", "valign", "width", "height", "bgcolor", "border", "colspan", "rowspan" },
+            ["th"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "align", "valign", "width", "height", "bgcolor", "border", "colspan", "rowspan" },
+            ["colgroup"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "width", "span" },
+            ["col"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "width", "span" },
+            ["p"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "align" },
+            ["div"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "align" },
+            ["span"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+            ["blockquote"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "align" },
+            ["hr"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "width", "align" }
         };
 
     private static readonly HashSet<string> UrlAttributes =
         new(StringComparer.OrdinalIgnoreCase) { "href", "src", "background", "action" };
+
+    private static readonly HashSet<string> AllowedCssProperties =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "color",
+            "background-color",
+            "font",
+            "font-family",
+            "font-size",
+            "font-style",
+            "font-weight",
+            "line-height",
+            "text-align",
+            "text-decoration",
+            "letter-spacing",
+            "white-space",
+            "word-break",
+            "word-wrap",
+            "display",
+            "width",
+            "height",
+            "max-width",
+            "min-width",
+            "max-height",
+            "min-height",
+            "margin",
+            "margin-left",
+            "margin-right",
+            "margin-top",
+            "margin-bottom",
+            "padding",
+            "padding-left",
+            "padding-right",
+            "padding-top",
+            "padding-bottom",
+            "border",
+            "border-top",
+            "border-right",
+            "border-bottom",
+            "border-left",
+            "border-color",
+            "border-style",
+            "border-width",
+            "border-collapse",
+            "border-spacing",
+            "vertical-align",
+            "background",
+            "background-repeat",
+            "background-position",
+            "background-size"
+        };
 
     public static SanitizedHtmlResult Sanitize(string? html)
     {
@@ -70,7 +136,7 @@ public static class HtmlSanitizer
         {
             if (child.NodeType == HtmlNodeType.Element)
             {
-                if (DangerousElements.Contains(child.Name))
+                if (!IsAllowedElement(child.Name))
                 {
                     blocked.Add(new BlockedResource(child.Name, BlockedResourceReason.DisallowedTag));
                     child.Remove();
@@ -86,22 +152,33 @@ public static class HtmlSanitizer
 
     private static void SanitizeAttributes(HtmlNode node, ICollection<BlockedResource> blocked)
     {
-        var allowed = AllowedAttributes.TryGetValue(node.Name, out var attrs)
-            ? attrs
-            : AllowedAttributes.GetValueOrDefault("*");
-
         var toRemove = new List<HtmlAttribute>();
         foreach (var attribute in node.Attributes.ToList())
         {
-            if (attribute.Name.StartsWith("on", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(attribute.Name, "style", StringComparison.OrdinalIgnoreCase))
+            if (attribute.Name.StartsWith("on", StringComparison.OrdinalIgnoreCase))
             {
                 toRemove.Add(attribute);
                 blocked.Add(new BlockedResource(attribute.Name, BlockedResourceReason.DisallowedAttribute));
                 continue;
             }
 
-            if (allowed != null && !allowed.Contains(attribute.Name))
+            if (string.Equals(attribute.Name, "style", StringComparison.OrdinalIgnoreCase))
+            {
+                var sanitizedStyle = SanitizeStyleAttribute(attribute.Value);
+                if (string.IsNullOrWhiteSpace(sanitizedStyle))
+                {
+                    toRemove.Add(attribute);
+                    blocked.Add(new BlockedResource(attribute.Name, BlockedResourceReason.DisallowedAttribute));
+                }
+                else
+                {
+                    attribute.Value = sanitizedStyle;
+                }
+
+                continue;
+            }
+
+            if (!IsAllowedAttribute(node.Name, attribute.Name))
             {
                 toRemove.Add(attribute);
                 continue;
@@ -139,6 +216,104 @@ public static class HtmlSanitizer
         Invalid,
         PrivateNetwork
     }
+
+    private static bool IsAllowedElement(string elementName) =>
+        !DisallowedElements.Contains(elementName);
+
+    private static bool IsAllowedAttribute(string elementName, string attributeName)
+    {
+        if (GlobalAttributes.Contains(attributeName))
+        {
+            return true;
+        }
+
+        return AllowedAttributesByElement.TryGetValue(elementName, out var allowed) &&
+               allowed.Contains(attributeName);
+    }
+
+    private static string? SanitizeStyleAttribute(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var sanitizedDeclarations = new List<string>();
+        foreach (var rawDeclaration in value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var colonIndex = rawDeclaration.IndexOf(':');
+            if (colonIndex <= 0 || colonIndex == rawDeclaration.Length - 1)
+            {
+                continue;
+            }
+
+            var property = rawDeclaration[..colonIndex].Trim();
+            var rawPropertyValue = rawDeclaration[(colonIndex + 1)..].Trim();
+            if (!IsAllowedCssProperty(property) || !IsSafeCssValue(rawPropertyValue))
+            {
+                continue;
+            }
+
+            var normalizedValue = NormalizeCssValue(rawPropertyValue);
+            if (string.IsNullOrWhiteSpace(normalizedValue))
+            {
+                continue;
+            }
+
+            sanitizedDeclarations.Add($"{property.ToLowerInvariant()}:{normalizedValue}");
+        }
+
+        return sanitizedDeclarations.Count == 0
+            ? null
+            : string.Join("; ", sanitizedDeclarations);
+    }
+
+    private static bool IsAllowedCssProperty(string property)
+    {
+        if (string.IsNullOrWhiteSpace(property) || property.StartsWith("--", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return AllowedCssProperties.Contains(property);
+    }
+
+    private static bool IsSafeCssValue(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        if (value.Any(char.IsControl))
+        {
+            return false;
+        }
+
+        if (ContainsCssToken(value, "url(") ||
+            ContainsCssToken(value, "@import") ||
+            ContainsCssToken(value, "expression(") ||
+            ContainsCssToken(value, "behavior(") ||
+            ContainsCssToken(value, "-moz-binding") ||
+            ContainsCssToken(value, "javascript:") ||
+            ContainsCssToken(value, "data:"))
+        {
+            return false;
+        }
+
+        return value.All(IsAllowedCssCharacter);
+    }
+
+    private static bool ContainsCssToken(string value, string token) =>
+        value.Contains(token, StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsAllowedCssCharacter(char c) =>
+        char.IsLetterOrDigit(c) ||
+        char.IsWhiteSpace(c) ||
+        c is '#' or '%' or '.' or ',' or '(' or ')' or '-' or '_' or '/' or '"' or '\'' or '!' or ':' or '+';
+
+    private static string NormalizeCssValue(string value) =>
+        string.Join(" ", value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
     private static UrlEvaluation EvaluateUrl(string value, string elementName, string attributeName)
     {
