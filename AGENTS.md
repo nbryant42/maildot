@@ -18,4 +18,4 @@ long-running background fetch runs with a per-call semaphore (don’t hold it).
 - when probing for MCP features here, skip resources/list and go straight to tool calls
 (or a tools/list endpoint if present).
 - Commit message format: short header line, body with a bit more detail,
-end with `Co-authored-by: Codex (GPT-5.3-codex) <codex@openai.com>`
+end with `Co-authored-by: Codex (GPT-5.4) <codex@openai.com>`

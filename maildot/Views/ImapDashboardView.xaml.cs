@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Input;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.System;
+using System.Diagnostics;
 
 namespace maildot.Views;
 
@@ -469,6 +470,7 @@ public sealed partial class ImapDashboardView : UserControl
         var markAllRead = new MenuFlyoutItem { Text = "Mark all as read" };
         markAllRead.Click += (_, __) =>
         {
+            Debug.WriteLine($"[MarkAllRead][UI] folder-menu-click folder={_contextMenuFolder?.Id ?? "<null>"}");
             if (_contextMenuFolder != null)
             {
                 FolderMarkAllReadRequested?.Invoke(this, _contextMenuFolder);

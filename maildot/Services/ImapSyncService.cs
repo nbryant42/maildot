@@ -3861,18 +3861,21 @@ GROUP BY lids.""LabelId""";
     public async Task<int> MarkAllReadInFolderAsync(string folderFullName)
     {
         var token = _cts.Token;
+        Debug.WriteLine($"[MarkAllRead][Service] enter folder={folderFullName}");
         if (_settings == null || string.IsNullOrWhiteSpace(folderFullName))
         {
+            Debug.WriteLine($"[MarkAllRead][Service] abort folder={folderFullName} reason=missing-settings-or-folder");
             return 0;
         }
 
         var db = await CreateDbContextAsync();
         if (db == null)
         {
+            Debug.WriteLine($"[MarkAllRead][Service] abort folder={folderFullName} reason=db-null");
             return 0;
         }
 
-        List<long> unreadUids;
+        int folderId;
         await using (db)
         {
             var folder = await db.ImapFolders
@@ -3880,31 +3883,27 @@ GROUP BY lids.""LabelId""";
                 .FirstOrDefaultAsync(f => f.AccountId == _settings.Id && f.FullName == folderFullName, token);
             if (folder == null)
             {
+                Debug.WriteLine($"[MarkAllRead][Service] abort folder={folderFullName} reason=folder-not-found-in-db");
                 return 0;
             }
 
-            unreadUids = await db.ImapMessages
-                .AsNoTracking()
-                .Where(m => m.FolderId == folder.Id && !m.IsRead)
-                .Select(m => m.ImapUid)
-                .ToListAsync(token);
+            folderId = folder.Id;
         }
 
-        var updatedCount = 0;
-        foreach (var uid in unreadUids)
+        var serverUnreadUids = await SearchUnreadUidsOnServerAsync(folderFullName, token);
+        Debug.WriteLine(
+            $"[MarkAllRead][Service] unread-sources folder={folderFullName} serverUnreadCount={serverUnreadUids.Count}");
+
+        if (serverUnreadUids.Count == 0)
         {
-            var updated = await SetMessageReadStateInternalAsync(
-                folderFullName,
-                uid.ToString(CultureInfo.InvariantCulture),
-                true,
-                refreshCounts: false);
-            if (updated)
-            {
-                updatedCount++;
-            }
+            Debug.WriteLine($"[MarkAllRead][Service] server-no-op folder={folderFullName} serverUnreadCount=0");
         }
 
+        Debug.WriteLine($"[MarkAllRead][Service] batch-start folder={folderFullName} serverUnreadCount={serverUnreadUids.Count}");
+        var updatedCount = await MarkEntireFolderReadBatchAsync(folderFullName, folderId, serverUnreadUids, token);
+        Debug.WriteLine($"[MarkAllRead][Service] batch-finished folder={folderFullName} updatedCount={updatedCount}");
         await RefreshNavigationCountsAsync(token);
+        Debug.WriteLine($"[MarkAllRead][Service] refresh-finished folder={folderFullName}");
         return updatedCount;
     }
 
@@ -3922,7 +3921,7 @@ GROUP BY lids.""LabelId""";
             return 0;
         }
 
-        List<(string FolderFullName, long ImapUid)> targets;
+        List<(int FolderId, string FolderFullName, long ImapUid)> targets;
         await using (db)
         {
             var label = await db.Labels
@@ -3939,7 +3938,7 @@ GROUP BY lids.""LabelId""";
                     join m in db.ImapMessages.AsNoTracking() on ml.MessageId equals m.Id
                     join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
                     where f.AccountId == _settings.Id && !m.IsRead
-                    select new { f.FullName, m.ImapUid })
+                    select new { f.Id, f.FullName, m.ImapUid })
                 .ToListAsync(token);
 
             var senderTargets = await (
@@ -3948,28 +3947,25 @@ GROUP BY lids.""LabelId""";
                     join m in db.ImapMessages.AsNoTracking() on sl.FromAddress equals m.FromAddress.ToLower()
                     join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
                     where f.AccountId == _settings.Id && !m.IsRead
-                    select new { f.FullName, m.ImapUid })
+                    select new { f.Id, f.FullName, m.ImapUid })
                 .ToListAsync(token);
 
             targets = explicitTargets
                 .Concat(senderTargets)
-                .GroupBy(x => (x.FullName, x.ImapUid))
+                .GroupBy(x => (x.Id, x.FullName, x.ImapUid))
                 .Select(g => g.Key)
                 .ToList();
         }
 
         var updatedCount = 0;
-        foreach (var target in targets)
+        foreach (var folderGroup in targets.GroupBy(t => (t.FolderId, t.FolderFullName)))
         {
-            var updated = await SetMessageReadStateInternalAsync(
-                target.FolderFullName,
-                target.ImapUid.ToString(CultureInfo.InvariantCulture),
-                true,
-                refreshCounts: false);
-            if (updated)
-            {
-                updatedCount++;
-            }
+            var batchCount = await MarkMessagesReadBatchAsync(
+                folderGroup.Key.FolderFullName,
+                folderGroup.Key.FolderId,
+                folderGroup.Select(t => t.ImapUid).ToList(),
+                token);
+            updatedCount += batchCount;
         }
 
         await RefreshNavigationCountsAsync(token);
@@ -4078,6 +4074,295 @@ GROUP BY lids.""LabelId""";
         catch
         {
             return ServerReadWriteResult.Failed;
+        }
+        finally
+        {
+            try
+            {
+                if (folder?.IsOpen == true)
+                {
+                    await folder.CloseAsync(false, token);
+                }
+            }
+            catch
+            {
+            }
+
+            _semaphore.Release();
+        }
+    }
+
+    private async Task<int> MarkMessagesReadBatchAsync(
+        string folderFullName,
+        int folderId,
+        IReadOnlyCollection<long> unreadUids,
+        CancellationToken token)
+    {
+        if (unreadUids.Count == 0)
+        {
+            return 0;
+        }
+
+        var positiveUids = unreadUids
+            .Where(uid => uid > 0)
+            .Select(uid => new UniqueId((uint)uid))
+            .ToList();
+        var localOnlyUids = unreadUids
+            .Where(uid => uid <= 0)
+            .ToList();
+
+        if (positiveUids.Count > 0)
+        {
+            var serverResult = await TrySetMessagesReadStateOnServerAsync(folderFullName, positiveUids, isRead: true, token);
+            if (serverResult == ServerReadWriteResult.Failed)
+            {
+                return 0;
+            }
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return 0;
+        }
+
+        await using (db)
+        {
+            var allUids = positiveUids.Select(uid => (long)uid.Id).Concat(localOnlyUids).ToArray();
+            var messages = await db.ImapMessages
+                .Where(m => m.FolderId == folderId && allUids.Contains(m.ImapUid) && !m.IsRead)
+                .ToListAsync(token);
+
+            if (messages.Count == 0)
+            {
+                return 0;
+            }
+
+            foreach (var message in messages)
+            {
+                message.IsRead = true;
+            }
+
+            await db.SaveChangesAsync(token);
+
+            var updatedIds = messages.Select(m => m.ImapUid.ToString(CultureInfo.InvariantCulture)).ToHashSet(StringComparer.Ordinal);
+            await EnqueueAsync(() =>
+            {
+                if (_viewModel.SelectedMessage != null &&
+                    string.Equals(_viewModel.SelectedMessage.FolderId, folderFullName, StringComparison.OrdinalIgnoreCase) &&
+                    updatedIds.Contains(_viewModel.SelectedMessage.Id))
+                {
+                    _viewModel.SelectedMessage.IsRead = true;
+                }
+
+                foreach (var visible in _viewModel.Messages)
+                {
+                    if (string.Equals(visible.FolderId, folderFullName, StringComparison.OrdinalIgnoreCase) &&
+                        updatedIds.Contains(visible.Id))
+                    {
+                        visible.IsRead = true;
+                    }
+                }
+            });
+
+            return messages.Count;
+        }
+    }
+
+    private async Task<int> MarkEntireFolderReadBatchAsync(
+        string folderFullName,
+        int folderId,
+        IReadOnlyCollection<long> serverUnreadUids,
+        CancellationToken token)
+    {
+        var positiveUids = serverUnreadUids
+            .Where(uid => uid > 0)
+            .Select(uid => new UniqueId((uint)uid))
+            .ToList();
+
+        if (positiveUids.Count > 0)
+        {
+            var serverResult = await TrySetMessagesReadStateOnServerAsync(folderFullName, positiveUids, isRead: true, token);
+            if (serverResult == ServerReadWriteResult.Failed)
+            {
+                return 0;
+            }
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return 0;
+        }
+
+        await using (db)
+        {
+            var messages = await db.ImapMessages
+                .Where(m => m.FolderId == folderId && !m.IsRead)
+                .ToListAsync(token);
+
+            if (messages.Count == 0)
+            {
+                return 0;
+            }
+
+            foreach (var message in messages)
+            {
+                message.IsRead = true;
+            }
+
+            await db.SaveChangesAsync(token);
+
+            var updatedIds = messages.Select(m => m.ImapUid.ToString(CultureInfo.InvariantCulture)).ToHashSet(StringComparer.Ordinal);
+            await EnqueueAsync(() =>
+            {
+                if (_viewModel.SelectedMessage != null &&
+                    string.Equals(_viewModel.SelectedMessage.FolderId, folderFullName, StringComparison.OrdinalIgnoreCase) &&
+                    updatedIds.Contains(_viewModel.SelectedMessage.Id))
+                {
+                    _viewModel.SelectedMessage.IsRead = true;
+                }
+
+                foreach (var visible in _viewModel.Messages)
+                {
+                    if (string.Equals(visible.FolderId, folderFullName, StringComparison.OrdinalIgnoreCase) &&
+                        updatedIds.Contains(visible.Id))
+                    {
+                        visible.IsRead = true;
+                    }
+                }
+            });
+
+            return messages.Count;
+        }
+    }
+
+    private async Task<ServerReadWriteResult> TrySetMessagesReadStateOnServerAsync(
+        string folderFullName,
+        IList<UniqueId> uids,
+        bool isRead,
+        CancellationToken token)
+    {
+        IMailFolder? folder = null;
+
+        if (uids.Count == 0)
+        {
+            return ServerReadWriteResult.Success;
+        }
+
+        if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
+        {
+            Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
+            return ServerReadWriteResult.Failed;
+        }
+
+        try
+        {
+            if (_client == null)
+            {
+                Debug.WriteLine($"[MarkAllRead][IMAP] skipped folder={folderFullName} reason=client-null uidCount={uids.Count}");
+                return ServerReadWriteResult.Failed;
+            }
+
+            if (!_folderCache.TryGetValue(folderFullName, out folder))
+            {
+                Debug.WriteLine($"[MarkAllRead][IMAP] skipped folder={folderFullName} reason=folder-not-cached uidCount={uids.Count}");
+                return ServerReadWriteResult.Failed;
+            }
+
+            if (!folder.IsOpen)
+            {
+                await folder.OpenAsync(FolderAccess.ReadWrite, token);
+            }
+
+            Debug.WriteLine(
+                $"[MarkAllRead][IMAP] start folder={folderFullName} action={(isRead ? "mark-read" : "mark-unread")} uidCount={uids.Count}");
+
+            if (isRead)
+            {
+                await folder.AddFlagsAsync(uids, MessageFlags.Seen, true, token);
+            }
+            else
+            {
+                await folder.RemoveFlagsAsync(uids, MessageFlags.Seen, true, token);
+            }
+
+            Debug.WriteLine(
+                $"[MarkAllRead][IMAP] success folder={folderFullName} action={(isRead ? "mark-read" : "mark-unread")} uidCount={uids.Count}");
+            return ServerReadWriteResult.Success;
+        }
+        catch (OperationCanceledException)
+        {
+            Debug.WriteLine(
+                $"[MarkAllRead][IMAP] canceled folder={folderFullName} action={(isRead ? "mark-read" : "mark-unread")} uidCount={uids.Count}");
+            throw;
+        }
+        catch
+        {
+            Debug.WriteLine(
+                $"[MarkAllRead][IMAP] failed folder={folderFullName} action={(isRead ? "mark-read" : "mark-unread")} uidCount={uids.Count}");
+            return ServerReadWriteResult.Failed;
+        }
+        finally
+        {
+            try
+            {
+                if (folder?.IsOpen == true)
+                {
+                    await folder.CloseAsync(false, token);
+                }
+            }
+            catch
+            {
+            }
+
+            _semaphore.Release();
+        }
+    }
+
+    private async Task<List<long>> SearchUnreadUidsOnServerAsync(string folderFullName, CancellationToken token)
+    {
+        IMailFolder? folder = null;
+
+        if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
+        {
+            Debug.WriteLine($"[MarkAllRead][IMAP] unread-search-skipped folder={folderFullName} reason=semaphore-timeout");
+            return [];
+        }
+
+        try
+        {
+            if (_client == null)
+            {
+                Debug.WriteLine($"[MarkAllRead][IMAP] unread-search-skipped folder={folderFullName} reason=client-null");
+                return [];
+            }
+
+            if (!_folderCache.TryGetValue(folderFullName, out folder))
+            {
+                Debug.WriteLine($"[MarkAllRead][IMAP] unread-search-skipped folder={folderFullName} reason=folder-not-cached");
+                return [];
+            }
+
+            if (!folder.IsOpen)
+            {
+                await folder.OpenAsync(FolderAccess.ReadOnly, token);
+            }
+
+            Debug.WriteLine($"[MarkAllRead][IMAP] unread-search-start folder={folderFullName}");
+            var uids = await folder.SearchAsync(SearchQuery.NotSeen, token);
+            Debug.WriteLine($"[MarkAllRead][IMAP] unread-search-success folder={folderFullName} uidCount={uids.Count}");
+            return uids.Select(uid => (long)uid.Id).ToList();
+        }
+        catch (OperationCanceledException)
+        {
+            Debug.WriteLine($"[MarkAllRead][IMAP] unread-search-canceled folder={folderFullName}");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[MarkAllRead][IMAP] unread-search-failed folder={folderFullName} error={ex.Message}");
+            return [];
         }
         finally
         {

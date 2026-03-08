@@ -738,13 +738,17 @@ public sealed partial class MainWindow : Window
     {
         if (_imapService == null)
         {
+            Debug.WriteLine($"[MarkAllRead][MainWindow] skipped folder={folder.Id} reason=imap-service-null");
             return;
         }
 
+        Debug.WriteLine($"[MarkAllRead][MainWindow] start folder={folder.Id}");
         await _imapService.MarkAllReadInFolderAsync(folder.Id);
+        Debug.WriteLine($"[MarkAllRead][MainWindow] service-returned folder={folder.Id}");
         if (_mailboxViewModel?.SelectedFolder != null &&
             string.Equals(_mailboxViewModel.SelectedFolder.Id, folder.Id, StringComparison.OrdinalIgnoreCase))
         {
+            Debug.WriteLine($"[MarkAllRead][MainWindow] reloading-selected-folder folder={folder.Id}");
             await _imapService.LoadFolderAsync(folder.Id);
         }
     }
