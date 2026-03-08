@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
 		<OutputType>Exe</OutputType>
@@ -11,6 +11,12 @@
 		<Prefer32Bit>false</Prefer32Bit>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 		<WindowsPackageType>None</WindowsPackageType>
+		<!-- Prevent WinAppSDK buildTransitive auto-init code from being generated in tests; the referenced app assembly already contains those generated types. -->
+		<WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
+		<WindowsAppSdkAutoInitialize>false</WindowsAppSdkAutoInitialize>
+		<WindowsAppSdkDeploymentManagerInitialize>false</WindowsAppSdkDeploymentManagerInitialize>
+		<WindowsAppSdkUndockedRegFreeWinRTInitialize>false</WindowsAppSdkUndockedRegFreeWinRTInitialize>
+		<WindowsAppSdkCompatibilityInitialize>false</WindowsAppSdkCompatibilityInitialize>
 	</PropertyGroup>
 
 	<ItemGroup>
