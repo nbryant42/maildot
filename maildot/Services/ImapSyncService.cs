@@ -13,6 +13,7 @@ using maildot.Data;
 using maildot.Models;
 using maildot.ViewModels;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.UI.Dispatching;
 using MimeKit;
 using Windows.UI;
@@ -1741,7 +1742,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         }
     }
 
-    private async Task<List<AttachmentInsert>> DownloadAttachmentsAsync(NpgsqlConnection conn, MimeMessage message, CancellationToken token)
+    private async Task<List<AttachmentInsert>> DownloadAttachmentsAsync(NpgsqlConnection conn, NpgsqlTransaction tx, MimeMessage message, CancellationToken token)
     {
         var parts = message.BodyParts
             .Where(IsAttachmentCandidate)
@@ -1752,7 +1753,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             return [];
         }
 
-        var manager = new NpgsqlLargeObjectManager(conn);
+        var manager = new PostgresLargeObjectStore(conn, tx);
         var results = new List<AttachmentInsert>(parts.Count);
 
         foreach (var part in parts)
@@ -1767,7 +1768,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         return results;
     }
 
-    private async Task<AttachmentInsert?> SaveAttachmentAsync(NpgsqlLargeObjectManager manager, MimeEntity entity, CancellationToken token)
+    private async Task<AttachmentInsert?> SaveAttachmentAsync(PostgresLargeObjectStore manager, MimeEntity entity, CancellationToken token)
     {
         var fileName = GetAttachmentFileName(entity);
         var contentType = TextCleaner.CleanNullable(entity.ContentType?.MimeType) ?? "application/octet-stream";
@@ -1798,7 +1799,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 return null;
             }
 
-            var oid = await manager.CreateAsync(0u, token);
+            var oid = await manager.CreateAsync(token);
             await using var loStream = await manager.OpenReadWriteAsync(oid, token);
 
             using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -2121,7 +2122,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             if (!hasAttachments)
             {
                 var conn = (NpgsqlConnection)db.Database.GetDbConnection();
-                var attachments = await DownloadAttachmentsAsync(conn, message, token);
+                var attachments = await DownloadAttachmentsAsync(conn, (NpgsqlTransaction)tx.GetDbTransaction(), message, token);
                 if (attachments.Count > 0)
                 {
                     foreach (var attachment in attachments)
@@ -3475,7 +3476,7 @@ GROUP BY lids.""LabelId""";
             }
 
             await using var tx = await conn.BeginTransactionAsync(token);
-            var manager = new NpgsqlLargeObjectManager(conn);
+            var manager = new PostgresLargeObjectStore(conn, tx);
             var results = new List<AttachmentContent>(attachments.Count);
 
             foreach (var attachment in attachments)

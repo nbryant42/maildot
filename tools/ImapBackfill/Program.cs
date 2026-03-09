@@ -7,6 +7,7 @@ using maildot.Services;
 using MailKit;
 using MailKit.Net.Imap;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using MimeKit;
 using MimeKit.Utils;
 using Npgsql;
@@ -384,7 +385,7 @@ internal static class Program
         if (options.ProcessAttachments)
         {
             var conn = (NpgsqlConnection)db.Database.GetDbConnection();
-            var manager = new NpgsqlLargeObjectManager(conn);
+            var manager = new PostgresLargeObjectStore(conn, (NpgsqlTransaction)tx.GetDbTransaction());
 
             var trackedAttachments = await db.MessageAttachments.Where(a => a.MessageId == entity.Id).ToListAsync(token);
             if (trackedAttachments.Count > 0)
@@ -574,7 +575,7 @@ internal static class Program
     }
 
     private static async Task<List<MessageAttachment>> DownloadAttachmentsAsync(
-        NpgsqlLargeObjectManager manager,
+        PostgresLargeObjectStore manager,
         MimeMessage message,
         int messageId,
         CancellationToken token)
@@ -602,7 +603,7 @@ internal static class Program
     }
 
     private static async Task<MessageAttachment?> SaveAttachmentAsync(
-        NpgsqlLargeObjectManager manager,
+        PostgresLargeObjectStore manager,
         MimeEntity entity,
         int messageId,
         CancellationToken token)
@@ -636,7 +637,7 @@ internal static class Program
                 return null;
             }
 
-            var oid = await manager.CreateAsync(0u, token);
+            var oid = await manager.CreateAsync(token);
             await using var loStream = await manager.OpenReadWriteAsync(oid, token);
 
             using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);

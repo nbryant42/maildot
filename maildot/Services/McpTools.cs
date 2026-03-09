@@ -271,7 +271,7 @@ public static class McpTools
         }
 
         await using var tx = await conn.BeginTransactionAsync(cancellationToken);
-        var manager = new NpgsqlLargeObjectManager(conn);
+        var manager = new PostgresLargeObjectStore(conn, tx);
 
         foreach (var attachment in attachments)
         {

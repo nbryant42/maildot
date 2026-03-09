@@ -1,5 +1,6 @@
 using System;
 using System.Threading.Tasks;
+using System.IO;
 using maildot.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -17,6 +18,7 @@ public sealed partial class ImapDashboardView : UserControl
     private ScrollViewer? _messagesScrollViewer;
     private bool _hasRequestedMore;
     private bool _attachmentsInitialized;
+    private string? _attachmentsHtmlPath;
     private EmailMessageViewModel? _contextMenuMessage;
     private MailFolderViewModel? _contextMenuFolder;
     private LabelViewModel? _contextMenuLabel;
@@ -248,7 +250,17 @@ public sealed partial class ImapDashboardView : UserControl
         AttachmentsWebView.Visibility = Visibility.Visible;
         AttachmentsHeaderRow.Height = new GridLength(1, GridUnitType.Auto);
         AttachmentsContentRow.Height = new GridLength(1, GridUnitType.Star);
-        AttachmentsWebView.NavigateToString(string.IsNullOrWhiteSpace(html) ? "<html><body></body></html>" : html);
+
+        var content = string.IsNullOrWhiteSpace(html) ? "<html><body></body></html>" : html;
+        _attachmentsHtmlPath ??= Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "maildot",
+            "webview",
+            "attachments-preview.html");
+
+        Directory.CreateDirectory(Path.GetDirectoryName(_attachmentsHtmlPath)!);
+        await File.WriteAllTextAsync(_attachmentsHtmlPath, content);
+        AttachmentsWebView.Source = new Uri(_attachmentsHtmlPath);
     }
 
     public async Task ClearAttachmentsAsync()
