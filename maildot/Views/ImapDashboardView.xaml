@@ -105,6 +105,7 @@
                                            Text="{x:Bind UnreadCount, Mode=OneWay}"
                                            Foreground="{ThemeResource TextFillColorPrimaryBrush}"
                                            HorizontalAlignment="Right"
+                                           Visibility="{x:Bind UnreadCount, Mode=OneWay, Converter={StaticResource LabelCountToVisibilityConverter}}"
                                            FontWeight="{x:Bind UnreadCount, Mode=OneWay, Converter={StaticResource UnreadCountToFontWeightConverter}}" />
                                 </Grid>
                             </TreeViewItem>
