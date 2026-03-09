@@ -4934,46 +4934,11 @@ GROUP BY lids.""LabelId""";
                 return null;
             }
 
-            var html = await BuildFallbackHtmlAsync(db, message.Body, token);
+            var html = await HtmlSanitizer.BuildFallbackHtmlAsync(db, message.Body, token);
             var headers = BuildHeaderInfo(message, message.Body);
 
             return new MessageBodyResult(html, headers);
         }
-    }
-
-    private static async Task<string> BuildFallbackHtmlAsync(MailDbContext db, MessageBody body, CancellationToken token)
-    {
-        if (HtmlSanitizer.NeedsResanitization(body.SanitizedHtmlVersion, body.HtmlText))
-        {
-            body.SanitizedHtml = HtmlSanitizer.SanitizeNullable(body.HtmlText);
-            body.SanitizedHtmlVersion = HtmlSanitizer.CurrentPolicyVersion;
-
-            try
-            {
-                await db.SaveChangesAsync(token);
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"Failed to persist refreshed sanitized HTML for message {body.MessageId}: {ex}");
-            }
-        }
-
-        if (!string.IsNullOrWhiteSpace(body.SanitizedHtml))
-        {
-            return body.SanitizedHtml;
-        }
-
-        if (!string.IsNullOrWhiteSpace(body.HtmlText))
-        {
-            return HtmlSanitizer.Sanitize(body.HtmlText).Html;
-        }
-
-        if (!string.IsNullOrWhiteSpace(body.PlainText))
-        {
-            return $"<html><body><pre>{System.Net.WebUtility.HtmlEncode(body.PlainText)}</pre></body></html>";
-        }
-
-        return "<html><body></body></html>";
     }
 
     private static MessageHeaderInfo BuildHeaderInfo(ImapMessage message, MessageBody body)

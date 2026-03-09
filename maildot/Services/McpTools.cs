@@ -198,7 +198,7 @@ public static class McpTools
             Cc: null,
             Bcc: null);
 
-        var html = await BuildFallbackHtmlAsync(db, message.Body, cancellationToken);
+        var html = await HtmlSanitizer.BuildFallbackHtmlAsync(db, message.Body, cancellationToken);
         return new MessageBodyResult(html, headers);
     }
 
@@ -1049,41 +1049,6 @@ public static class McpTools
         }
 
         return string.IsNullOrWhiteSpace(cleanedAddress) ? cleanedName : cleanedAddress;
-    }
-
-    private static async Task<string> BuildFallbackHtmlAsync(MailDbContext db, MessageBody body, CancellationToken cancellationToken)
-    {
-        if (HtmlSanitizer.NeedsResanitization(body.SanitizedHtmlVersion, body.HtmlText))
-        {
-            body.SanitizedHtml = HtmlSanitizer.SanitizeNullable(body.HtmlText);
-            body.SanitizedHtmlVersion = HtmlSanitizer.CurrentPolicyVersion;
-
-            try
-            {
-                await db.SaveChangesAsync(cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"Failed to persist refreshed sanitized HTML for message {body.MessageId}: {ex}");
-            }
-        }
-
-        if (!string.IsNullOrWhiteSpace(body.SanitizedHtml))
-        {
-            return body.SanitizedHtml;
-        }
-
-        if (!string.IsNullOrWhiteSpace(body.HtmlText))
-        {
-            return HtmlSanitizer.Sanitize(body.HtmlText).Html;
-        }
-
-        if (!string.IsNullOrWhiteSpace(body.PlainText))
-        {
-            return $"<html><body><pre>{System.Net.WebUtility.HtmlEncode(body.PlainText)}</pre></body></html>";
-        }
-
-        return "<html><body></body></html>";
     }
 
     public record AccountResult(int Id, string DisplayName, string Server, string Username, DateTimeOffset? LastSyncedAt);

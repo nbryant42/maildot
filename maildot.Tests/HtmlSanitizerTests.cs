@@ -154,6 +154,36 @@ public class HtmlSanitizerTests
     }
 
     [Fact]
+    public void BlocksDataUriOnAnchors()
+    {
+        var html = "<a href=\"data:text/html,<script>alert(1)</script>\">click</a>";
+        var result = HtmlSanitizer.Sanitize(html);
+
+        Assert.DoesNotContain("data:", result.Html, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(result.BlockedResources, r => r.Reason == BlockedResourceReason.InvalidSchemeOrHost);
+    }
+
+    [Fact]
+    public void StripsSvgElements()
+    {
+        var html = "<div>Hello</div><svg onload=\"alert(1)\"><circle r=\"50\"/></svg>";
+        var result = HtmlSanitizer.Sanitize(html);
+
+        Assert.DoesNotContain("<svg", result.Html, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(result.BlockedResources, r => r.Reason == BlockedResourceReason.DisallowedTag && r.Url == "svg");
+    }
+
+    [Fact]
+    public void StripsMathElements()
+    {
+        var html = "<div>Hello</div><math><mrow><mi>x</mi></mrow></math>";
+        var result = HtmlSanitizer.Sanitize(html);
+
+        Assert.DoesNotContain("<math", result.Html, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(result.BlockedResources, r => r.Reason == BlockedResourceReason.DisallowedTag && r.Url == "math");
+    }
+
+    [Fact]
     public void NeedsResanitization_WhenStoredVersionIsBehind()
     {
         Assert.True(HtmlSanitizer.NeedsResanitization(1, "<div>Hello</div>"));

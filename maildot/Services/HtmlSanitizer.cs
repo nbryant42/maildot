@@ -1,9 +1,14 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading;
+using System.Threading.Tasks;
 using HtmlAgilityPack;
+using maildot.Data;
+using maildot.Models;
 
 namespace maildot.Services;
 
@@ -22,13 +27,14 @@ public enum BlockedResourceReason
 
 public static class HtmlSanitizer
 {
-    public const int CurrentPolicyVersion = 2;
+    public const int CurrentPolicyVersion = 3;
 
     private static readonly HashSet<string> DisallowedElements =
         new(StringComparer.OrdinalIgnoreCase)
         {
             "script", "style", "iframe", "frame", "frameset", "object", "embed", "link",
-            "meta", "form", "input", "button", "video", "audio", "source", "canvas"
+            "meta", "form", "input", "button", "video", "audio", "source", "canvas",
+            "svg", "math", "foreignobject", "use", "base"
         };
 
     private static readonly HashSet<string> ExternalContentElements =
@@ -138,6 +144,41 @@ public static class HtmlSanitizer
 
     public static bool NeedsResanitization(int sanitizedHtmlVersion, string? htmlText) =>
         !string.IsNullOrWhiteSpace(htmlText) && sanitizedHtmlVersion < CurrentPolicyVersion;
+
+    public static async Task<string> BuildFallbackHtmlAsync(MailDbContext db, MessageBody body, CancellationToken cancellationToken)
+    {
+        if (NeedsResanitization(body.SanitizedHtmlVersion, body.HtmlText))
+        {
+            body.SanitizedHtml = SanitizeNullable(body.HtmlText);
+            body.SanitizedHtmlVersion = CurrentPolicyVersion;
+
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to persist refreshed sanitized HTML for message {body.MessageId}: {ex}");
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(body.SanitizedHtml))
+        {
+            return body.SanitizedHtml;
+        }
+
+        if (!string.IsNullOrWhiteSpace(body.HtmlText))
+        {
+            return Sanitize(body.HtmlText).Html;
+        }
+
+        if (!string.IsNullOrWhiteSpace(body.PlainText))
+        {
+            return $"<html><body><pre>{System.Net.WebUtility.HtmlEncode(body.PlainText)}</pre></body></html>";
+        }
+
+        return "<html><body></body></html>";
+    }
 
     private static void CleanNode(HtmlNode node, ICollection<BlockedResource> blocked)
     {
@@ -339,10 +380,13 @@ public static class HtmlSanitizer
             return UrlEvaluation.Allow;
         }
 
-        // Allow data URIs for inline content
+        // Allow data URIs only for img[src] to prevent phishing via data:text/html on anchors
         if (value.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
         {
-            return UrlEvaluation.Allow;
+            return string.Equals(elementName, "img", StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(attributeName, "src", StringComparison.OrdinalIgnoreCase)
+                ? UrlEvaluation.Allow
+                : UrlEvaluation.Invalid;
         }
 
         if (!Uri.TryCreate(value, UriKind.RelativeOrAbsolute, out var uri))
