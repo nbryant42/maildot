@@ -58,6 +58,7 @@ public sealed class MessageBody
     public string? PlainText { get; set; }
     public string? HtmlText { get; set; }
     public string? SanitizedHtml { get; set; }
+    public int SanitizedHtmlVersion { get; set; } = 1;
     public Dictionary<string, string[]>? Headers { get; set; }
     public string Preview { get; set; } = string.Empty;
 

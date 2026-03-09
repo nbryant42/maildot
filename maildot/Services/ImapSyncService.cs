@@ -2101,7 +2101,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
                 var plain = TextCleaner.CleanNullable(message.TextBody);
                 var html = TextCleaner.CleanNullable(message.HtmlBody);
-                var sanitized = string.IsNullOrWhiteSpace(html) ? null : TextCleaner.CleanNullable(HtmlSanitizer.Sanitize(html).Html);
+                var sanitized = HtmlSanitizer.SanitizeNullable(html);
                 var previewSource = string.IsNullOrWhiteSpace(plain) ? message.Subject ?? string.Empty : plain;
                 var preview = BuildPreview(previewSource);
 
@@ -2111,6 +2111,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     PlainText = plain,
                     HtmlText = html,
                     SanitizedHtml = sanitized,
+                    SanitizedHtmlVersion = HtmlSanitizer.CurrentPolicyVersion,
                     Headers = headers,
                     Preview = preview
                 };
@@ -4924,7 +4925,6 @@ GROUP BY lids.""LabelId""";
             }
 
             var message = await db.ImapMessages
-                .AsNoTracking()
                 .Include(m => m.Body)
                 .Where(m => m.FolderId == folderEntity.Id && m.ImapUid == uid)
                 .FirstOrDefaultAsync(token);
@@ -4934,31 +4934,11 @@ GROUP BY lids.""LabelId""";
                 return null;
             }
 
-            var html = BuildFallbackHtml(message.Body);
+            var html = await HtmlSanitizer.BuildFallbackHtmlAsync(db, message.Body, token);
             var headers = BuildHeaderInfo(message, message.Body);
 
             return new MessageBodyResult(html, headers);
         }
-    }
-
-    private static string BuildFallbackHtml(MessageBody body)
-    {
-        if (!string.IsNullOrWhiteSpace(body.SanitizedHtml))
-        {
-            return body.SanitizedHtml;
-        }
-
-        if (!string.IsNullOrWhiteSpace(body.HtmlText))
-        {
-            return HtmlSanitizer.Sanitize(body.HtmlText).Html;
-        }
-
-        if (!string.IsNullOrWhiteSpace(body.PlainText))
-        {
-            return $"<html><body><pre>{System.Net.WebUtility.HtmlEncode(body.PlainText)}</pre></body></html>";
-        }
-
-        return "<html><body></body></html>";
     }
 
     private static MessageHeaderInfo BuildHeaderInfo(ImapMessage message, MessageBody body)

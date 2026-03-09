@@ -244,6 +244,11 @@ namespace maildot.Data.Migrations
                     b.Property<string>("SanitizedHtml")
                         .HasColumnType("text");
 
+                    b.Property<int>("SanitizedHtmlVersion")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1);
+
                     b.HasKey("MessageId");
 
                     b.ToTable("message_bodies", (string)null);

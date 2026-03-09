@@ -375,6 +375,7 @@ internal static class Program
                 trackedBody.PlainText = rebuilt.PlainText;
                 trackedBody.HtmlText = rebuilt.HtmlText;
                 trackedBody.SanitizedHtml = rebuilt.SanitizedHtml;
+                trackedBody.SanitizedHtmlVersion = rebuilt.SanitizedHtmlVersion;
                 trackedBody.Headers = rebuilt.Headers;
                 trackedBody.Preview = rebuilt.Preview;
             }
@@ -540,7 +541,7 @@ internal static class Program
 
         var plain = TextCleaner.CleanNullable(message.TextBody);
         var html = TextCleaner.CleanNullable(message.HtmlBody);
-        var sanitized = string.IsNullOrWhiteSpace(html) ? null : TextCleaner.CleanNullable(HtmlSanitizer.Sanitize(html).Html);
+        var sanitized = HtmlSanitizer.SanitizeNullable(html);
         var previewSource = string.IsNullOrWhiteSpace(plain) ? message.Subject ?? string.Empty : plain;
         var preview = BuildPreview(previewSource);
 
@@ -550,6 +551,7 @@ internal static class Program
             PlainText = plain,
             HtmlText = html,
             SanitizedHtml = sanitized,
+            SanitizedHtmlVersion = HtmlSanitizer.CurrentPolicyVersion,
             Headers = headers,
             Preview = preview
         };
