@@ -203,10 +203,22 @@
                                FontSize="20"
                                FontWeight="SemiBold" />
                     <ProgressRing Width="24" Height="24" IsActive="{Binding IsBusy}" />
-                    <CheckBox Content="{Binding ActiveFilterLabel}"
-                          IsChecked="{Binding ActiveFilterOnly, Mode=TwoWay}"
-                          Checked="OnUnlabeledOnlyToggled"
-                          Unchecked="OnUnlabeledOnlyToggled"/>
+                    <ComboBox MinWidth="160"
+                              SelectedIndex="{Binding FolderFilterMode, Mode=TwoWay}"
+                              SelectionChanged="OnFolderFilterChanged"
+                              Visibility="{Binding ShowFolderFilter, Converter={StaticResource BoolToVisibilityConverter}}">
+                        <ComboBoxItem Content="All" />
+                        <ComboBoxItem Content="Unread only" />
+                        <ComboBoxItem Content="Unlabeled only" />
+                    </ComboBox>
+                    <ComboBox MinWidth="160"
+                              SelectedIndex="{Binding LabelFilterMode, Mode=TwoWay}"
+                              SelectionChanged="OnLabelFilterChanged"
+                              Visibility="{Binding ShowLabelFilter, Converter={StaticResource BoolToVisibilityConverter}}">
+                        <ComboBoxItem Content="All" />
+                        <ComboBoxItem Content="Unread only" />
+                        <ComboBoxItem Content="Suggestions only" />
+                    </ComboBox>
                 </StackPanel>
                 <TextBlock Text="{Binding StatusMessage}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="WrapWholeWords" />
                 <StackPanel Orientation="Horizontal" Spacing="8">

@@ -48,7 +48,7 @@ public sealed partial class ImapDashboardView : UserControl
     public event EventHandler<EmailMessageViewModel>? SenderSuggestionAccepted;
     public event EventHandler<EmailMessageViewModel>? LabelSenderRequested;
     public event EventHandler<EmailMessageViewModel>? DeleteMessageRequested;
-    public event EventHandler<bool>? UnlabeledOnlyToggled;
+    public event EventHandler? FilterChanged;
     public event EventHandler<MessageReadStateRequest>? MessageReadStateChangeRequested;
     public event EventHandler<MailFolderViewModel>? FolderMarkAllReadRequested;
     public event EventHandler<LabelViewModel>? LabelMarkAllReadRequested;
@@ -192,23 +192,31 @@ public sealed partial class ImapDashboardView : UserControl
         }
     }
 
-    private void OnUnlabeledOnlyToggled(object sender, RoutedEventArgs e)
+    private void OnFolderFilterChanged(object sender, SelectionChangedEventArgs e)
     {
         if (DataContext is not MailboxViewModel vm)
         {
             return;
         }
 
-        if (sender is ToggleSwitch ts)
+        if (sender is ComboBox comboBox && comboBox.SelectedIndex >= 0)
         {
-            vm.ActiveFilterOnly = ts.IsOn;
-            UnlabeledOnlyToggled?.Invoke(this, ts.IsOn);
+            vm.FolderFilterMode = comboBox.SelectedIndex;
+            FilterChanged?.Invoke(this, EventArgs.Empty);
         }
-        else if (sender is CheckBox cb)
+    }
+
+    private void OnLabelFilterChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (DataContext is not MailboxViewModel vm)
         {
-            var isOn = cb.IsChecked == true;
-            vm.ActiveFilterOnly = isOn;
-            UnlabeledOnlyToggled?.Invoke(this, isOn);
+            return;
+        }
+
+        if (sender is ComboBox comboBox && comboBox.SelectedIndex >= 0)
+        {
+            vm.LabelFilterMode = comboBox.SelectedIndex;
+            FilterChanged?.Invoke(this, EventArgs.Empty);
         }
     }
 

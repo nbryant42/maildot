@@ -59,6 +59,8 @@ even if the server data is deleted, contrary to most IMAP clients, which treat t
 designed to mirror server state locally. It's not ready to fully replace Thunderbird, but it can fill in some gaps in my
 workflow.
 
+For implementation details on the hybrid IMAP/Postgres consistency model, see [docs/source-of-truth-model.md](docs/source-of-truth-model.md).
+
 If your IMAP provider is Gmail, you will likely be frustrated that our "labels" are not synced to Gmail labels, which
 are emulated as folders when viewed via IMAP. But if your workflow is like mine, you might be in the right place.
 

@@ -36,6 +36,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
     private readonly SemaphoreSlim _semaphore = new(1, 1);
     private readonly Dictionary<string, IMailFolder> _folderCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _folderNextEndIndex = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> _folderNextUnreadOffset = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, long?> _folderNextUnlabeledImapUid = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<(int AccountId, int LabelId), LearnedLambdaEntry> _folderPriorLambdaCache = [];
     private readonly object _folderPriorLambdaCacheGate = new();
@@ -134,6 +135,12 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 await folder.OpenAsync(FolderAccess.ReadOnly, _cts.Token);
             }
 
+            if (_viewModel.FolderUnreadOnly)
+            {
+                await LoadUnreadFolderPageAsync(folderId, folderDisplay, folder, append: false, combinedOffset: 0, _cts.Token);
+                return;
+            }
+
             if (_viewModel.UnlabeledOnly)
             {
                 _folderNextUnlabeledImapUid[folderId] = null;
@@ -142,39 +149,39 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             }
 
             var messageCount = folder.Count;
-            if (messageCount == 0)
+            if (messageCount > 0)
             {
-                _folderNextEndIndex[folderId] = -1;
-                var localOnlyMessages = await LoadLocalOnlyMessagesForFolderAsync(folderId, PageSize, _cts.Token);
+                var endIndex = messageCount - 1;
+                var startIndex = Math.Max(0, endIndex - PageSize + 1);
+                var emailItems = await FetchMessagesAsync(folder, startIndex, endIndex);
+                var localOnly = await LoadLocalOnlyMessagesForFolderAsync(folderId, PageSize, _cts.Token);
+                var mergedItems = emailItems
+                    .Concat(localOnly)
+                    .GroupBy(m => m.Id)
+                    .Select(g => g.First())
+                    .OrderByDescending(m => m.Received)
+                    .Take(PageSize)
+                    .ToList();
+
+                _folderNextEndIndex[folderId] = startIndex - 1;
+
                 await EnqueueAsync(() =>
                 {
-                    _viewModel.SetMessages(folderDisplay, localOnlyMessages);
-                    _viewModel.SetStatus(localOnlyMessages.Count == 0 ? "Folder is empty." : "Mailbox is up to date.", false);
-                    _viewModel.SetLoadMoreAvailability(false);
+                    _viewModel.SetMessages(folderDisplay, mergedItems);
+                    _viewModel.SetStatus("Mailbox is up to date.", false);
+                    _viewModel.SetLoadMoreAvailability(startIndex > 0);
                     _viewModel.SetRetryVisible(false);
                 });
                 return;
             }
 
-            var endIndex = messageCount - 1;
-            var startIndex = Math.Max(0, endIndex - PageSize + 1);
-            var emailItems = await FetchMessagesAsync(folder, startIndex, endIndex);
-            var localOnly = await LoadLocalOnlyMessagesForFolderAsync(folderId, PageSize, _cts.Token);
-            var mergedItems = emailItems
-                .Concat(localOnly)
-                .GroupBy(m => m.Id)
-                .Select(g => g.First())
-                .OrderByDescending(m => m.Received)
-                .Take(PageSize)
-                .ToList();
-
-            _folderNextEndIndex[folderId] = startIndex - 1;
-
+            _folderNextEndIndex[folderId] = -1;
+            var localOnlyMessages = await LoadLocalOnlyMessagesForFolderAsync(folderId, PageSize, _cts.Token);
             await EnqueueAsync(() =>
             {
-                _viewModel.SetMessages(folderDisplay, mergedItems);
-                _viewModel.SetStatus("Mailbox is up to date.", false);
-                _viewModel.SetLoadMoreAvailability(startIndex > 0);
+                _viewModel.SetMessages(folderDisplay, localOnlyMessages);
+                _viewModel.SetStatus(localOnlyMessages.Count == 0 ? "Folder is empty." : "Mailbox is up to date.", false);
+                _viewModel.SetLoadMoreAvailability(false);
                 _viewModel.SetRetryVisible(false);
             });
             return;
@@ -287,6 +294,25 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 }
 
                 await LoadUnlabeledFolderPageAsync(folderId, nextUid, append: true, _cts.Token);
+                return;
+            }
+
+            if (_viewModel.FolderUnreadOnly)
+            {
+                if (!_folderNextUnreadOffset.TryGetValue(folderId, out var nextUnreadOffset) || nextUnreadOffset < 0)
+                {
+                    await ReportStatusAsync("No more messages to load.", false);
+                    await EnqueueAsync(() =>
+                    {
+                        _viewModel.SetLoadMoreAvailability(false);
+                        _viewModel.SetRetryVisible(false);
+                    });
+                    return;
+                }
+
+                var unreadFolderDisplay = string.IsNullOrEmpty(folder.Name) ? folderId : folder.Name;
+                await ReportStatusAsync($"Loading older messages for {unreadFolderDisplay}â€¦", true);
+                await LoadUnreadFolderPageAsync(folderId, unreadFolderDisplay, folder, append: true, combinedOffset: nextUnreadOffset, _cts.Token);
                 return;
             }
 
@@ -891,6 +917,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             // clear _folderCache first so that exceptions can't leave us in an inconsistent state.
             _folderCache.Clear();
             _folderNextEndIndex.Clear();
+            _folderNextUnreadOffset.Clear();
 
             _client?.Dispose();
             _client = new ImapClient();
@@ -1149,7 +1176,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             })
             .ToList();
 
-        return ApplyUnlabeledFilter(items);
+        return ApplyFolderViewFilter(items);
     }
 
     private async Task LoadUnlabeledFolderPageAsync(string folderFullName, long? imapUidLessThan, bool append, CancellationToken token)
@@ -1298,7 +1325,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 .Take(limit)
                 .ToListAsync(token);
 
-            return rows.Select(r =>
+            return ApplyFolderViewFilter(rows.Select(r =>
             {
                 var senderDisplay = !string.IsNullOrWhiteSpace(r.FromName)
                     ? r.FromName!
@@ -1319,7 +1346,246 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     Received = r.ReceivedUtc.LocalDateTime,
                     IsRead = r.IsRead
                 };
+            }).ToList());
+        }
+    }
+
+    private async Task LoadUnreadFolderPageAsync(
+        string folderFullName,
+        string folderDisplay,
+        IMailFolder folder,
+        bool append,
+        int combinedOffset,
+        CancellationToken token)
+    {
+        var serverUnreadUids = await folder.SearchAsync(SearchQuery.NotSeen, token);
+        var serverUnreadCount = serverUnreadUids.Count;
+        var queryLimit = combinedOffset + (PageSize * 3);
+
+        var pagedUnreadUids = serverUnreadUids
+            .Reverse()
+            .Skip(combinedOffset)
+            .Take(PageSize * 2)
+            .ToList();
+
+        var serverUnreadMessages = pagedUnreadUids.Count == 0
+            ? []
+            : await FetchMessagesByUidAsync(folder, pagedUnreadUids, token);
+
+        var localUnreadMessages = await LoadUnreadMessagesForFolderAsync(folderFullName, queryLimit, token);
+        var localUnreadCount = await CountUnreadMessagesForFolderAsync(folderFullName, token);
+
+        var merged = serverUnreadMessages
+            .Concat(localUnreadMessages)
+            .GroupBy(m => m.Id, StringComparer.Ordinal)
+            .Select(g => g.First())
+            .OrderByDescending(m => m.Received)
+            .ToList();
+
+        var page = merged
+            .Skip(combinedOffset)
+            .Take(PageSize)
+            .ToList();
+
+        var hasMore = combinedOffset + page.Count < Math.Max(merged.Count, serverUnreadCount + localUnreadCount);
+        _folderNextUnreadOffset[folderFullName] = hasMore ? combinedOffset + page.Count : -1;
+
+        await EnqueueAsync(() =>
+        {
+            if (append)
+            {
+                _viewModel.AppendMessages(page);
+            }
+            else
+            {
+                _viewModel.SetMessages(folderDisplay, page);
+            }
+
+            _viewModel.SetStatus(page.Count == 0 && !append ? "No unread messages." : "Mailbox is up to date.", false);
+            _viewModel.SetLoadMoreAvailability(hasMore);
+            _viewModel.SetRetryVisible(false);
+        });
+    }
+
+    private async Task<List<EmailMessageViewModel>> FetchMessagesByUidAsync(IMailFolder folder, IList<UniqueId> uids, CancellationToken token)
+    {
+        var summaries = await folder.FetchAsync(
+            uids,
+            MessageSummaryItems.Envelope | MessageSummaryItems.UniqueId | MessageSummaryItems.InternalDate | MessageSummaryItems.Flags,
+            token);
+
+        await PersistMessagesAsync(folder, summaries);
+
+        var labelMap = await LoadLabelMapAsync(summaries.Select(s => (long)s.UniqueId.Id));
+
+        return summaries
+            .OrderByDescending(s => s.InternalDate?.UtcDateTime ?? DateTime.MinValue)
+            .Select(summary =>
+            {
+                var mailbox = summary.Envelope?.From?.OfType<MailboxAddress>().FirstOrDefault();
+                var senderName = mailbox?.Name;
+                var senderAddress = mailbox?.Address;
+                var senderDisplay = !string.IsNullOrWhiteSpace(senderName)
+                    ? senderName!
+                    : senderAddress ?? "(Unknown sender)";
+
+                var colorComponents = SenderColorHelper.GetColor(senderName, senderAddress);
+                var messageColor = new Color
+                {
+                    A = 255,
+                    R = colorComponents.R,
+                    G = colorComponents.G,
+                    B = colorComponents.B
+                };
+
+                var toList = FormatAddressList(summary.Envelope?.To);
+                var ccList = FormatAddressList(summary.Envelope?.Cc);
+                var bccList = FormatAddressList(summary.Envelope?.Bcc);
+
+                var vm = new EmailMessageViewModel
+                {
+                    Id = summary.UniqueId.Id.ToString(),
+                    FolderId = folder.FullName,
+                    Subject = summary.Envelope?.Subject ?? "(No subject)",
+                    Sender = senderDisplay,
+                    SenderAddress = senderAddress ?? string.Empty,
+                    SenderInitials = SenderInitialsHelper.From(senderName, senderAddress),
+                    SenderColor = messageColor,
+                    Preview = summary.Envelope?.Subject ?? string.Empty,
+                    Received = summary.InternalDate?.LocalDateTime ?? DateTimeOffset.UtcNow.LocalDateTime,
+                    IsRead = summary.Flags?.HasFlag(MessageFlags.Seen) == true,
+                    To = toList,
+                    Cc = string.IsNullOrWhiteSpace(ccList) ? null : ccList,
+                    Bcc = string.IsNullOrWhiteSpace(bccList) ? null : bccList
+                };
+
+                if (labelMap.TryGetValue(summary.UniqueId.Id, out var names))
+                {
+                    vm.LabelNames = names;
+                }
+
+                return vm;
+            })
+            .ToList();
+    }
+
+    private async Task<List<EmailMessageViewModel>> LoadUnreadMessagesForFolderAsync(string folderFullName, int limit, CancellationToken token)
+    {
+        if (_settings == null || string.IsNullOrWhiteSpace(folderFullName) || limit <= 0)
+        {
+            return [];
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return [];
+        }
+
+        await using (db)
+        {
+            var folder = await db.ImapFolders.AsNoTracking()
+                .FirstOrDefaultAsync(f => f.AccountId == _settings.Id && f.FullName == folderFullName, token);
+
+            if (folder == null)
+            {
+                return [];
+            }
+
+            var rows = await (
+                    from m in db.ImapMessages.AsNoTracking()
+                    join b in db.MessageBodies.AsNoTracking() on m.Id equals b.MessageId into bodies
+                    from b in bodies.DefaultIfEmpty()
+                    where m.FolderId == folder.Id && !m.IsRead
+                    orderby m.ReceivedUtc descending, m.ImapUid descending
+                    select new
+                    {
+                        m.Id,
+                        m.ImapUid,
+                        m.IsRead,
+                        m.Subject,
+                        m.FromName,
+                        m.FromAddress,
+                        m.ReceivedUtc,
+                        Preview = b != null ? b.Preview : null
+                    })
+                .Take(limit)
+                .ToListAsync(token);
+
+            var messageIds = rows.Select(r => r.Id).ToList();
+            var explicitLabels = await (
+                    from ml in db.MessageLabels.AsNoTracking()
+                    join l in db.Labels.AsNoTracking() on ml.LabelId equals l.Id
+                    where messageIds.Contains(ml.MessageId)
+                    select new { ml.MessageId, l.Name })
+                .ToListAsync(token);
+
+            var senderLabels = await (
+                    from m in db.ImapMessages.AsNoTracking()
+                    where messageIds.Contains(m.Id)
+                    join sl in db.SenderLabels.AsNoTracking() on m.FromAddress.ToLower() equals sl.FromAddress
+                    join l in db.Labels.AsNoTracking() on sl.LabelId equals l.Id
+                    select new { m.Id, l.Name })
+                .ToListAsync(token);
+
+            var labelMap = explicitLabels
+                .Select(x => new { MessageId = x.MessageId, x.Name })
+                .Concat(senderLabels.Select(x => new { MessageId = x.Id, x.Name }))
+                .GroupBy(x => x.MessageId)
+                .ToDictionary(g => g.Key, g => g.Select(x => x.Name).Distinct().ToList());
+
+            return rows.Select(r =>
+            {
+                var senderDisplay = !string.IsNullOrWhiteSpace(r.FromName)
+                    ? r.FromName!
+                    : string.IsNullOrWhiteSpace(r.FromAddress) ? "(Unknown sender)" : r.FromAddress!;
+
+                var color = SenderColorHelper.GetColor(r.FromName, r.FromAddress);
+                var vm = new EmailMessageViewModel
+                {
+                    Id = r.ImapUid.ToString(),
+                    IsLocalOnly = r.ImapUid <= 0,
+                    FolderId = folder.FullName,
+                    Subject = string.IsNullOrWhiteSpace(r.Subject) ? "(No subject)" : r.Subject!,
+                    Sender = senderDisplay,
+                    SenderAddress = r.FromAddress ?? string.Empty,
+                    SenderInitials = SenderInitialsHelper.From(r.FromName, r.FromAddress),
+                    SenderColor = new Color { A = 255, R = color.R, G = color.G, B = color.B },
+                    Preview = string.IsNullOrWhiteSpace(r.Preview) ? r.Subject ?? string.Empty : r.Preview!,
+                    Received = r.ReceivedUtc.LocalDateTime,
+                    IsRead = r.IsRead
+                };
+
+                if (labelMap.TryGetValue(r.Id, out var names))
+                {
+                    vm.LabelNames = names;
+                }
+
+                return vm;
             }).ToList();
+        }
+    }
+
+    private async Task<int> CountUnreadMessagesForFolderAsync(string folderFullName, CancellationToken token)
+    {
+        if (_settings == null || string.IsNullOrWhiteSpace(folderFullName))
+        {
+            return 0;
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return 0;
+        }
+
+        await using (db)
+        {
+            return await (
+                    from f in db.ImapFolders.AsNoTracking()
+                    where f.AccountId == _settings.Id && f.FullName == folderFullName
+                    select db.ImapMessages.Count(m => m.FolderId == f.Id && !m.IsRead))
+                .FirstOrDefaultAsync(token);
         }
     }
 
@@ -1335,6 +1601,20 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             _folderNextUnlabeledImapUid[folderFullName] = null;
             await LoadUnlabeledFolderPageAsync(folderFullName, null, append: false, token);
             await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
+            return;
+        }
+
+        if (_viewModel.FolderUnreadOnly)
+        {
+            var unreadMessages = await LoadUnreadMessagesForFolderAsync(folderFullName, PageSize, token);
+            _folderNextUnreadOffset[folderFullName] = unreadMessages.Count == PageSize ? PageSize : -1;
+            await EnqueueAsync(() =>
+            {
+                _viewModel.SetMessages(folderFullName, unreadMessages);
+                _viewModel.SetStatus(unreadMessages.Count == 0 ? "No unread messages." : "Mailbox is up to date.", false);
+                _viewModel.SetLoadMoreAvailability(unreadMessages.Count == PageSize);
+                _viewModel.SetRetryVisible(true);
+            });
             return;
         }
 
@@ -1362,6 +1642,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     join b in db.MessageBodies.AsNoTracking() on m.Id equals b.MessageId into bodies
                     from b in bodies.DefaultIfEmpty()
                     where m.FolderId == folder.Id
+                          && (!_viewModel.FolderUnreadOnly || !m.IsRead)
                     orderby m.ImapUid descending
                     select new
                     {
@@ -1431,7 +1712,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             _folderNextEndIndex[folderFullName] = -1;
             await EnqueueAsync(() =>
             {
-                _viewModel.SetMessages(string.IsNullOrWhiteSpace(folder.DisplayName) ? folder.FullName : folder.DisplayName, messages);
+                _viewModel.SetMessages(string.IsNullOrWhiteSpace(folder.DisplayName) ? folder.FullName : folder.DisplayName, ApplyFolderViewFilter(messages));
                 _viewModel.SetLoadMoreAvailability(false);
                 _viewModel.SetRetryVisible(true);
             });
@@ -3297,16 +3578,36 @@ GROUP BY lids.""LabelId""";
         };
     }
 
-    private List<EmailMessageViewModel> ApplyUnlabeledFilter(IEnumerable<EmailMessageViewModel> messages)
+    private List<EmailMessageViewModel> ApplyFolderViewFilter(IEnumerable<EmailMessageViewModel> messages)
     {
-        if (!_viewModel.UnlabeledOnly)
+        var filtered = messages;
+
+        if (_viewModel.FolderUnreadOnly)
         {
-            return messages.ToList();
+            filtered = filtered.Where(m => m.IsUnread);
+        }
+        else if (_viewModel.UnlabeledOnly)
+        {
+            filtered = filtered.Where(IsUnlabeled);
         }
 
-        return messages
-            .Where(IsUnlabeled)
-            .ToList();
+        return filtered.ToList();
+    }
+
+    private List<EmailMessageViewModel> ApplyLabelViewFilter(IEnumerable<EmailMessageViewModel> messages)
+    {
+        var filtered = messages;
+
+        if (_viewModel.LabelUnreadOnly)
+        {
+            filtered = filtered.Where(m => m.IsUnread);
+        }
+        else if (_viewModel.SuggestionsOnly)
+        {
+            filtered = filtered.Where(m => m.IsSuggested);
+        }
+
+        return filtered.ToList();
     }
 
     private static bool IsUnlabeled(EmailMessageViewModel message) =>
@@ -3607,16 +3908,9 @@ GROUP BY lids.""LabelId""";
                     explicitSet.Add(vm);
                 }
 
-                var ordered = explicitSet
+                var ordered = ApplyLabelViewFilter(explicitSet
                     .OrderByDescending(m => m.Received)
-                    .ToList();
-
-                if (_viewModel.SuggestionsOnly)
-                {
-                    ordered = ordered
-                        .Where(m => m.IsSuggested)
-                        .ToList();
-                }
+                    .ToList());
 
                 await EnqueueAsync(() =>
                 {

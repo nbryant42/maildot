@@ -24,8 +24,8 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
     private bool _isRetryVisible;
     private EmailMessageViewModel? _selectedMessage;
     private int? _selectedLabelId;
-    private bool _unlabeledOnly;
-    private bool _suggestionsOnly;
+    private int _folderFilterMode;
+    private int _labelFilterMode;
 
     public ObservableCollection<MailFolderViewModel> Folders { get; } = new();
     public ObservableCollection<EmailMessageViewModel> Messages { get; } = new();
@@ -45,6 +45,7 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
                     _lastSelectedFolderId = value.Id;
                 }
                 OnPropertyChanged(nameof(SelectedFolder));
+                OnPropertyChanged(nameof(ShowFolderFilter));
             }
         }
     }
@@ -73,6 +74,8 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
             {
                 _isSearchActive = value;
                 OnPropertyChanged(nameof(IsSearchActive));
+                OnPropertyChanged(nameof(ShowFolderFilter));
+                OnPropertyChanged(nameof(ShowLabelFilter));
             }
         }
     }
@@ -157,51 +160,75 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public bool UnlabeledOnly
+    public int FolderFilterMode
     {
-        get => _unlabeledOnly;
+        get => _folderFilterMode;
         set
         {
-            if (_unlabeledOnly != value)
+            if (_folderFilterMode != value)
             {
-                _unlabeledOnly = value;
+                _folderFilterMode = value;
+                OnPropertyChanged(nameof(FolderFilterMode));
                 OnPropertyChanged(nameof(UnlabeledOnly));
-                OnPropertyChanged(nameof(ActiveFilterOnly));
+                OnPropertyChanged(nameof(FolderUnreadOnly));
             }
         }
     }
+
+    public int LabelFilterMode
+    {
+        get => _labelFilterMode;
+        set
+        {
+            if (_labelFilterMode != value)
+            {
+                _labelFilterMode = value;
+                OnPropertyChanged(nameof(LabelFilterMode));
+                OnPropertyChanged(nameof(SuggestionsOnly));
+                OnPropertyChanged(nameof(LabelUnreadOnly));
+            }
+        }
+    }
+
+    public bool UnlabeledOnly
+    {
+        get => _folderFilterMode == 2;
+        set
+        {
+            if (value)
+            {
+                FolderFilterMode = 2;
+            }
+            else if (_folderFilterMode == 2)
+            {
+                FolderFilterMode = 0;
+            }
+        }
+    }
+
+    public bool FolderUnreadOnly => _folderFilterMode == 1;
 
     public bool SuggestionsOnly
     {
-        get => _suggestionsOnly;
+        get => _labelFilterMode == 2;
         set
         {
-            if (_suggestionsOnly != value)
+            if (value)
             {
-                _suggestionsOnly = value;
-                OnPropertyChanged(nameof(SuggestionsOnly));
-                OnPropertyChanged(nameof(ActiveFilterOnly));
+                LabelFilterMode = 2;
+            }
+            else if (_labelFilterMode == 2)
+            {
+                LabelFilterMode = 0;
             }
         }
     }
 
-    public bool ActiveFilterOnly
-    {
-        get => _selectedLabelId != null ? _suggestionsOnly : _unlabeledOnly;
-        set
-        {
-            if (_selectedLabelId != null)
-            {
-                SuggestionsOnly = value;
-            }
-            else
-            {
-                UnlabeledOnly = value;
-            }
-        }
-    }
+    public bool LabelUnreadOnly => _labelFilterMode == 1;
 
-    public string ActiveFilterLabel => _selectedLabelId != null ? "Suggestions only" : "Unlabeled only";
+    public bool ShowFolderFilter => !IsSearchActive && _selectedLabelId == null && _selectedFolder != null;
+
+    public bool ShowLabelFilter => !IsSearchActive && _selectedLabelId != null;
 
     public void SetFolders(IEnumerable<MailFolderViewModel> folders)
     {
@@ -256,8 +283,8 @@ public sealed class MailboxViewModel : INotifyPropertyChanged
             SelectedFolder = null;
         }
 
-        OnPropertyChanged(nameof(ActiveFilterOnly));
-        OnPropertyChanged(nameof(ActiveFilterLabel));
+        OnPropertyChanged(nameof(ShowFolderFilter));
+        OnPropertyChanged(nameof(ShowLabelFilter));
     }
 
     public int? SelectedLabelId => _selectedLabelId;

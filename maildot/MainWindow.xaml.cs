@@ -273,8 +273,8 @@ public sealed partial class MainWindow : Window
         _dashboardView.LabelSenderRequested += OnLabelSenderRequested;
         _dashboardView.DeleteMessageRequested -= OnDeleteMessageRequested;
         _dashboardView.DeleteMessageRequested += OnDeleteMessageRequested;
-        _dashboardView.UnlabeledOnlyToggled -= OnUnlabeledOnlyToggled;
-        _dashboardView.UnlabeledOnlyToggled += OnUnlabeledOnlyToggled;
+        _dashboardView.FilterChanged -= OnFilterChanged;
+        _dashboardView.FilterChanged += OnFilterChanged;
         _dashboardView.MessageReadStateChangeRequested -= OnMessageReadStateChangeRequested;
         _dashboardView.MessageReadStateChangeRequested += OnMessageReadStateChangeRequested;
         _dashboardView.FolderMarkAllReadRequested -= OnFolderMarkAllReadRequested;
@@ -306,11 +306,12 @@ public sealed partial class MainWindow : Window
 
     private void OnFolderSelected(object? sender, MailFolderViewModel folder)
     {
-        if (_imapService == null)
+        if (_imapService == null || _mailboxViewModel == null)
         {
             return;
         }
 
+        _mailboxViewModel.SelectedFolder = folder;
         ClearLabelSelection();
         _mailboxViewModel?.ExitSearchMode();
         _dashboardView?.ClearMessageContentAsync();
@@ -318,7 +319,7 @@ public sealed partial class MainWindow : Window
         _ = _imapService.LoadFolderAsync(folder.Id);
     }
 
-    private void OnUnlabeledOnlyToggled(object? sender, bool isOn)
+    private void OnFilterChanged(object? sender, EventArgs e)
     {
         if (_imapService == null || _mailboxViewModel == null || _mailboxViewModel.IsSearchActive)
         {
@@ -327,12 +328,10 @@ public sealed partial class MainWindow : Window
 
         if (_mailboxViewModel.SelectedLabelId is int labelId)
         {
-            _mailboxViewModel.SuggestionsOnly = isOn;
             _ = _imapService.LoadLabelMessagesAsync(labelId, _searchSinceUtc);
             return;
         }
 
-        _mailboxViewModel.UnlabeledOnly = isOn;
         if (_mailboxViewModel.SelectedFolder is MailFolderViewModel folder)
         {
             _ = _imapService.LoadFolderAsync(folder.Id);
