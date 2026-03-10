@@ -1642,7 +1642,6 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     join b in db.MessageBodies.AsNoTracking() on m.Id equals b.MessageId into bodies
                     from b in bodies.DefaultIfEmpty()
                     where m.FolderId == folder.Id
-                          && (!_viewModel.FolderUnreadOnly || !m.IsRead)
                     orderby m.ImapUid descending
                     select new
                     {
@@ -3582,11 +3581,7 @@ GROUP BY lids.""LabelId""";
     {
         var filtered = messages;
 
-        if (_viewModel.FolderUnreadOnly)
-        {
-            filtered = filtered.Where(m => m.IsUnread);
-        }
-        else if (_viewModel.UnlabeledOnly)
+        if (_viewModel.UnlabeledOnly)
         {
             filtered = filtered.Where(IsUnlabeled);
         }
