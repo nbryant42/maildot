@@ -667,19 +667,33 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        var bodyTask = _imapService.LoadMessageBodyAsync(folderId, messageId);
-        var attachmentsTask = _imapService.LoadImageAttachmentsAsync(folderId, messageId);
-
-        var body = await bodyTask;
+        var body = await _imapService.LoadMessageBodyAsync(folderId, messageId);
 
         if (body?.Headers != null)
         {
             ApplyMessageHeaders(messageId, body.Headers);
         }
 
+        List<ImapSyncService.AttachmentContent> attachments = [];
         if (body != null)
         {
-            await _dashboardView.DisplayMessageContentAsync(body.Html);
+            await _imapService.EnsureCidAttachmentMetadataAsync(folderId, messageId, body.Html);
+
+            try
+            {
+                attachments = await _imapService.LoadImageAttachmentsAsync(folderId, messageId);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Attachment load failed: {ex}");
+            }
+
+            var inlineRender = CidInlineImageResolver.Resolve(body.Html, attachments);
+            await _dashboardView.DisplayMessageContentAsync(inlineRender.Html);
+
+            attachments = attachments
+                .Where(a => !inlineRender.ConsumedAttachmentIds.Contains(a.AttachmentId) && !IsInlineDisposition(a.Disposition))
+                .ToList();
 
             if (_mailboxViewModel?.SelectedMessage is { } selected &&
                 string.Equals(selected.Id, messageId, StringComparison.Ordinal) &&
@@ -692,16 +706,6 @@ public sealed partial class MainWindow : Window
         else
         {
             await _dashboardView.ClearMessageContentAsync();
-        }
-
-        List<ImapSyncService.AttachmentContent> attachments = [];
-        try
-        {
-            attachments = await attachmentsTask;
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"Attachment load failed: {ex}");
         }
 
         if (attachments.Count > 0)
@@ -1352,4 +1356,8 @@ img{max-width:100%;height:auto;border-radius:6px;display:block;}
         sb.Append("</body></html>");
         return sb.ToString();
     }
+
+    private static bool IsInlineDisposition(string? disposition) =>
+        !string.IsNullOrWhiteSpace(disposition) &&
+        disposition.TrimStart().StartsWith("inline", StringComparison.OrdinalIgnoreCase);
 }

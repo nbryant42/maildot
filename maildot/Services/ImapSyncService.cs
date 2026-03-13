@@ -1924,8 +1924,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
     }
 
     private record EmbeddingInsert(int MessageId, int ChunkIndex, float[] Vector, string ModelVersion, DateTimeOffset CreatedAt);
-    private record AttachmentInsert(string FileName, string ContentType, string? Disposition, long SizeBytes, string Hash, uint LargeObjectId);
-    public record AttachmentContent(string FileName, string ContentType, string? Disposition, string Base64Data, long SizeBytes);
+    private record AttachmentInsert(string FileName, string ContentType, string? ContentId, string? Disposition, long SizeBytes, string Hash, uint LargeObjectId);
+    public record AttachmentContent(int AttachmentId, string FileName, string ContentType, string? ContentId, string? Disposition, string Base64Data, long SizeBytes);
     public record MessageHeaderInfo(string From, string FromAddress, string To, string? Cc, string? Bcc);
     public record MessageBodyResult(string Html, MessageHeaderInfo Headers);
     private record SearchResult(
@@ -2030,6 +2030,9 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
     {
         var fileName = GetAttachmentFileName(entity);
         var contentType = TextCleaner.CleanNullable(entity.ContentType?.MimeType) ?? "application/octet-stream";
+        var contentId = entity.Headers?
+            .FirstOrDefault(h => h != null && string.Equals(h.Field, "Content-Id", StringComparison.OrdinalIgnoreCase))
+            ?.Value;
         var disposition = entity.Headers?
             .FirstOrDefault(h => h != null && string.Equals(h.Field, "Content-Disposition", StringComparison.OrdinalIgnoreCase))
             ?.Value;
@@ -2084,6 +2087,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             return new AttachmentInsert(
                 FileName: fileName,
                 ContentType: contentType,
+                ContentId: contentId,
                 Disposition: disposition,
                 SizeBytes: totalBytes,
                 Hash: hash,
@@ -2347,10 +2351,31 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 return;
             }
 
-            await db.Database.OpenConnectionAsync(token);
-            await using var tx = await db.Database.BeginTransactionAsync(token);
+            await PersistMessageMimeContentAsync(
+                db,
+                entity,
+                message,
+                overwriteBody: !hasBody,
+                overwriteAttachments: !hasAttachments,
+                token);
+        }
+    }
 
-            if (!hasBody)
+    private async Task PersistMessageMimeContentAsync(
+        MailDbContext db,
+        ImapMessage entity,
+        MimeMessage message,
+        bool overwriteBody,
+        bool overwriteAttachments,
+        CancellationToken token)
+    {
+        await db.Database.OpenConnectionAsync(token);
+        await using var tx = await db.Database.BeginTransactionAsync(token);
+        var conn = (NpgsqlConnection)db.Database.GetDbConnection();
+
+        try
+        {
+            if (overwriteBody)
             {
                 var headers = message.Headers
                     .GroupBy(h => h.Field)
@@ -2364,52 +2389,77 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 var previewSource = string.IsNullOrWhiteSpace(plain) ? message.Subject ?? string.Empty : plain;
                 var preview = BuildPreview(previewSource);
 
-                MessageBody mb = new()
-                {
-                    MessageId = entity.Id,
-                    PlainText = plain,
-                    HtmlText = html,
-                    SanitizedHtml = sanitized,
-                    SanitizedHtmlVersion = HtmlSanitizer.CurrentPolicyVersion,
-                    Headers = headers,
-                    Preview = preview
-                };
-                db.MessageBodies.Add(mb);
-            }
+                var existingBody = await db.MessageBodies
+                    .FirstOrDefaultAsync(b => b.MessageId == entity.Id, token);
 
-            if (!hasAttachments)
-            {
-                var conn = (NpgsqlConnection)db.Database.GetDbConnection();
-                var attachments = await DownloadAttachmentsAsync(conn, (NpgsqlTransaction)tx.GetDbTransaction(), message, token);
-                if (attachments.Count > 0)
+                if (existingBody == null)
                 {
-                    foreach (var attachment in attachments)
+                    db.MessageBodies.Add(new MessageBody
                     {
-                        db.MessageAttachments.Add(new MessageAttachment
-                        {
-                            MessageId = entity.Id,
-                            FileName = attachment.FileName,
-                            ContentType = attachment.ContentType,
-                            Disposition = attachment.Disposition,
-                            SizeBytes = attachment.SizeBytes,
-                            Hash = attachment.Hash,
-                            LargeObjectId = attachment.LargeObjectId
-                        });
-                    }
+                        MessageId = entity.Id,
+                        PlainText = plain,
+                        HtmlText = html,
+                        SanitizedHtml = sanitized,
+                        SanitizedHtmlVersion = HtmlSanitizer.CurrentPolicyVersion,
+                        Headers = headers,
+                        Preview = preview
+                    });
+                }
+                else
+                {
+                    existingBody.PlainText = plain;
+                    existingBody.HtmlText = html;
+                    existingBody.SanitizedHtml = sanitized;
+                    existingBody.SanitizedHtmlVersion = HtmlSanitizer.CurrentPolicyVersion;
+                    existingBody.Headers = headers;
+                    existingBody.Preview = preview;
                 }
             }
 
-            try
+            if (overwriteAttachments)
             {
-                await db.SaveChangesAsync(token);
-                await tx.CommitAsync(token);
+                var existingAttachments = await db.MessageAttachments
+                    .Where(a => a.MessageId == entity.Id)
+                    .ToListAsync(token);
+
+                var manager = new PostgresLargeObjectStore(conn, (NpgsqlTransaction)tx.GetDbTransaction());
+                foreach (var existingAttachment in existingAttachments)
+                {
+                    if (existingAttachment.LargeObjectId != 0)
+                    {
+                        await manager.UnlinkAsync(existingAttachment.LargeObjectId, token);
+                    }
+                }
+
+                if (existingAttachments.Count > 0)
+                {
+                    db.MessageAttachments.RemoveRange(existingAttachments);
+                }
+
+                var attachments = await DownloadAttachmentsAsync(conn, (NpgsqlTransaction)tx.GetDbTransaction(), message, token);
+                foreach (var attachment in attachments)
+                {
+                    db.MessageAttachments.Add(new MessageAttachment
+                    {
+                        MessageId = entity.Id,
+                        FileName = attachment.FileName,
+                        ContentType = attachment.ContentType,
+                        ContentId = attachment.ContentId,
+                        Disposition = attachment.Disposition,
+                        SizeBytes = attachment.SizeBytes,
+                        Hash = attachment.Hash,
+                        LargeObjectId = attachment.LargeObjectId
+                    });
+                }
             }
-            catch (DbUpdateException ex)
-            {
-                Debug.WriteLine(
-                    $"Exception occurred while persisting message UID {uid} in folder {folder.FullName} from " +
-                    $"{entity.FromAddress} dated {entity.ReceivedUtc:o} with subject \"{entity.Subject}\": {ex}");
-            }
+
+            await db.SaveChangesAsync(token);
+            await tx.CommitAsync(token);
+        }
+        catch (DbUpdateException ex)
+        {
+            Debug.WriteLine(
+                $"Exception occurred while persisting MIME content for message {entity.ImapUid} in folder {entity.FolderId}: {ex}");
         }
     }
 
@@ -3687,6 +3737,74 @@ GROUP BY lids.""LabelId""";
     public Task<MessageBodyResult?> LoadMessageBodyAsync(string folderId, string messageId) =>
         LoadMessageBodyInternalAsync(folderId, messageId, true);
 
+    public async Task EnsureCidAttachmentMetadataAsync(string folderId, string messageId, string html)
+    {
+        if (_settings == null ||
+            string.IsNullOrWhiteSpace(folderId) ||
+            string.IsNullOrWhiteSpace(messageId) ||
+            !CidInlineImageResolver.ContainsCidReferences(html) ||
+            !long.TryParse(messageId, out var uid))
+        {
+            return;
+        }
+
+        var referencedCids = CidInlineImageResolver.ExtractCidReferences(html);
+        if (referencedCids.Count == 0)
+        {
+            return;
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return;
+        }
+
+        await using (db)
+        {
+            var folderEntity = await db.ImapFolders
+                .AsNoTracking()
+                .Where(f => f.AccountId == _settings.Id && f.FullName == folderId)
+                .FirstOrDefaultAsync(_cts.Token);
+            if (folderEntity == null)
+            {
+                return;
+            }
+
+            var messageEntity = await db.ImapMessages
+                .AsNoTracking()
+                .Where(m => m.FolderId == folderEntity.Id && m.ImapUid == uid)
+                .FirstOrDefaultAsync(_cts.Token);
+            if (messageEntity == null)
+            {
+                return;
+            }
+
+            var storedContentIds = await db.MessageAttachments
+                .AsNoTracking()
+                .Where(a => a.MessageId == messageEntity.Id &&
+                            !string.IsNullOrWhiteSpace(a.ContentId) &&
+                            a.ContentType.StartsWith("image/"))
+                .Select(a => a.ContentId!)
+                .ToListAsync(_cts.Token);
+
+            var unresolved = referencedCids
+                .Where(cid => !storedContentIds.Any(stored =>
+                    string.Equals(
+                        CidInlineImageResolver.NormalizeContentId(stored),
+                        cid,
+                        StringComparison.OrdinalIgnoreCase)))
+                .ToList();
+
+            if (unresolved.Count == 0)
+            {
+                return;
+            }
+        }
+
+        await RefreshMessageMimeFromServerAsync(folderId, uid, overwriteBody: true, overwriteAttachments: true, _cts.Token);
+    }
+
     public async Task<List<AttachmentContent>> LoadImageAttachmentsAsync(string folderId, string messageId)
     {
         var token = _cts.Token;
@@ -3767,8 +3885,10 @@ GROUP BY lids.""LabelId""";
                     await stream.CopyToAsync(ms, token);
                     var base64 = Convert.ToBase64String(ms.ToArray());
                     results.Add(new AttachmentContent(
+                        AttachmentId: attachment.Id,
                         FileName: attachment.FileName,
                         ContentType: attachment.ContentType,
+                        ContentId: attachment.ContentId,
                         Disposition: attachment.Disposition,
                         Base64Data: base64,
                         SizeBytes: attachment.SizeBytes));
@@ -3781,6 +3901,88 @@ GROUP BY lids.""LabelId""";
 
             await tx.CommitAsync(token);
             return results;
+        }
+    }
+
+    private async Task RefreshMessageMimeFromServerAsync(
+        string folderFullName,
+        long uid,
+        bool overwriteBody,
+        bool overwriteAttachments,
+        CancellationToken token)
+    {
+        IMailFolder? folder = null;
+        MimeMessage? message = null;
+
+        if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
+        {
+            Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
+            return;
+        }
+
+        try
+        {
+            if (_client == null || !_folderCache.TryGetValue(folderFullName, out folder))
+            {
+                return;
+            }
+
+            if (!folder.IsOpen)
+            {
+                await folder.OpenAsync(FolderAccess.ReadOnly, token);
+            }
+
+            message = await folder.GetMessageAsync(new UniqueId((uint)uid), token);
+        }
+        catch (MessageNotFoundException)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Unable to refresh MIME for {folderFullName}/{uid}: {ex}");
+            return;
+        }
+        finally
+        {
+            try
+            {
+                if (folder?.IsOpen == true)
+                {
+                    await folder.CloseAsync(false, token);
+                }
+            }
+            catch
+            {
+            }
+
+            _semaphore.Release();
+        }
+
+        if (message == null || _settings == null)
+        {
+            return;
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return;
+        }
+
+        await using (db)
+        {
+            var folderEntity = await db.ImapFolders
+                .AsNoTracking()
+                .Where(f => f.AccountId == _settings.Id && f.FullName == folderFullName)
+                .FirstOrDefaultAsync(token);
+            if (folderEntity == null)
+            {
+                return;
+            }
+
+            var entity = await UpsertImapMessageAsync(db, folderEntity.Id, message, uid, token);
+            await PersistMessageMimeContentAsync(db, entity, message, overwriteBody, overwriteAttachments, token);
         }
     }
 

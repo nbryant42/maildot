@@ -197,6 +197,10 @@ namespace maildot.Data.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<string>("ContentId")
+                        .HasColumnType("text")
+                        .HasColumnName("content_id");
+
                     b.Property<string>("Disposition")
                         .HasColumnType("text");
 

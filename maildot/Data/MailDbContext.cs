@@ -72,6 +72,7 @@ public sealed class MailDbContext : DbContext
         modelBuilder.Entity<MessageAttachment>(entity =>
         {
             entity.ToTable("message_attachments");
+            entity.Property(e => e.ContentId).HasColumnName("content_id");
             entity.Property(e => e.LargeObjectId).HasColumnName("large_object_id");
             entity.HasOne(a => a.Message)
                   .WithMany(m => m.Attachments)

@@ -31,6 +31,16 @@ public class HtmlSanitizerTests
     }
 
     [Fact]
+    public void AllowsCidImages()
+    {
+        var html = "<img src=\"cid:SignatureLogo\" />";
+        var result = HtmlSanitizer.Sanitize(html);
+
+        Assert.Contains("cid:SignatureLogo", result.Html, StringComparison.Ordinal);
+        Assert.Empty(result.BlockedResources);
+    }
+
+    [Fact]
     public void RemovesJavascriptHref()
     {
         var html = "<a href=\"javascript:alert(1)\">click</a>";

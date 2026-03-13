@@ -40,7 +40,6 @@ Improve HTML email fidelity incrementally without weakening the current privacy 
 
 ### Phase 2 candidates
 
-- `cid:` inline image support using locally stored attachments
 - per-message remote image opt-in
 
 ### Later possibilities
@@ -74,3 +73,8 @@ Expand sanitizer tests in four buckets:
 ## Rationale for keeping remote content blocked
 
 Remote images and external media remain the largest privacy risk in typical email rendering because they enable tracking pixels and sender-controlled fetches. Phase 1 is focused on presentation fidelity that can be recovered locally, without changing that privacy model.
+
+## Current status update
+
+- `cid:` inline image rendering is now allowed for `img[src]` and resolved only from locally stored attachments.
+- This does not enable remote content; it only replaces `cid:` references with local attachment data at render time.

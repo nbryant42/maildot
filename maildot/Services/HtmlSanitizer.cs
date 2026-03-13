@@ -27,7 +27,7 @@ public enum BlockedResourceReason
 
 public static class HtmlSanitizer
 {
-    public const int CurrentPolicyVersion = 3;
+    public const int CurrentPolicyVersion = 4;
 
     private static readonly HashSet<string> DisallowedElements =
         new(StringComparer.OrdinalIgnoreCase)
@@ -382,6 +382,15 @@ public static class HtmlSanitizer
 
         // Allow data URIs only for img[src] to prevent phishing via data:text/html on anchors
         if (value.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+        {
+            return string.Equals(elementName, "img", StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(attributeName, "src", StringComparison.OrdinalIgnoreCase)
+                ? UrlEvaluation.Allow
+                : UrlEvaluation.Invalid;
+        }
+
+        // Allow cid: only for img[src]; the content is resolved from locally stored attachments later.
+        if (value.StartsWith("cid:", StringComparison.OrdinalIgnoreCase))
         {
             return string.Equals(elementName, "img", StringComparison.OrdinalIgnoreCase) &&
                    string.Equals(attributeName, "src", StringComparison.OrdinalIgnoreCase)

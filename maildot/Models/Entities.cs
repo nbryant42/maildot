@@ -71,6 +71,7 @@ public sealed class MessageAttachment
     public int MessageId { get; set; }
     public string FileName { get; set; } = string.Empty;
     public string ContentType { get; set; } = string.Empty;
+    public string? ContentId { get; set; }
     public string? Disposition { get; set; }
     public long SizeBytes { get; set; }
     public string Hash { get; set; } = string.Empty;
