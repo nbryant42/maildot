@@ -19,6 +19,7 @@ using System.Text;
 using System.Threading.Tasks;
 using Windows.Foundation;
 using Windows.Graphics;
+using Windows.Storage.Pickers;
 using Windows.System;
 using WinRT.Interop;
 
@@ -39,6 +40,7 @@ public sealed partial class MainWindow : Window
     private SearchMode _searchMode = SearchMode.Auto;
     private AppWindow? _appWindow;
     private DateTimeOffset? _searchSinceUtc = null;
+    private readonly Dictionary<int, ImapSyncService.AttachmentContent> _currentAttachments = [];
 
     public MainWindow()
     {
@@ -281,6 +283,8 @@ public sealed partial class MainWindow : Window
         _dashboardView.FolderMarkAllReadRequested += OnFolderMarkAllReadRequested;
         _dashboardView.LabelMarkAllReadRequested -= OnLabelMarkAllReadRequested;
         _dashboardView.LabelMarkAllReadRequested += OnLabelMarkAllReadRequested;
+        _dashboardView.AttachmentSaveRequested -= OnAttachmentSaveRequested;
+        _dashboardView.AttachmentSaveRequested += OnAttachmentSaveRequested;
 
         _dashboardView.BindViewModel(_mailboxViewModel);
         RootContent.Content = _dashboardView;
@@ -674,6 +678,7 @@ public sealed partial class MainWindow : Window
             ApplyMessageHeaders(messageId, body.Headers);
         }
 
+        _currentAttachments.Clear();
         List<ImapSyncService.AttachmentContent> attachments = [];
         if (body != null)
         {
@@ -681,7 +686,7 @@ public sealed partial class MainWindow : Window
 
             try
             {
-                attachments = await _imapService.LoadImageAttachmentsAsync(folderId, messageId);
+                attachments = await _imapService.LoadAttachmentsAsync(folderId, messageId);
             }
             catch (Exception ex)
             {
@@ -692,8 +697,13 @@ public sealed partial class MainWindow : Window
             await _dashboardView.DisplayMessageContentAsync(inlineRender.Html);
 
             attachments = attachments
-                .Where(a => !inlineRender.ConsumedAttachmentIds.Contains(a.AttachmentId) && !IsInlineDisposition(a.Disposition))
+                .Where(a => !inlineRender.ConsumedAttachmentIds.Contains(a.AttachmentId) &&
+                            !ShouldHideAttachmentFromPane(a))
                 .ToList();
+            foreach (var attachment in attachments)
+            {
+                _currentAttachments[attachment.AttachmentId] = attachment;
+            }
 
             if (_mailboxViewModel?.SelectedMessage is { } selected &&
                 string.Equals(selected.Id, messageId, StringComparison.Ordinal) &&
@@ -717,6 +727,39 @@ public sealed partial class MainWindow : Window
         {
             await _dashboardView.ClearAttachmentsAsync();
         }
+    }
+
+    private async void OnAttachmentSaveRequested(object? sender, int attachmentId)
+    {
+        if (_imapService == null || !_currentAttachments.TryGetValue(attachmentId, out var attachment))
+        {
+            return;
+        }
+
+        var fileName = SanitizeAttachmentFileName(attachment.FileName);
+        var extension = GetAttachmentExtension(fileName, attachment.ContentType);
+
+        var picker = new FileSavePicker
+        {
+            SuggestedFileName = Path.GetFileNameWithoutExtension(fileName)
+        };
+        picker.FileTypeChoices.Add(
+            string.IsNullOrWhiteSpace(attachment.ContentType) ? "Attachment" : attachment.ContentType,
+            new List<string> { extension });
+
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        var file = await picker.PickSaveFileAsync();
+        if (file == null)
+        {
+            return;
+        }
+
+        var exported = await _imapService.ExportAttachmentAsync(attachmentId, file.Path);
+        _mailboxViewModel?.SetStatus(
+            exported
+                ? $"Saved attachment \"{fileName}\"."
+                : $"Failed to save attachment \"{fileName}\".",
+            false);
     }
 
     private async void OnMessageReadStateChangeRequested(object? sender, MessageReadStateRequest request)
@@ -1322,7 +1365,10 @@ public sealed partial class MainWindow : Window
 body{font-family:'Segoe UI',sans-serif;background:#f7f7f7;color:#1a1a1a;margin:0;padding:12px;}
 .item{margin-bottom:18px;padding:12px;background:#fff;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,0.08);}
 .meta{font-size:12px;color:#555;margin-bottom:8px;word-break:break-all;}
+.actions{margin-top:10px;}
+.save{display:inline-block;padding:6px 10px;border-radius:999px;background:#1f4f8f;color:#fff;text-decoration:none;font-size:12px;font-weight:600;}
 img{max-width:100%;height:auto;border-radius:6px;display:block;}
+pre{margin:0;color:#444;font:inherit;white-space:pre-wrap;}
 </style></head><body>
 """);
 
@@ -1343,13 +1389,27 @@ img{max-width:100%;height:auto;border-radius:6px;display:block;}
             sb.Append("<div class=\"meta\">");
             sb.Append(string.Join(" · ", metaParts));
             sb.Append("</div>");
-            sb.Append("<img src=\"data:");
-            sb.Append(att.ContentType);
-            sb.Append(";base64,");
-            sb.Append(att.Base64Data);
-            sb.Append("\" alt=\"");
-            sb.Append(fileName);
-            sb.Append("\" />");
+            if (!string.IsNullOrWhiteSpace(att.Base64Data) &&
+                !string.IsNullOrWhiteSpace(att.ContentType) &&
+                att.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+            {
+                sb.Append("<img src=\"data:");
+                sb.Append(att.ContentType);
+                sb.Append(";base64,");
+                sb.Append(att.Base64Data);
+                sb.Append("\" alt=\"");
+                sb.Append(fileName);
+                sb.Append("\" />");
+            }
+            else
+            {
+                sb.Append("<pre>Preview unavailable for ");
+                sb.Append(WebUtility.HtmlEncode(att.ContentType ?? "attachment"));
+                sb.Append(".</pre>");
+            }
+            sb.Append("<div class=\"actions\"><a class=\"save\" href=\"maildot-attachment:");
+            sb.Append(att.AttachmentId);
+            sb.Append("\">Save as...</a></div>");
             sb.Append("</div>");
         }
 
@@ -1360,4 +1420,40 @@ img{max-width:100%;height:auto;border-radius:6px;display:block;}
     private static bool IsInlineDisposition(string? disposition) =>
         !string.IsNullOrWhiteSpace(disposition) &&
         disposition.TrimStart().StartsWith("inline", StringComparison.OrdinalIgnoreCase);
+
+    private static bool ShouldHideAttachmentFromPane(ImapSyncService.AttachmentContent attachment) =>
+        IsInlineDisposition(attachment.Disposition) &&
+        !string.IsNullOrWhiteSpace(attachment.ContentType) &&
+        attachment.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase);
+
+    private static string SanitizeAttachmentFileName(string? fileName)
+    {
+        var cleaned = string.IsNullOrWhiteSpace(fileName) ? "attachment" : fileName.Trim();
+        foreach (var invalid in Path.GetInvalidFileNameChars())
+        {
+            cleaned = cleaned.Replace(invalid, '_');
+        }
+
+        return string.IsNullOrWhiteSpace(cleaned) ? "attachment" : cleaned;
+    }
+
+    private static string GetAttachmentExtension(string fileName, string? contentType)
+    {
+        var extension = Path.GetExtension(fileName);
+        if (!string.IsNullOrWhiteSpace(extension))
+        {
+            return extension;
+        }
+
+        return contentType?.ToLowerInvariant() switch
+        {
+            "application/pdf" => ".pdf",
+            "text/plain" => ".txt",
+            "text/html" => ".html",
+            "image/jpeg" => ".jpg",
+            "image/png" => ".png",
+            "image/gif" => ".gif",
+            _ => ".bin"
+        };
+    }
 }

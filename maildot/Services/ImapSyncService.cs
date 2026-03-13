@@ -1925,7 +1925,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
     private record EmbeddingInsert(int MessageId, int ChunkIndex, float[] Vector, string ModelVersion, DateTimeOffset CreatedAt);
     private record AttachmentInsert(string FileName, string ContentType, string? ContentId, string? Disposition, long SizeBytes, string Hash, uint LargeObjectId);
-    public record AttachmentContent(int AttachmentId, string FileName, string ContentType, string? ContentId, string? Disposition, string Base64Data, long SizeBytes);
+    public record AttachmentContent(int AttachmentId, string FileName, string ContentType, string? ContentId, string? Disposition, string? Base64Data, long SizeBytes);
     public record MessageHeaderInfo(string From, string FromAddress, string To, string? Cc, string? Bcc);
     public record MessageBodyResult(string Html, MessageHeaderInfo Headers);
     private record SearchResult(
@@ -3805,7 +3805,7 @@ GROUP BY lids.""LabelId""";
         await RefreshMessageMimeFromServerAsync(folderId, uid, overwriteBody: true, overwriteAttachments: true, _cts.Token);
     }
 
-    public async Task<List<AttachmentContent>> LoadImageAttachmentsAsync(string folderId, string messageId)
+    public async Task<List<AttachmentContent>> LoadAttachmentsAsync(string folderId, string messageId)
     {
         var token = _cts.Token;
         if (_settings == null)
@@ -3851,11 +3851,6 @@ GROUP BY lids.""LabelId""";
                 .Where(a => a.MessageId == messageEntity.Id)
                 .ToListAsync(token);
 
-            attachments = attachments
-                .Where(a => !string.IsNullOrWhiteSpace(a.ContentType) &&
-                            a.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
-                .ToList();
-
             if (attachments.Count == 0)
             {
                 return [];
@@ -3873,34 +3868,96 @@ GROUP BY lids.""LabelId""";
 
             foreach (var attachment in attachments)
             {
-                if (attachment.LargeObjectId == 0)
-                {
-                    continue;
-                }
-
+                string? base64 = null;
                 try
                 {
-                    await using var stream = await manager.OpenReadAsync(attachment.LargeObjectId, token);
-                    using var ms = new MemoryStream();
-                    await stream.CopyToAsync(ms, token);
-                    var base64 = Convert.ToBase64String(ms.ToArray());
-                    results.Add(new AttachmentContent(
-                        AttachmentId: attachment.Id,
-                        FileName: attachment.FileName,
-                        ContentType: attachment.ContentType,
-                        ContentId: attachment.ContentId,
-                        Disposition: attachment.Disposition,
-                        Base64Data: base64,
-                        SizeBytes: attachment.SizeBytes));
+                    if (attachment.LargeObjectId != 0 &&
+                        !string.IsNullOrWhiteSpace(attachment.ContentType) &&
+                        attachment.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        await using var stream = await manager.OpenReadAsync(attachment.LargeObjectId, token);
+                        using var ms = new MemoryStream();
+                        await stream.CopyToAsync(ms, token);
+                        base64 = Convert.ToBase64String(ms.ToArray());
+                    }
                 }
                 catch (Exception ex)
                 {
                     Debug.WriteLine($"Failed to read attachment {attachment.FileName} ({attachment.LargeObjectId}): {ex}");
                 }
+
+                results.Add(new AttachmentContent(
+                    AttachmentId: attachment.Id,
+                    FileName: attachment.FileName,
+                    ContentType: attachment.ContentType,
+                    ContentId: attachment.ContentId,
+                    Disposition: attachment.Disposition,
+                    Base64Data: base64,
+                    SizeBytes: attachment.SizeBytes));
             }
 
             await tx.CommitAsync(token);
             return results;
+        }
+    }
+
+    public async Task<bool> ExportAttachmentAsync(int attachmentId, string destinationPath)
+    {
+        var token = _cts.Token;
+        if (_settings == null || attachmentId <= 0 || string.IsNullOrWhiteSpace(destinationPath))
+        {
+            return false;
+        }
+
+        var db = await CreateDbContextAsync();
+        if (db == null)
+        {
+            return false;
+        }
+
+        await using (db)
+        {
+            var attachment = await (
+                from a in db.MessageAttachments.AsNoTracking()
+                join m in db.ImapMessages.AsNoTracking() on a.MessageId equals m.Id
+                join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
+                where a.Id == attachmentId && f.AccountId == _settings.Id
+                select a
+            ).FirstOrDefaultAsync(token);
+
+            if (attachment == null || attachment.LargeObjectId == 0)
+            {
+                return false;
+            }
+
+            var directory = Path.GetDirectoryName(destinationPath);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            var conn = (NpgsqlConnection)db.Database.GetDbConnection();
+            if (conn.State != System.Data.ConnectionState.Open)
+            {
+                await conn.OpenAsync(token);
+            }
+
+            await using var tx = await conn.BeginTransactionAsync(token);
+            var manager = new PostgresLargeObjectStore(conn, tx);
+
+            try
+            {
+                await using var source = await manager.OpenReadAsync(attachment.LargeObjectId, token);
+                await using var destination = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None);
+                await source.CopyToAsync(destination, token);
+                await tx.CommitAsync(token);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to export attachment {attachmentId} to {destinationPath}: {ex}");
+                return false;
+            }
         }
     }
 

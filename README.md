@@ -2,7 +2,9 @@
 
 _It's spelled "Mail.Net", but it's pronounced "maildot."_
 
-This project should be regarded as proof-of-concept level. There are few features beyond the semantic search experiment.
+This project is still early-stage and developer-oriented, but it has grown beyond a pure proof-of-concept. Core mail
+archiving, browsing, search, labeling, and modern HTML rendering now work well enough to support real day-to-day use
+for the author.
 
 ## Project priorities
 
@@ -20,23 +22,26 @@ This project should be regarded as proof-of-concept level. There are few feature
 
 ## Project status
 
-**Proof-of-concept:**
+**Current state:**
 
-- Basic email receiving UX works.
-- Basic rich-text email rendering: works, but HTML is sanitized heavily. Needs improvement.
-- PostgreSQL persistence works.
-- Search: semantic search via vector embeddings, and simple sender/subject filters over archived emails.
-- Email sending (Reply, Forward) is a kludge, which delegates to the system default mailer via mailto: links,
-  which have length limits and no attachments.
-- Labelling/categorization, with label suggestions implemented via vector embeddings centroids, plus a learned Bayesian
-  prior lift based on the server-side folder assignment (e.g. if it's in the Junk folder, it's more likely to have the
-  Spam label)
-    * This seems fairly accurate, but there may be room for improvement (e.g. cache multiple centroids per label via
-    k-means)
-- Installer/packaging: not yet implemented. Visual Studio publish profiles for an unpackaged, framework-dependent
-  deployment exist, and should work, but are mostly untested.
-- Basic MCP functionality: implemented, but needs richer message-listing and -labeling functionality at minimum
-- LLM-in-the-loop email management: only via MCP currently; no built-in functionality yet.
+- Core IMAP mailbox UX is implemented: folder browsing, message list/detail view, read/unread handling, delete-to-folder,
+  and pagination over archived mail.
+- Rich-text email rendering is substantially improved. HTML is still sanitized defensively, but common newsletter/layout
+  content now renders much more faithfully, including local `cid:` inline images while keeping remote-content blocking.
+- PostgreSQL persistence is a major part of the design rather than an experiment: headers, bodies, attachments, labels,
+  and embeddings are stored locally, with a hybrid IMAP/Postgres source-of-truth model for long-term archival use.
+- Attachments are persisted in Postgres and can now be exported back to disk from the UI. Inline signature images are
+  suppressed from the attachment pane when appropriate.
+- Search works in multiple modes: semantic search via vector embeddings, plus sender/subject filtering over archived mail.
+- Labeling/categorization is implemented, including manual labels, sender-based labels, label unread counts, and label
+  suggestions driven by embedding centroids plus a Bayesian prior lift from server-side folder placement.
+- Basic MCP functionality is implemented and useful, though still incomplete relative to the full local archive model.
+- Email sending is still limited: Reply/Forward currently delegate to the system default mailer via `mailto:` links,
+  which means length limits and no attachment support.
+- Installer/packaging remains immature. Visual Studio publish profiles for unpackaged, framework-dependent deployment
+  exist, but they are not the main focus and are lightly tested.
+- LLM-in-the-loop email management is still only exposed via MCP; there is no built-in autonomous assistant workflow in
+  the app itself yet.
 
 ## Who is this for?
 

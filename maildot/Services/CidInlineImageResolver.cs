@@ -67,6 +67,7 @@ public static class CidInlineImageResolver
         var matches = attachments
             .Where(a => !string.IsNullOrWhiteSpace(a.ContentId) &&
                         !string.IsNullOrWhiteSpace(a.ContentType) &&
+                        !string.IsNullOrWhiteSpace(a.Base64Data) &&
                         a.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
             .GroupBy(a => NormalizeContentId(a.ContentId), StringComparer.OrdinalIgnoreCase)
             .Where(g => !string.IsNullOrWhiteSpace(g.Key))

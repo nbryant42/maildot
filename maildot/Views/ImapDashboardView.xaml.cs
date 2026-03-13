@@ -2,6 +2,7 @@ using System;
 using System.Threading.Tasks;
 using System.IO;
 using maildot.ViewModels;
+using Microsoft.Web.WebView2.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
@@ -52,6 +53,7 @@ public sealed partial class ImapDashboardView : UserControl
     public event EventHandler<MessageReadStateRequest>? MessageReadStateChangeRequested;
     public event EventHandler<MailFolderViewModel>? FolderMarkAllReadRequested;
     public event EventHandler<LabelViewModel>? LabelMarkAllReadRequested;
+    public event EventHandler<int>? AttachmentSaveRequested;
 
     public void BindViewModel(MailboxViewModel viewModel)
     {
@@ -310,6 +312,24 @@ public sealed partial class ImapDashboardView : UserControl
         settings.AreDefaultScriptDialogsEnabled = false;
         settings.AreDefaultContextMenusEnabled = false;
         settings.AreDevToolsEnabled = false;
+        AttachmentsWebView.CoreWebView2.NavigationStarting -= OnAttachmentsNavigationStarting;
+        AttachmentsWebView.CoreWebView2.NavigationStarting += OnAttachmentsNavigationStarting;
+    }
+
+    private void OnAttachmentsNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(e.Uri) ||
+            !e.Uri.StartsWith("maildot-attachment:", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        e.Cancel = true;
+        var idText = e.Uri["maildot-attachment:".Length..];
+        if (int.TryParse(idText, out var attachmentId))
+        {
+            AttachmentSaveRequested?.Invoke(this, attachmentId);
+        }
     }
 
     private void OnAddRootLabelClicked(object _, RoutedEventArgs e) =>
