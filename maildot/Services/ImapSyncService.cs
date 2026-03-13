@@ -1812,6 +1812,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 }
 
                 var folders = GetFoldersByPriority();
+                var foldersWithUpdates = new List<string>();
                 foreach (var folder in folders)
                 {
                     if (token.IsCancellationRequested)
@@ -1819,7 +1820,16 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                         break;
                     }
 
-                    await FetchMissingBodiesForFolderAsync(folder, token); //reacquires semaphore repeatedly
+                    if (await FetchMissingBodiesForFolderAsync(folder, token)) // reacquires semaphore repeatedly
+                    {
+                        foldersWithUpdates.Add(folder.FullName);
+                    }
+                }
+
+                if (foldersWithUpdates.Count > 0)
+                {
+                    await RefreshFolderUnreadCountsAsync(foldersWithUpdates, token);
+                    await RefreshLabelUnreadCountsAsync(token);
                 }
 
                 delay = TimeSpan.FromMinutes(1);
@@ -2175,16 +2185,16 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         return 1;
     }
 
-    private async Task FetchMissingBodiesForFolderAsync(IMailFolder folder, CancellationToken token)
+    private async Task<bool> FetchMissingBodiesForFolderAsync(IMailFolder folder, CancellationToken token)
     {
         if (_settings == null)
         {
-            return;
+            return false;
         }
         var db = await CreateDbContextAsync();
         if (db == null)
         {
-            return;
+            return false;
         }
 
         Models.ImapFolder? folderEntity;
@@ -2196,7 +2206,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             folderEntity = await EnsureFolderEntityAsync(db, folder, token);
             if (folderEntity == null)
             {
-                return;
+                return false;
             }
 
             knownMessages = (await db.ImapMessages
@@ -2219,14 +2229,14 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
         {
             Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
-            return;
+            return false;
         }
 
         try
         {
             if (_client == null)
             {
-                return;
+                return false;
             }
 
             if (!folder.IsOpen)
@@ -2268,10 +2278,11 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
         if (folderEntity == null)
         {
-            return;
+            return false;
         }
 
         var folderId = folderEntity.Id;
+        var updated = false;
 
         foreach (var uid in targets)
         {
@@ -2280,11 +2291,13 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 break;
             }
 
-            await FetchAndPersistBodyAsync(folder, folderId, uid, token);
+            updated = await FetchAndPersistBodyAsync(folder, folderId, uid, token) || updated;
         }
+
+        return updated;
     }
 
-    private async Task FetchAndPersistBodyAsync(IMailFolder folder, int folderId, long uid, CancellationToken token)
+    private async Task<bool> FetchAndPersistBodyAsync(IMailFolder folder, int folderId, long uid, CancellationToken token)
     {
         MimeMessage? message = null;
         var uniqueId = new UniqueId((uint)uid);
@@ -2292,14 +2305,14 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
         {
             Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
-            return;
+            return false;
         }
 
         try
         {
             if (_client == null)
             {
-                return;
+                return false;
             }
 
             if (!folder.IsOpen)
@@ -2330,13 +2343,13 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
         if (message == null)
         {
-            return;
+            return false;
         }
 
         var db = await CreateDbContextAsync();
         if (db == null)
         {
-            return;
+            return false;
         }
 
         await using (db)
@@ -2348,7 +2361,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             var needsWork = !hasBody || !hasAttachments;
             if (!needsWork)
             {
-                return;
+                return false;
             }
 
             await PersistMessageMimeContentAsync(
@@ -2358,6 +2371,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 overwriteBody: !hasBody,
                 overwriteAttachments: !hasAttachments,
                 token);
+            return true;
         }
     }
 
