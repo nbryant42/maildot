@@ -1088,29 +1088,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 .Where(l => l.AccountId == _settings.Id)
                 .OrderBy(l => l.Name)
                 .ToListAsync(token);
-            var labelIds = entities.Select(e => e.Id).ToArray();
-
-            var explicitUnread = await (
-                    from ml in db.MessageLabels.AsNoTracking()
-                    where labelIds.Contains(ml.LabelId)
-                    join m in db.ImapMessages.AsNoTracking() on ml.MessageId equals m.Id
-                    where !m.IsRead
-                    select new { ml.LabelId, m.Id })
-                .ToListAsync(token);
-
-            var senderUnread = await (
-                    from sl in db.SenderLabels.AsNoTracking()
-                    where labelIds.Contains(sl.LabelId)
-                    join m in db.ImapMessages.AsNoTracking() on sl.FromAddress equals m.FromAddress.ToLower()
-                    join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
-                    where f.AccountId == _settings.Id && !m.IsRead
-                    select new { sl.LabelId, m.Id })
-                .ToListAsync(token);
-
-            var unreadCounts = explicitUnread
-                .Concat(senderUnread)
-                .GroupBy(x => x.LabelId)
-                .ToDictionary(g => g.Key, g => g.Select(x => x.Id).Distinct().Count());
+            var unreadCounts = await LoadLabelUnreadCountsAsync(db, token);
 
             return BuildLabelTree(entities, unreadCounts);
         }
@@ -4767,53 +4745,67 @@ GROUP BY lids.""LabelId""";
 
     private async Task<Dictionary<int, int>> LoadLabelUnreadCountsAsync(CancellationToken token)
     {
-        var result = new Dictionary<int, int>();
         if (_settings == null)
         {
-            return result;
+            return [];
         }
 
         var db = await CreateDbContextAsync();
         if (db == null)
         {
-            return result;
+            return [];
         }
 
         await using (db)
         {
-            var labelIds = await db.Labels
-                .AsNoTracking()
-                .Where(l => l.AccountId == _settings.Id)
-                .Select(l => l.Id)
-                .ToArrayAsync(token);
-
-            if (labelIds.Length == 0)
-            {
-                return result;
-            }
-
-            var explicitUnread = await (
-                    from ml in db.MessageLabels.AsNoTracking()
-                    where labelIds.Contains(ml.LabelId)
-                    join m in db.ImapMessages.AsNoTracking() on ml.MessageId equals m.Id
-                    where !m.IsRead
-                    select new { ml.LabelId, m.Id })
-                .ToListAsync(token);
-
-            var senderUnread = await (
-                    from sl in db.SenderLabels.AsNoTracking()
-                    where labelIds.Contains(sl.LabelId)
-                    join m in db.ImapMessages.AsNoTracking() on sl.FromAddress equals m.FromAddress.ToLower()
-                    join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
-                    where f.AccountId == _settings.Id && !m.IsRead
-                    select new { sl.LabelId, m.Id })
-                .ToListAsync(token);
-
-            return explicitUnread
-                .Concat(senderUnread)
-                .GroupBy(x => x.LabelId)
-                .ToDictionary(g => g.Key, g => g.Select(x => x.Id).Distinct().Count());
+            return await LoadLabelUnreadCountsAsync(db, token);
         }
+    }
+
+    private async Task<Dictionary<int, int>> LoadLabelUnreadCountsAsync(MailDbContext db, CancellationToken token)
+    {
+        if (_settings == null)
+        {
+            return [];
+        }
+
+        var connString = BuildConnectionString(db);
+        await using var conn = new NpgsqlConnection(connString);
+        await conn.OpenAsync(token);
+
+        const string sql = """
+WITH unread_labeled AS (
+    SELECT ml."LabelId" AS label_id, m."Id" AS message_id
+    FROM imap_messages m
+    JOIN message_labels ml ON ml."MessageId" = m."Id"
+    WHERE NOT m."IsRead"
+
+    UNION
+
+    SELECT sl."LabelId" AS label_id, m."Id" AS message_id
+    FROM imap_messages m
+    JOIN sender_labels sl ON sl.from_address = lower(m."FromAddress")
+    WHERE NOT m."IsRead"
+)
+SELECT ul.label_id, count(*) AS unread_count
+FROM unread_labeled ul
+JOIN labels l ON l."Id" = ul.label_id
+WHERE l."AccountId" = @accountId
+GROUP BY ul.label_id
+ORDER BY ul.label_id
+""";
+
+        var result = new Dictionary<int, int>();
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("accountId", _settings.Id);
+
+        await using var reader = await cmd.ExecuteReaderAsync(token);
+        while (await reader.ReadAsync(token))
+        {
+            result[reader.GetInt32(0)] = reader.GetInt32(1);
+        }
+
+        return result;
     }
 
     private async Task<(bool Moved, long? TargetUid)> TryMoveMessageOnServerAsync(
