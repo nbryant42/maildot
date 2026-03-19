@@ -929,6 +929,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 await ReportStatusAsync("Loading folders…", true);
             }
 
+            var labelsTask = LoadLabelsAsync(_cts.Token);
             var folders = await LoadFoldersAsync(_cts.Token);
             await EnqueueAsync(() =>
             {
@@ -936,7 +937,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 _viewModel.SetRetryVisible(false);
             });
 
-            var labels = await LoadLabelsAsync(_cts.Token);
+            var labels = await labelsTask;
             await EnqueueAsync(() => _viewModel.SetLabels(labels));
 
             _backgroundTask ??= Task.Run(() => BackgroundFetchLoopAsync(_cts.Token), _cts.Token);
