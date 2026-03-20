@@ -4522,6 +4522,11 @@ GROUP BY lids.""LabelId""";
             updatedCount += batchCount;
         }
 
+        if (targets.Count > 0 && updatedCount == 0)
+        {
+            await ReportStatusAsync("Unable to mark labeled messages as read.", false);
+        }
+
         await RefreshFolderUnreadCountsAsync(affectedFolderNames, token);
         await RefreshLabelUnreadCountsAsync(token);
         return updatedCount;
@@ -4662,6 +4667,7 @@ GROUP BY lids.""LabelId""";
             .Where(uid => uid > 0)
             .Select(uid => new UniqueId((uint)uid))
             .ToList();
+        var acceptedPositiveUids = new List<long>(positiveUids.Count);
         var localOnlyUids = unreadUids
             .Where(uid => uid <= 0)
             .ToList();
@@ -4669,10 +4675,28 @@ GROUP BY lids.""LabelId""";
         if (positiveUids.Count > 0)
         {
             var serverResult = await TrySetMessagesReadStateOnServerAsync(folderFullName, positiveUids, isRead: true, token);
-            if (serverResult == ServerReadWriteResult.Failed)
+            if (serverResult == ServerReadWriteResult.Success)
             {
-                return 0;
+                acceptedPositiveUids.AddRange(positiveUids.Select(uid => (long)uid.Id));
             }
+            else
+            {
+                foreach (var uid in positiveUids)
+                {
+                    var singleResult = await TrySetMessageReadStateOnServerAsync(folderFullName, uid.Id, isRead: true, token);
+                    if (singleResult == ServerReadWriteResult.Failed)
+                    {
+                        continue;
+                    }
+
+                    acceptedPositiveUids.Add((long)uid.Id);
+                }
+            }
+        }
+
+        if (acceptedPositiveUids.Count == 0 && localOnlyUids.Count == 0)
+        {
+            return 0;
         }
 
         var db = await CreateDbContextAsync();
@@ -4683,7 +4707,7 @@ GROUP BY lids.""LabelId""";
 
         await using (db)
         {
-            var allUids = positiveUids.Select(uid => (long)uid.Id).Concat(localOnlyUids).ToArray();
+            var allUids = acceptedPositiveUids.Concat(localOnlyUids).ToArray();
             var messages = await db.ImapMessages
                 .Where(m => m.FolderId == folderId && allUids.Contains(m.ImapUid) && !m.IsRead)
                 .ToListAsync(token);

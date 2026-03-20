@@ -800,8 +800,10 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        await _imapService.MarkAllReadInLabelAsync(label.Id);
-        if (_mailboxViewModel?.SelectedLabelId == label.Id && !_mailboxViewModel.IsSearchActive)
+        var updatedCount = await _imapService.MarkAllReadInLabelAsync(label.Id);
+        if (updatedCount > 0 &&
+            _mailboxViewModel?.SelectedLabelId == label.Id &&
+            !_mailboxViewModel.IsSearchActive)
         {
             await _imapService.LoadLabelMessagesAsync(label.Id, _searchSinceUtc);
         }
