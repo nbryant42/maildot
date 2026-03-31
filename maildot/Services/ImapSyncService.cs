@@ -2277,6 +2277,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             .OrderByDescending(uid => uid)
             .ToList();
 
+        Debug.WriteLine($"[ReadSync] background-scan folder={folder.FullName} knownCount={knownMessages.Count} missingBodyCount={missingBodyUids.Count()} missingMessageCount={missingMessages.Count()} targetCount={targets.Count}");
+
         if (folderEntity == null)
         {
             return false;
@@ -2301,6 +2303,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
     private async Task<bool> FetchAndPersistBodyAsync(IMailFolder folder, int folderId, long uid, CancellationToken token)
     {
         MimeMessage? message = null;
+        bool? isRead = null;
         var uniqueId = new UniqueId((uint)uid);
 
         if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
@@ -2321,6 +2324,11 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 await folder.OpenAsync(FolderAccess.ReadOnly, token);
             }
 
+            var summaries = await folder.FetchAsync(
+                [uniqueId],
+                MessageSummaryItems.Flags,
+                token);
+            isRead = summaries.FirstOrDefault()?.Flags?.HasFlag(MessageFlags.Seen) == true;
             message = await folder.GetMessageAsync(uniqueId, token);
         }
         catch
@@ -2342,7 +2350,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             _semaphore.Release();
         }
 
-        if (message == null)
+        if (message == null || isRead == null)
         {
             return false;
         }
@@ -2355,7 +2363,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
         await using (db)
         {
-            var entity = await UpsertImapMessageAsync(db, folderId, message, uid, token);
+            var entity = await UpsertImapMessageAsync(db, folderId, message, uid, isRead.Value, token);
 
             var hasBody = await db.MessageBodies.AnyAsync(b => b.MessageId == entity.Id, token);
             var hasAttachments = await db.MessageAttachments.AnyAsync(a => a.MessageId == entity.Id, token);
@@ -2372,6 +2380,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 overwriteBody: !hasBody,
                 overwriteAttachments: !hasAttachments,
                 token);
+            Debug.WriteLine($"[ReadSync] background-persist folderId={folderId} uid={uid} isRead={isRead.Value} hasBody={hasBody} hasAttachments={hasAttachments}");
             return true;
         }
     }
@@ -2529,7 +2538,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         return folderEntity;
     }
 
-    private ImapMessage CreateImapMessage(int folderId, MimeMessage message, long uid)
+    private ImapMessage CreateImapMessage(int folderId, MimeMessage message, long uid, bool isRead)
     {
         var sender = message.From.OfType<MailboxAddress>().FirstOrDefault();
         var senderName = TextCleaner.CleanNullable(sender?.Name) ?? string.Empty;
@@ -2550,17 +2559,18 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             FromAddress = senderAddress,
             ReceivedUtc = receivedUtc,
             Hash = $"{messageId}:{uid}",
-            IsRead = true
+            IsRead = isRead
         };
     }
 
-    private static void UpdateImapMessage(ImapMessage entity, MimeMessage message)
+    private static void UpdateImapMessage(ImapMessage entity, MimeMessage message, bool isRead)
     {
         var sender = message.From.OfType<MailboxAddress>().FirstOrDefault();
         entity.Subject = TextCleaner.CleanNullable(message.Subject) ?? string.Empty;
         entity.FromName = TextCleaner.CleanNullable(sender?.Name) ?? string.Empty;
         entity.FromAddress = TextCleaner.CleanNullable(sender?.Address) ?? string.Empty;
         entity.ReceivedUtc = ResolveReceivedUtc(message, internalDateFallback: null, existingReceived: entity.ReceivedUtc);
+        entity.IsRead = isRead;
     }
 
     private static bool IsUniqueViolation(DbUpdateException ex) =>
@@ -2634,19 +2644,25 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         return string.IsNullOrWhiteSpace(csFromDb) ? string.Empty : csFromDb;
     }
 
-    private async Task<ImapMessage> UpsertImapMessageAsync(MailDbContext db, int folderId, MimeMessage message, long uid, CancellationToken token)
+    private async Task<ImapMessage> UpsertImapMessageAsync(MailDbContext db, int folderId, MimeMessage message, long uid, bool isRead, CancellationToken token)
     {
         var existing = await db.ImapMessages
             .FirstOrDefaultAsync(m => m.FolderId == folderId && m.ImapUid == uid, token);
 
         if (existing != null)
         {
-            UpdateImapMessage(existing, message);
+            var previousIsRead = existing.IsRead;
+            UpdateImapMessage(existing, message, isRead);
+            if (previousIsRead != isRead)
+            {
+                Debug.WriteLine($"[ReadSync] updated existing message from server flags folderId={folderId} uid={uid} oldIsRead={previousIsRead} newIsRead={isRead}");
+            }
             await db.SaveChangesAsync(token);
             return existing;
         }
 
-        var entity = CreateImapMessage(folderId, message, uid);
+        Debug.WriteLine($"[ReadSync] created new message from server flags folderId={folderId} uid={uid} isRead={isRead}");
+        var entity = CreateImapMessage(folderId, message, uid, isRead);
         db.ImapMessages.Add(entity);
 
         try
@@ -2659,7 +2675,12 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             db.Entry(entity).State = EntityState.Detached;
             var reloaded = await db.ImapMessages
                 .FirstAsync(m => m.FolderId == folderId && m.ImapUid == uid, token);
-            UpdateImapMessage(reloaded, message);
+            var previousIsRead = reloaded.IsRead;
+            UpdateImapMessage(reloaded, message, isRead);
+            if (previousIsRead != isRead)
+            {
+                Debug.WriteLine($"[ReadSync] updated reloaded message from server flags folderId={folderId} uid={uid} oldIsRead={previousIsRead} newIsRead={isRead}");
+            }
             await db.SaveChangesAsync(token);
             return reloaded;
         }
@@ -3985,6 +4006,7 @@ GROUP BY lids.""LabelId""";
     {
         IMailFolder? folder = null;
         MimeMessage? message = null;
+        bool? isRead = null;
 
         if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
         {
@@ -4004,6 +4026,11 @@ GROUP BY lids.""LabelId""";
                 await folder.OpenAsync(FolderAccess.ReadOnly, token);
             }
 
+            var summaries = await folder.FetchAsync(
+                [new UniqueId((uint)uid)],
+                MessageSummaryItems.Flags,
+                token);
+            isRead = summaries.FirstOrDefault()?.Flags?.HasFlag(MessageFlags.Seen) == true;
             message = await folder.GetMessageAsync(new UniqueId((uint)uid), token);
         }
         catch (MessageNotFoundException)
@@ -4031,7 +4058,7 @@ GROUP BY lids.""LabelId""";
             _semaphore.Release();
         }
 
-        if (message == null || _settings == null)
+        if (message == null || isRead == null || _settings == null)
         {
             return;
         }
@@ -4053,7 +4080,7 @@ GROUP BY lids.""LabelId""";
                 return;
             }
 
-            var entity = await UpsertImapMessageAsync(db, folderEntity.Id, message, uid, token);
+            var entity = await UpsertImapMessageAsync(db, folderEntity.Id, message, uid, isRead.Value, token);
             await PersistMessageMimeContentAsync(db, entity, message, overwriteBody, overwriteAttachments, token);
         }
     }
@@ -4102,10 +4129,10 @@ GROUP BY lids.""LabelId""";
                 var explicitSet = explicitResults
                     .Select(r =>
                     {
-                    var vm = CreateEmailViewModel(r.Message, r.Folder, r.Body);
-                    vm.IsSuggested = false;
-                    return vm;
-                })
+                        var vm = CreateEmailViewModel(r.Message, r.Folder, r.Body);
+                        vm.IsSuggested = false;
+                        return vm;
+                    })
                 .ToList();
 
                 var senderResults = await (
@@ -4517,7 +4544,7 @@ GROUP BY lids.""LabelId""";
             var batchCount = await MarkMessagesReadBatchAsync(
                 folderGroup.Key.FolderFullName,
                 folderGroup.Key.FolderId,
-                folderGroup.Select(t => t.ImapUid).ToList(),
+                [.. folderGroup.Select(t => t.ImapUid)],
                 token);
             updatedCount += batchCount;
         }
@@ -4660,6 +4687,7 @@ GROUP BY lids.""LabelId""";
     {
         if (unreadUids.Count == 0)
         {
+            Debug.WriteLine($"[MarkAllRead][Batch] abort folder={folderFullName} reason=no-unread-uids");
             return 0;
         }
 
@@ -4681,11 +4709,14 @@ GROUP BY lids.""LabelId""";
             }
             else
             {
+                Debug.WriteLine($"[MarkAllRead][Batch] failed to mark messages as read on server folder={folderFullName} uidCount={positiveUids.Count} result={serverResult}");
+
                 foreach (var uid in positiveUids)
                 {
                     var singleResult = await TrySetMessageReadStateOnServerAsync(folderFullName, uid.Id, isRead: true, token);
                     if (singleResult == ServerReadWriteResult.Failed)
                     {
+                        Debug.WriteLine($"[MarkAllRead][Batch] failed to mark single message as read on server folder={folderFullName} uid={uid.Id}");
                         continue;
                     }
 
@@ -4693,15 +4724,21 @@ GROUP BY lids.""LabelId""";
                 }
             }
         }
+        else
+        {
+            Debug.WriteLine($"[MarkAllRead][Batch] no positive UIDs to mark as read on server for folder={folderFullName}");
+        }
 
         if (acceptedPositiveUids.Count == 0 && localOnlyUids.Count == 0)
         {
+            Debug.WriteLine($"[MarkAllRead][Batch] abort folder={folderFullName} reason=no-accepted-uids");
             return 0;
         }
 
         var db = await CreateDbContextAsync();
         if (db == null)
         {
+            Debug.WriteLine($"[MarkAllRead][Batch] abort folder={folderFullName} reason=db-null");
             return 0;
         }
 
@@ -4714,6 +4751,7 @@ GROUP BY lids.""LabelId""";
 
             if (messages.Count == 0)
             {
+                Debug.WriteLine($"[MarkAllRead][Batch] no messages to update in DB for folder={folderFullName} acceptedUidCount={acceptedPositiveUids.Count} localOnlyUidCount={localOnlyUids.Count}");
                 return 0;
             }
 
@@ -5470,7 +5508,7 @@ ORDER BY ul.label_id
                 continue;
             }
 
-            message.LabelNames = [..names, labelName];
+            message.LabelNames = [.. names, labelName];
             if (inLabelView && selectedLabelId == labelId && message.IsSuggested)
             {
                 message.IsSuggested = false;
