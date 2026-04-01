@@ -4611,71 +4611,89 @@ GROUP BY lids.""LabelId""";
         bool isRead,
         CancellationToken token)
     {
-        IMailFolder? folder = null;
+        var canRetry = true;
 
-        if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
+        while (true)
         {
-            Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
-            return ServerReadWriteResult.Failed;
-        }
+            IMailFolder? folder = null;
+            Exception? failure = null;
 
-        try
-        {
-            if (_client == null)
+            if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
             {
+                Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
                 return ServerReadWriteResult.Failed;
             }
 
-            if (!_folderCache.TryGetValue(folderFullName, out folder))
-            {
-                return ServerReadWriteResult.Failed;
-            }
-
-            if (!folder.IsOpen)
-            {
-                await folder.OpenAsync(FolderAccess.ReadWrite, token);
-            }
-
-            var uniqueId = new UniqueId((uint)uid);
-            if (isRead)
-            {
-                await folder.AddFlagsAsync(uniqueId, MessageFlags.Seen, true, token);
-            }
-            else
-            {
-                await folder.RemoveFlagsAsync(uniqueId, MessageFlags.Seen, true, token);
-            }
-
-            return ServerReadWriteResult.Success;
-        }
-        catch (MessageNotFoundException)
-        {
-            return ServerReadWriteResult.NotFound;
-        }
-        catch (ImapCommandException ex) when (
-            ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase) ||
-            ex.Message.Contains("no such message", StringComparison.OrdinalIgnoreCase))
-        {
-            return ServerReadWriteResult.NotFound;
-        }
-        catch
-        {
-            return ServerReadWriteResult.Failed;
-        }
-        finally
-        {
             try
             {
-                if (folder?.IsOpen == true)
+                if (_client == null)
                 {
-                    await folder.CloseAsync(false, token);
+                    throw new ServiceNotConnectedException();
                 }
+
+                if (!_folderCache.TryGetValue(folderFullName, out folder))
+                {
+                    throw new ServiceNotConnectedException();
+                }
+
+                if (!folder.IsOpen)
+                {
+                    await folder.OpenAsync(FolderAccess.ReadWrite, token);
+                }
+
+                var uniqueId = new UniqueId((uint)uid);
+                if (isRead)
+                {
+                    await folder.AddFlagsAsync(uniqueId, MessageFlags.Seen, true, token);
+                }
+                else
+                {
+                    await folder.RemoveFlagsAsync(uniqueId, MessageFlags.Seen, true, token);
+                }
+
+                return ServerReadWriteResult.Success;
             }
-            catch
+            catch (MessageNotFoundException)
             {
+                return ServerReadWriteResult.NotFound;
+            }
+            catch (ImapCommandException ex) when (
+                ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase) ||
+                ex.Message.Contains("no such message", StringComparison.OrdinalIgnoreCase))
+            {
+                return ServerReadWriteResult.NotFound;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                failure = ex;
+            }
+            finally
+            {
+                try
+                {
+                    if (folder?.IsOpen == true)
+                    {
+                        await folder.CloseAsync(false, token);
+                    }
+                }
+                catch
+                {
+                }
+
+                _semaphore.Release();
             }
 
-            _semaphore.Release();
+            if (failure != null && canRetry && IsRecoverable(failure) && await TryReconnectAsync())
+            {
+                canRetry = false;
+                continue;
+            }
+
+            return ServerReadWriteResult.Failed;
         }
     }
 
@@ -4860,80 +4878,94 @@ GROUP BY lids.""LabelId""";
         bool isRead,
         CancellationToken token)
     {
-        IMailFolder? folder = null;
-
         if (uids.Count == 0)
         {
             return ServerReadWriteResult.Success;
         }
 
-        if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
-        {
-            Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
-            return ServerReadWriteResult.Failed;
-        }
+        var canRetry = true;
 
-        try
+        while (true)
         {
-            if (_client == null)
+            IMailFolder? folder = null;
+            Exception? failure = null;
+
+            if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
             {
-                Debug.WriteLine($"[MarkAllRead][IMAP] skipped folder={folderFullName} reason=client-null uidCount={uids.Count}");
+                Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
                 return ServerReadWriteResult.Failed;
             }
 
-            if (!_folderCache.TryGetValue(folderFullName, out folder))
+            try
             {
-                Debug.WriteLine($"[MarkAllRead][IMAP] skipped folder={folderFullName} reason=folder-not-cached uidCount={uids.Count}");
-                return ServerReadWriteResult.Failed;
+                if (_client == null)
+                {
+                    Debug.WriteLine($"[MarkAllRead][IMAP] skipped folder={folderFullName} reason=client-null uidCount={uids.Count}");
+                    throw new ServiceNotConnectedException();
+                }
+
+                if (!_folderCache.TryGetValue(folderFullName, out folder))
+                {
+                    Debug.WriteLine($"[MarkAllRead][IMAP] skipped folder={folderFullName} reason=folder-not-cached uidCount={uids.Count}");
+                    throw new ServiceNotConnectedException();
+                }
+
+                if (!folder.IsOpen)
+                {
+                    await folder.OpenAsync(FolderAccess.ReadWrite, token);
+                }
+
+                Debug.WriteLine(
+                    $"[MarkAllRead][IMAP] start folder={folderFullName} action={(isRead ? "mark-read" : "mark-unread")} uidCount={uids.Count}");
+
+                if (isRead)
+                {
+                    await folder.AddFlagsAsync(uids, MessageFlags.Seen, true, token);
+                }
+                else
+                {
+                    await folder.RemoveFlagsAsync(uids, MessageFlags.Seen, true, token);
+                }
+
+                Debug.WriteLine(
+                    $"[MarkAllRead][IMAP] success folder={folderFullName} action={(isRead ? "mark-read" : "mark-unread")} uidCount={uids.Count}");
+                return ServerReadWriteResult.Success;
+            }
+            catch (OperationCanceledException)
+            {
+                Debug.WriteLine(
+                    $"[MarkAllRead][IMAP] canceled folder={folderFullName} action={(isRead ? "mark-read" : "mark-unread")} uidCount={uids.Count}");
+                throw;
+            }
+            catch (Exception ex)
+            {
+                failure = ex;
+            }
+            finally
+            {
+                try
+                {
+                    if (folder?.IsOpen == true)
+                    {
+                        await folder.CloseAsync(false, token);
+                    }
+                }
+                catch
+                {
+                }
+
+                _semaphore.Release();
             }
 
-            if (!folder.IsOpen)
+            if (failure != null && canRetry && IsRecoverable(failure) && await TryReconnectAsync())
             {
-                await folder.OpenAsync(FolderAccess.ReadWrite, token);
+                canRetry = false;
+                continue;
             }
 
-            Debug.WriteLine(
-                $"[MarkAllRead][IMAP] start folder={folderFullName} action={(isRead ? "mark-read" : "mark-unread")} uidCount={uids.Count}");
-
-            if (isRead)
-            {
-                await folder.AddFlagsAsync(uids, MessageFlags.Seen, true, token);
-            }
-            else
-            {
-                await folder.RemoveFlagsAsync(uids, MessageFlags.Seen, true, token);
-            }
-
-            Debug.WriteLine(
-                $"[MarkAllRead][IMAP] success folder={folderFullName} action={(isRead ? "mark-read" : "mark-unread")} uidCount={uids.Count}");
-            return ServerReadWriteResult.Success;
-        }
-        catch (OperationCanceledException)
-        {
-            Debug.WriteLine(
-                $"[MarkAllRead][IMAP] canceled folder={folderFullName} action={(isRead ? "mark-read" : "mark-unread")} uidCount={uids.Count}");
-            throw;
-        }
-        catch
-        {
             Debug.WriteLine(
                 $"[MarkAllRead][IMAP] failed folder={folderFullName} action={(isRead ? "mark-read" : "mark-unread")} uidCount={uids.Count}");
             return ServerReadWriteResult.Failed;
-        }
-        finally
-        {
-            try
-            {
-                if (folder?.IsOpen == true)
-                {
-                    await folder.CloseAsync(false, token);
-                }
-            }
-            catch
-            {
-            }
-
-            _semaphore.Release();
         }
     }
 
