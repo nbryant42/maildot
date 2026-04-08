@@ -147,6 +147,8 @@ namespace maildot.Data.Migrations
                     b.HasIndex("FolderId", "ImapUid")
                         .IsUnique();
 
+                    b.HasIndex("FolderId", "ReceivedUtc");
+
                     b.HasIndex("IsRead");
 
                     b.HasIndex("ReceivedUtc");

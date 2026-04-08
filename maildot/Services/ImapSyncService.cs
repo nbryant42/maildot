@@ -3362,13 +3362,56 @@ LEFT JOIN folder_counts fc ON fc.folder_id = g.folder_id AND fc.""LabelId"" = g.
         CancellationToken token)
     {
         const int trainLimit = 4000;
-        var sql = @"
-WITH message_targets AS (
+        var folderIds = new List<int>();
+        await using (var folderCmd = new NpgsqlCommand(
+                         @"SELECT id
+                           FROM imap_folders
+                           WHERE ""AccountId"" = @accountId
+                           ORDER BY id",
+                         conn))
+        {
+            folderCmd.Parameters.AddWithValue("accountId", accountId);
+
+            await using var folderReader = await folderCmd.ExecuteReaderAsync(token);
+            while (await folderReader.ReadAsync(token))
+            {
+                folderIds.Add(folderReader.GetInt32(0));
+            }
+        }
+
+        if (folderIds.Count == 0)
+        {
+            return [];
+        }
+
+        var messageTargetsSql = new StringBuilder();
+        for (var i = 0; i < folderIds.Count; i++)
+        {
+            if (i > 0)
+            {
+                messageTargetsSql.AppendLine("UNION ALL");
+            }
+
+            messageTargetsSql.AppendLine("(");
+            messageTargetsSql.AppendLine($@"    SELECT *
+    FROM raw_message_targets rmt
+    WHERE rmt.""FolderId"" = @folderId{i}
+    ORDER BY rmt.""ReceivedUtc"" DESC
+    LIMIT @trainLimit");
+            messageTargetsSql.Append(")");
+            if (i < folderIds.Count - 1)
+            {
+                messageTargetsSql.AppendLine();
+            }
+        }
+
+        var sql = $@"
+WITH raw_message_targets AS NOT MATERIALIZED (
     SELECT
-	    m.""Id"" AS ""MessageId"",
-	    m.""FolderId"",
+        m.""Id"" AS ""MessageId"",
+        m.""FolderId"",
         m.""ReceivedUtc"",
-	    (m.""Id"" IN (SELECT ml.""MessageId""
+        (m.""Id"" IN (SELECT ml.""MessageId""
                       FROM message_labels ml
                       WHERE ml.""LabelId"" = @labelId)
          OR lower(m.""FromAddress"") IN (SELECT sl.from_address
@@ -3376,8 +3419,9 @@ WITH message_targets AS (
                                          WHERE sl.""LabelId"" = @labelId)
         ) AS is_positive
     FROM ""imap_messages"" m
-    WHERE m.""FolderId"" IN (SELECT id FROM imap_folders WHERE ""AccountId"" = @accountId)
-    ORDER BY m.""ReceivedUtc"" DESC
+),
+message_targets AS (
+{messageTargetsSql}
 ),
 global_stats AS (
     SELECT
@@ -3447,11 +3491,14 @@ WHERE ss.score < 0.0";
 
         var examples = new List<FolderPriorTrainingExample>();
         await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("accountId", accountId);
         cmd.Parameters.AddWithValue("labelId", labelId);
         cmd.Parameters.AddWithValue("priorAlpha", priorAlpha);
         cmd.Parameters.AddWithValue("trainLimit", trainLimit);
         cmd.Parameters.AddWithValue("centroid", BuildVectorLiteral(centroid));
+        for (var i = 0; i < folderIds.Count; i++)
+        {
+            cmd.Parameters.AddWithValue($"folderId{i}", folderIds[i]);
+        }
 
         await using var reader = await cmd.ExecuteReaderAsync(token);
         while (await reader.ReadAsync(token))
