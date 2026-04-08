@@ -3363,25 +3363,21 @@ LEFT JOIN folder_counts fc ON fc.folder_id = g.folder_id AND fc.""LabelId"" = g.
     {
         const int trainLimit = 4000;
         var sql = @"
-WITH label_ids AS (
-    SELECT ml0.""LabelId"", ml0.""MessageId""
-    FROM ""message_labels"" ml0
-    JOIN ""imap_messages"" m0 ON m0.""Id"" = ml0.""MessageId""
-    JOIN ""imap_folders"" f0 ON f0.""id"" = m0.""FolderId""
-    WHERE f0.""AccountId"" = @accountId
-    UNION
-    SELECT sl0.""LabelId"", m0.""Id""
-    FROM ""sender_labels"" sl0
-    JOIN ""labels"" l0 ON l0.""Id"" = sl0.""LabelId""
-    JOIN ""imap_messages"" m0 ON sl0.""from_address"" = lower(m0.""FromAddress"")
-    JOIN ""imap_folders"" f0 ON f0.""id"" = m0.""FolderId""
-    WHERE l0.""AccountId"" = @accountId
-      AND f0.""AccountId"" = @accountId
-),
-message_targets AS (
-    SELECT li.""MessageId"", bool_or(li.""LabelId"" = @labelId) AS is_positive
-    FROM label_ids li
-    GROUP BY li.""MessageId""
+WITH message_targets AS (
+    SELECT
+	    m.""Id"" AS ""MessageId"",
+	    m.""FolderId"",
+        m.""ReceivedUtc"",
+	    (m.""Id"" IN (SELECT ml.""MessageId""
+                      FROM message_labels ml
+                      WHERE ml.""LabelId"" = @labelId)
+         OR lower(m.""FromAddress"") IN (SELECT sl.from_address
+                                         FROM sender_labels sl
+                                         WHERE sl.""LabelId"" = @labelId)
+        ) AS is_positive
+    FROM ""imap_messages"" m
+    WHERE m.""FolderId"" IN (SELECT id FROM imap_folders WHERE ""AccountId"" = @accountId)
+    ORDER BY m.""ReceivedUtc"" DESC
 ),
 global_stats AS (
     SELECT
@@ -3391,12 +3387,11 @@ global_stats AS (
 ),
 folder_stats AS (
     SELECT
-        m0.""FolderId"" AS folder_id,
+        mt.""FolderId"" AS folder_id,
         count(*)::double precision AS total_count,
         count(*) FILTER (WHERE mt.is_positive)::double precision AS label_count
     FROM message_targets mt
-    JOIN ""imap_messages"" m0 ON m0.""Id"" = mt.""MessageId""
-    GROUP BY m0.""FolderId""
+    GROUP BY mt.""FolderId""
 ),
 prior_scores AS (
     SELECT
@@ -3424,16 +3419,13 @@ prior_scores AS (
     CROSS JOIN global_stats gs
 ),
 ranked_messages AS (
-    SELECT
-        mt.""MessageId"" AS message_id,
-        m.""FolderId"" AS folder_id,
-        mt.is_positive
-    FROM message_targets mt
-    JOIN ""imap_messages"" m ON m.""Id"" = mt.""MessageId""
-    JOIN ""imap_folders"" f ON f.""id"" = m.""FolderId""
-    WHERE f.""AccountId"" = @accountId
-    ORDER BY m.""ReceivedUtc"" DESC
-    LIMIT @trainLimit
+	SELECT
+		mt.""MessageId"" AS message_id,
+		mt.""FolderId"" AS folder_id,
+		is_positive
+	FROM message_targets mt
+	ORDER BY mt.""ReceivedUtc"" DESC
+	LIMIT @trainLimit
 ),
 semantic_scores AS (
     SELECT
