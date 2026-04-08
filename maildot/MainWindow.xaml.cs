@@ -344,12 +344,21 @@ public sealed partial class MainWindow : Window
 
     private void OnLoadMoreRequested(object? sender, EventArgs e)
     {
-        if (_imapService == null || _mailboxViewModel?.SelectedFolder is not MailFolderViewModel folder)
+        if (_imapService == null || _mailboxViewModel == null)
         {
             return;
         }
 
-        _ = _imapService.LoadOlderMessagesAsync(folder.Id);
+        if (_mailboxViewModel.SelectedLabelId is int labelId)
+        {
+            _ = _imapService.LoadOlderLabelMessagesAsync(labelId, _searchSinceUtc);
+            return;
+        }
+
+        if (_mailboxViewModel.SelectedFolder is MailFolderViewModel folder)
+        {
+            _ = _imapService.LoadOlderMessagesAsync(folder.Id);
+        }
     }
 
     private void OnRetryRequested(object? sender, EventArgs e)

@@ -38,6 +38,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
     private readonly Dictionary<string, int> _folderNextEndIndex = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _folderNextUnreadOffset = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, long?> _folderNextUnlabeledImapUid = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<int, int> _labelNextOffset = [];
     private readonly Dictionary<(int AccountId, int LabelId), LearnedLambdaEntry> _folderPriorLambdaCache = [];
     private readonly object _folderPriorLambdaCacheGate = new();
     private bool _offlineFallbackHydrated;
@@ -4124,10 +4125,23 @@ GROUP BY lids.""LabelId""";
         }
     }
 
-    public async Task LoadLabelMessagesAsync(int labelId, DateTimeOffset? sinceUtc)
+    public Task LoadLabelMessagesAsync(int labelId, DateTimeOffset? sinceUtc) =>
+        LoadLabelMessagesPageAsync(labelId, sinceUtc, append: false, offset: 0);
+
+    public Task LoadOlderLabelMessagesAsync(int labelId, DateTimeOffset? sinceUtc)
+    {
+        if (!_labelNextOffset.TryGetValue(labelId, out var offset) || offset < 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        return LoadLabelMessagesPageAsync(labelId, sinceUtc, append: true, offset: offset);
+    }
+
+    private async Task LoadLabelMessagesPageAsync(int labelId, DateTimeOffset? sinceUtc, bool append, int offset)
     {
         var token = _cts.Token;
-        if (_settings == null)
+        if (_settings == null || offset < 0)
         {
             return;
         }
@@ -4154,82 +4168,110 @@ GROUP BY lids.""LabelId""";
 
             try
             {
-                var explicitResults = await (
-                    from ml in db.MessageLabels.AsNoTracking()
-                    where ml.LabelId == labelId
-                    join m in db.ImapMessages.AsNoTracking() on ml.MessageId equals m.Id
-                    join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
-                    where f.AccountId == _settings.Id
-                    join b in db.MessageBodies.AsNoTracking() on m.Id equals b.MessageId into bodies
-                    from b in bodies.DefaultIfEmpty()
-                    select new { Message = m, Folder = f, Body = b }
-                ).ToListAsync(token);
+                List<EmailMessageViewModel> messages;
 
-                var explicitSet = explicitResults
-                    .Select(r =>
+                if (_viewModel.SuggestionsOnly)
+                {
+                    var suggestions = await GetSuggestedMessagesAsync(db, labelId, sinceUtc, token);
+                    messages = suggestions.Select(suggestion =>
+                    {
+                        var vm = CreateEmailViewModel(suggestion.Message, suggestion.Folder, suggestion.Body);
+                        vm.IsSuggested = true;
+                        vm.SuggestionScore = suggestion.Score + 1.0d;
+                        return vm;
+                    }).ToList();
+
+                    _labelNextOffset[labelId] = -1;
+                }
+                else
+                {
+                    var explicitMessageIds =
+                        from ml in db.MessageLabels.AsNoTracking()
+                        where ml.LabelId == labelId
+                        select ml.MessageId;
+
+                    var senderMessageIds =
+                        from sl in db.SenderLabels.AsNoTracking()
+                        where sl.LabelId == labelId
+                        join m in db.ImapMessages.AsNoTracking() on sl.FromAddress equals m.FromAddress.ToLower()
+                        select m.Id;
+
+                    var labelMessageIds = explicitMessageIds.Union(senderMessageIds);
+
+                    var pagedResults = await (
+                        from m in db.ImapMessages.AsNoTracking()
+                        where labelMessageIds.Contains(m.Id)
+                        join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
+                        where f.AccountId == _settings.Id
+                        where !_viewModel.LabelUnreadOnly || !m.IsRead
+                        join b in db.MessageBodies.AsNoTracking() on m.Id equals b.MessageId into bodies
+                        from b in bodies.DefaultIfEmpty()
+                        orderby m.ReceivedUtc descending, m.Id descending
+                        select new { Message = m, Folder = f, Body = b }
+                    )
+                    .Skip(offset)
+                    .Take(PageSize + 1)
+                    .ToListAsync(token);
+
+                    var hasMore = pagedResults.Count > PageSize;
+                    _labelNextOffset[labelId] = hasMore ? offset + PageSize : -1;
+
+                    var pageResults = pagedResults.Take(PageSize).ToList();
+                    messages = pageResults.Select(r =>
                     {
                         var vm = CreateEmailViewModel(r.Message, r.Folder, r.Body);
                         vm.IsSuggested = false;
                         return vm;
-                    })
-                .ToList();
+                    }).ToList();
 
-                var senderResults = await (
-                    from sl in db.SenderLabels.AsNoTracking()
-                    where sl.LabelId == labelId
-                    join m in db.ImapMessages.AsNoTracking() on sl.FromAddress equals m.FromAddress.ToLower()
-                    join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
-                    where f.AccountId == _settings.Id
-                    join b in db.MessageBodies.AsNoTracking() on m.Id equals b.MessageId into bodies
-                    from b in bodies.DefaultIfEmpty()
-                    select new { Message = m, Folder = f, Body = b }
-                ).ToListAsync(token);
-
-                var senderVms = senderResults.Select(r =>
-                {
-                    var vm = CreateEmailViewModel(r.Message, r.Folder, r.Body);
-                    vm.IsSuggested = false;
-                    return vm;
-                }).ToList();
-
-                var suggestions = await GetSuggestedMessagesAsync(db, labelId, sinceUtc, token);
-                var explicitIds = explicitResults.Select(r => r.Message.Id).ToHashSet();
-
-                foreach (var vm in senderVms)
-                {
-                    if (!explicitIds.Contains(int.Parse(vm.Id)))
+                    if (!append)
                     {
-                        explicitSet.Add(vm);
-                        explicitIds.Add(int.Parse(vm.Id));
+                        var suggestions = await GetSuggestedMessagesAsync(db, labelId, sinceUtc, token);
+                        var existingIds = pageResults.Select(r => r.Message.Id).ToHashSet();
+
+                        foreach (var suggestion in suggestions)
+                        {
+                            if (_viewModel.LabelUnreadOnly && suggestion.Message.IsRead)
+                            {
+                                continue;
+                            }
+
+                            if (!existingIds.Add(suggestion.Message.Id))
+                            {
+                                continue;
+                            }
+
+                            var vm = CreateEmailViewModel(suggestion.Message, suggestion.Folder, suggestion.Body);
+                            vm.IsSuggested = true;
+                            // convert negative inner product to cosine distance:
+                            // 0 (exact match) .. 1 (orthogonal) .. 2 (opposite meaning)
+                            // real world values I've seen are in the range ~0.057 - ~1.1, so SuggestionToBrushConverter
+                            // maps 0.0 to soft green and 1.0 to soft orange.
+                            vm.SuggestionScore = suggestion.Score + 1.0d;
+                            messages.Add(vm);
+                        }
+
+                        messages = messages
+                            .OrderByDescending(m => m.Received)
+                            .ToList();
                     }
                 }
-
-                foreach (var suggestion in suggestions)
-                {
-                    if (explicitIds.Contains(suggestion.Message.Id))
-                    {
-                        continue;
-                    }
-
-                    var vm = CreateEmailViewModel(suggestion.Message, suggestion.Folder, suggestion.Body);
-                    vm.IsSuggested = true;
-                    // convert negative inner product to cosine distance:
-                    // 0 (exact match) .. 1 (orthogonal) .. 2 (opposite meaning)
-                    // real world values I've seen are in the range ~0.057 - ~1.1, so SuggestionToBrushConverter
-                    // maps 0.0 to soft green and 1.0 to soft orange.
-                    vm.SuggestionScore = suggestion.Score + 1.0d;
-                    explicitSet.Add(vm);
-                }
-
-                var ordered = ApplyLabelViewFilter(explicitSet
-                    .OrderByDescending(m => m.Received)
-                    .ToList());
 
                 await EnqueueAsync(() =>
                 {
-                    _viewModel.SetMessages($"Label: {label.Name}", ordered);
+                    if (append)
+                    {
+                        _viewModel.AppendMessages(messages);
+                    }
+                    else
+                    {
+                        _viewModel.SetMessages($"Label: {label.Name}", messages);
+                    }
+
                     _viewModel.SetStatus("Mailbox is up to date.", false);
-                    _viewModel.SetLoadMoreAvailability(false);
+                    _viewModel.SetLoadMoreAvailability(!_viewModel.SuggestionsOnly &&
+                                                       _labelNextOffset.TryGetValue(labelId, out var nextOffset) &&
+                                                       nextOffset >= 0);
                     _viewModel.SetRetryVisible(false);
                 });
             }
