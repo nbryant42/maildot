@@ -39,6 +39,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
     private readonly Dictionary<string, int> _folderNextUnreadOffset = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, long?> _folderNextUnlabeledImapUid = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<int, int> _labelNextOffset = [];
+    private readonly Dictionary<int, CentroidCacheEntry> _centroidCache = [];
+    private readonly object _centroidCacheGate = new();
     private readonly Dictionary<(int AccountId, int LabelId), LearnedLambdaEntry> _folderPriorLambdaCache = [];
     private readonly object _folderPriorLambdaCacheGate = new();
     private bool _offlineFallbackHydrated;
@@ -57,6 +59,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
     private const int EmbeddingDim = 1024;
     private const double DefaultFolderPriorAlpha = 24.0d;
     private const double DefaultFolderPriorLambda = 0.10d;
+    private static readonly TimeSpan CentroidCacheTtl = TimeSpan.FromMinutes(30);
     private static readonly TimeSpan FolderPriorLambdaCacheTtl = TimeSpan.FromMinutes(30);
 
     public async Task StartAsync(AccountSettings settings, string password)
@@ -2787,6 +2790,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
     private sealed record SuggestedResult(ImapMessage Message, Models.ImapFolder Folder, MessageBody? Body,
         double Score);
+    private sealed record CentroidCacheEntry(Dictionary<int, float[]> Value, DateTimeOffset CachedAtUtc);
     private sealed record LearnedLambdaEntry(double Value, DateTimeOffset LearnedAtUtc);
     private readonly record struct FolderPriorTrainingExample(double SemanticScore, double PriorLift, bool IsPositive);
     private readonly record struct SuggestedCandidate(int MessageId, int FolderId, double Score, double Rank, double? DominanceGap);
@@ -3577,8 +3581,32 @@ WHERE ss.score < 0.0";
         }
     }
 
-    private static async Task<Dictionary<int, float[]>> GetCentroidsAsync(NpgsqlConnection conn, int accountId, CancellationToken token)
+    private void ClearCentroidCache()
     {
+        lock (_centroidCacheGate)
+        {
+            _centroidCache.Clear();
+        }
+    }
+
+    private void ClearSuggestionCaches()
+    {
+        ClearFolderPriorLambdaCache();
+        ClearCentroidCache();
+    }
+
+    private async Task<Dictionary<int, float[]>> GetCentroidsAsync(NpgsqlConnection conn, int accountId, CancellationToken token)
+    {
+        var now = DateTimeOffset.UtcNow;
+        lock (_centroidCacheGate)
+        {
+            if (_centroidCache.TryGetValue(accountId, out var cached) &&
+                now - cached.CachedAtUtc <= CentroidCacheTtl)
+            {
+                return cached.Value;
+            }
+        }
+
         var sql = @"
 WITH label_ids AS (
     SELECT ml.""LabelId"", ml.""MessageId""
@@ -3614,6 +3642,11 @@ GROUP BY lids.""LabelId""";
             var labelId = reader.GetInt32(0);
             var vec = reader.GetFieldValue<float[]>(1);
             map[labelId] = NormalizeCentroid(vec);
+        }
+
+        lock (_centroidCacheGate)
+        {
+            _centroidCache[accountId] = new CentroidCacheEntry(map, now);
         }
 
         return map;
@@ -5489,7 +5522,7 @@ ORDER BY ul.label_id
                 return true;
             }
 
-            ClearFolderPriorLambdaCache();
+            ClearSuggestionCaches();
             await ReportStatusAsync($"Applied label \"{label.Name}\"", false);
             return true;
         }
@@ -5553,7 +5586,7 @@ ORDER BY ul.label_id
                 return true;
             }
 
-            ClearFolderPriorLambdaCache();
+            ClearSuggestionCaches();
             await UpdateVisibleMessagesForSenderLabelAsync(cleaned, label.Id, label.Name);
         }
 
