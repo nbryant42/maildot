@@ -990,12 +990,12 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
     private async Task<IReadOnlyList<MailFolderViewModel>> LoadFoldersAsync(CancellationToken token)
     {
         var folders = new List<MailFolderViewModel>();
-        var seenFolderNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (_client == null)
+        if (_client == null || _client.Inbox == null)
         {
             return folders;
         }
 
+        var seenFolderNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         _folderCache.Clear();
 
         async Task AddFolderAsync(IMailFolder folder)
