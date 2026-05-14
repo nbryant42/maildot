@@ -20,6 +20,7 @@ public sealed partial class ImapDashboardView : UserControl
     private bool _hasRequestedMore;
     private bool _attachmentsInitialized;
     private string? _attachmentsHtmlPath;
+    private string? _messageHtmlPath;
     private EmailMessageViewModel? _contextMenuMessage;
     private MailFolderViewModel? _contextMenuFolder;
     private LabelViewModel? _contextMenuLabel;
@@ -244,13 +245,30 @@ public sealed partial class ImapDashboardView : UserControl
     public async Task DisplayMessageContentAsync(string html)
     {
         await EnsureWebViewAsync();
-        MessageWebView.NavigateToString(string.IsNullOrWhiteSpace(html) ? "<html><body></body></html>" : html);
+        var content = string.IsNullOrWhiteSpace(html) ? "<html><body></body></html>" : html;
+        _messageHtmlPath ??= Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "maildot",
+            "webview",
+            "message-preview.html");
+
+        Directory.CreateDirectory(Path.GetDirectoryName(_messageHtmlPath)!);
+        await File.WriteAllTextAsync(_messageHtmlPath, content);
+        MessageWebView.Source = new Uri(_messageHtmlPath);
     }
 
     public async Task ClearMessageContentAsync()
     {
         await EnsureWebViewAsync();
-        MessageWebView.NavigateToString("<html><body></body></html>");
+        if (string.IsNullOrWhiteSpace(_messageHtmlPath))
+        {
+            MessageWebView.NavigateToString("<html><body></body></html>");
+            return;
+        }
+
+        const string emptyHtml = "<html><body></body></html>";
+        await File.WriteAllTextAsync(_messageHtmlPath, emptyHtml);
+        MessageWebView.Source = new Uri(_messageHtmlPath);
     }
 
     public async Task DisplayAttachmentsAsync(string html)
