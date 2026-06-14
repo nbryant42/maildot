@@ -1248,9 +1248,20 @@ public sealed partial class MainWindow : Window
         await _imapService.AddSenderLabelAsync(labelId, senderAddress);
     }
 
-    private async void OnLabelSenderRequested(object? sender, EmailMessageViewModel message)
+    private async void OnLabelSenderRequested(object? sender, LabelSenderRequest request)
     {
         if (_imapService == null || _mailboxViewModel == null)
+        {
+            return;
+        }
+
+        var senderAddresses = request.Messages
+            .Select(ExtractAddress)
+            .Where(address => !string.IsNullOrWhiteSpace(address))
+            .Select(address => address!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (senderAddresses.Count == 0)
         {
             return;
         }
@@ -1277,7 +1288,9 @@ public sealed partial class MainWindow : Window
 
         var dialog = new ContentDialog
         {
-            Title = $"Label sender: {message.SenderAddress}",
+            Title = senderAddresses.Count == 1
+                ? $"Label sender: {senderAddresses[0]}"
+                : $"Label {senderAddresses.Count} senders from {request.Messages.Count} selected messages",
             Content = combo,
             PrimaryButtonText = "Apply",
             CloseButtonText = "Cancel",
@@ -1291,7 +1304,10 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        await _imapService.AddSenderLabelAsync(selected.Id, message.SenderAddress);
+        foreach (var senderAddress in senderAddresses)
+        {
+            await _imapService.AddSenderLabelAsync(selected.Id, senderAddress);
+        }
     }
 
     private async void OnDeleteMessageRequested(object? sender, EmailMessageViewModel message)

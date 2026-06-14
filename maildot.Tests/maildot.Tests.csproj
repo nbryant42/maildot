@@ -30,6 +30,7 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<ProjectReference Include="..\maildot\maildot.csproj" />
+		<ProjectReference Include="..\maildot\maildot.csproj"
+		                  AdditionalProperties="WindowsAppSdkBootstrapInitialize=false;WindowsAppSdkAutoInitialize=false;WindowsAppSdkDeploymentManagerInitialize=false;WindowsAppSdkUndockedRegFreeWinRTInitialize=false;WindowsAppSdkCompatibilityInitialize=false" />
 	</ItemGroup>
 </Project>

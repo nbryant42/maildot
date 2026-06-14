@@ -2,35 +2,13 @@ using maildot.Data;
 using maildot.Models;
 using maildot.Services;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Windows.ApplicationModel.DynamicDependency;
 using System.Diagnostics;
 
 namespace maildot.Tests;
 
-// need to use WinAppSDK Bootstrap for ONNX Runtime
-public class Fixture : IDisposable
+public class ClusteringTests
 {
-    public Fixture()
-    {
-        Bootstrap.Initialize(0x00010008);
-    }
-
-    public void Dispose()
-    {
-        Bootstrap.Shutdown();
-    }
-}
-
-public class ClusteringTests : IClassFixture<Fixture>
-{
-    private readonly Fixture _fixture;
-
-    public ClusteringTests(Fixture fixture)
-    {
-        _fixture = fixture;
-    }
-
-    [Fact]
+    [Fact(Skip = "Downloads the embedding model and is intended for local experimentation.")]
     public async Task TestClustering()
     {
         // 1) "emails" (subject + short body)

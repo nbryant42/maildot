@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using System.IO;
 using maildot.ViewModels;
@@ -48,7 +50,7 @@ public sealed partial class ImapDashboardView : UserControl
     public event EventHandler<LabelViewModel>? LabelSelected;
     public event EventHandler<EmailMessageViewModel>? SuggestionAccepted;
     public event EventHandler<EmailMessageViewModel>? SenderSuggestionAccepted;
-    public event EventHandler<EmailMessageViewModel>? LabelSenderRequested;
+    public event EventHandler<LabelSenderRequest>? LabelSenderRequested;
     public event EventHandler<EmailMessageViewModel>? DeleteMessageRequested;
     public event EventHandler? FilterChanged;
     public event EventHandler<MessageReadStateRequest>? MessageReadStateChangeRequested;
@@ -422,12 +424,26 @@ public sealed partial class ImapDashboardView : UserControl
             return;
         }
 
-        _contextMenuMessage = (e.OriginalSource as FrameworkElement)?.DataContext as EmailMessageViewModel
-                              ?? MessagesList.SelectedItem as EmailMessageViewModel;
+        var clickedMessage = (e.OriginalSource as FrameworkElement)?.DataContext as EmailMessageViewModel;
+        if (clickedMessage != null && !MessagesList.SelectedItems.Contains(clickedMessage))
+        {
+            MessagesList.SelectedItems.Clear();
+            MessagesList.SelectedItems.Add(clickedMessage);
+        }
+
+        _contextMenuMessage = clickedMessage ?? MessagesList.SelectedItem as EmailMessageViewModel;
 
         if (_contextMenuMessage == null)
         {
             return;
+        }
+
+        var contextMessages = MessagesList.SelectedItems
+            .OfType<EmailMessageViewModel>()
+            .ToList();
+        if (contextMessages.Count == 0)
+        {
+            contextMessages.Add(_contextMenuMessage);
         }
 
         var vm = DataContext as MailboxViewModel;
@@ -485,10 +501,7 @@ public sealed partial class ImapDashboardView : UserControl
         var labelSender = new MenuFlyoutItem { Text = "Label sender..." };
         labelSender.Click += (_, __) =>
         {
-            if (_contextMenuMessage != null)
-            {
-                LabelSenderRequested?.Invoke(this, _contextMenuMessage);
-            }
+            LabelSenderRequested?.Invoke(this, new LabelSenderRequest(contextMessages));
         };
         flyout.Items.Add(labelSender);
 
@@ -594,4 +607,5 @@ public sealed partial class ImapDashboardView : UserControl
 
 public sealed record LabelDropRequest(int LabelId, string? MessageId, string? FolderId);
 public sealed record MessageReadStateRequest(EmailMessageViewModel Message, bool IsRead);
+public sealed record LabelSenderRequest(IReadOnlyList<EmailMessageViewModel> Messages);
 

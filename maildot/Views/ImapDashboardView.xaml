@@ -247,6 +247,7 @@
                     <ListView x:Name="MessagesList"
                               ItemsSource="{Binding Messages}"
                               SelectedItem="{Binding SelectedMessage, Mode=TwoWay}"
+                              SelectionMode="Extended"
                               CanDragItems="True"
                               DragItemsStarting="OnMessagesDragItemsStarting"
                               KeyDown="OnMessagesListKeyDown"
