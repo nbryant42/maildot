@@ -89,12 +89,13 @@ public partial class QwenEmbedder : IDisposable
         Directory.CreateDirectory(onnxDir);
         var so = new SessionOptions();
 
-        // Disabled; none of the auto-downloadable providers are working for me as of WinAppSDK 2.0.0-experimental3.
+        // Disabled; none of the auto-downloadable providers are working for me as of WinAppSDK 1.8 thru 2.2.
         // NvTensorRTRTXExecutionProvider, if appended here, causes a StackOverflowException on `new InferenceSession`.
-        // This can be worked around by running the `new InferenceSession` in a `new Thread` with 8MB stack size, but
-        // it still runs out of memory downstream, during the compilation phase, allocating at least 128GB of memory.
-        // Might be related to the fact that it prints many errors about unsupported op types; the logs themselves
-        // consume memory?
+        // In earlier TensorRT-RTX versions, that could be worked around by running the `new InferenceSession` in a
+        // `new Thread` with 8MB stack size, but it still ran out of memory downstream, during the compilation phase,
+        // allocating at least 128GB of memory. This failure now happens earlier, during the `new InferenceSession` call
+        // itself, and even Int32.MaxValue stack size does not help. This seems to be a model-specific incompatibility;
+        // We previously saw a lot of warnings about unsupported op types.
 #if false
         foreach (var dev in ortEnv.GetEpDevices())
         {
