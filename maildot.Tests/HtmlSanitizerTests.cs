@@ -4,6 +4,42 @@ namespace maildot.Tests;
 
 public class HtmlSanitizerTests
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void RejectsPoisonMessageWithoutRecursiveStackOverflow(bool closeTags)
+    {
+        var html = string.Concat(Enumerable.Repeat("<div>", 20_000)) + "hello";
+        if (closeTags) html += string.Concat(Enumerable.Repeat("</div>", 20_000));
+
+        var result = HtmlSanitizer.Sanitize(html);
+
+        Assert.Contains(result.BlockedResources, r => r.Reason == BlockedResourceReason.DocumentLimitExceeded);
+        Assert.DoesNotContain("<div>", result.Html);
+        Assert.False(string.IsNullOrWhiteSpace(result.Html));
+        // The placeholder is safe to persist/render and no longer contains poison markup.
+        Assert.Equal(result.Html, HtmlSanitizer.Sanitize(result.Html).Html);
+    }
+
+    [Fact]
+    public void RejectsOversizedHtmlBeforeParsing()
+    {
+        var result = HtmlSanitizer.Sanitize(new string('x', HtmlSanitizer.MaxHtmlCharacters + 1));
+        Assert.Contains(result.BlockedResources, r => r.Reason == BlockedResourceReason.DocumentLimitExceeded);
+        Assert.True(result.Html.Length < 1024);
+    }
+
+    [Fact]
+    public void PreservesOrdinaryNestedLayoutAndStillRemovesActiveContent()
+    {
+        var html = string.Concat(Enumerable.Repeat("<div>", 100)) +
+            "<p>Hello</p><script>alert(1)</script>" + string.Concat(Enumerable.Repeat("</div>", 100));
+        var result = HtmlSanitizer.Sanitize(html);
+        Assert.Contains("<p>Hello</p>", result.Html);
+        Assert.DoesNotContain("script", result.Html);
+        Assert.DoesNotContain(result.BlockedResources, r => r.Reason == BlockedResourceReason.DocumentLimitExceeded);
+    }
+
     [Fact]
     public void StripsScriptTags()
     {

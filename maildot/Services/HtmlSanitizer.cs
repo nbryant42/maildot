@@ -22,12 +22,16 @@ public enum BlockedResourceReason
     DisallowedAttribute,
     ExternalContentBlocked,
     InvalidSchemeOrHost,
-    PrivateNetwork
+    PrivateNetwork,
+    DocumentLimitExceeded
 }
 
 public static class HtmlSanitizer
 {
-    public const int CurrentPolicyVersion = 4;
+    public const int CurrentPolicyVersion = 5;
+    internal const int MaxHtmlCharacters = 8 * 1024 * 1024;
+    internal const int MaxNestingDepth = 256;
+    private const string RejectedHtml = "<html><body><p>This message is too complex to preview safely.</p></body></html>";
 
     private static readonly HashSet<string> DisallowedElements =
         new(StringComparer.OrdinalIgnoreCase)
@@ -127,8 +131,25 @@ public static class HtmlSanitizer
             return new SanitizedHtmlResult(string.Empty, Array.Empty<BlockedResource>());
         }
 
-        var doc = new HtmlDocument();
-        doc.LoadHtml(html);
+        if (html.Length > MaxHtmlCharacters)
+        {
+            return RejectDocument();
+        }
+
+        var doc = new HtmlDocument { OptionMaxNestedChildNodes = MaxNestingDepth };
+        try
+        {
+            // Bound the parser itself: an iterative sanitizer alone cannot protect parsing
+            // or HtmlAgilityPack's recursive serialization from hostile nesting.
+            doc.LoadHtml(html);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // HtmlAgilityPack reports its nesting limit with a plain Exception. Other
+            // parser failures must also fail closed and yield a persistable placeholder
+            // so automatic sync does not continually retry an unrenderable message.
+            return RejectDocument();
+        }
 
         var blockedResources = new List<BlockedResource>();
         CleanNode(doc.DocumentNode, blockedResources);
@@ -136,6 +157,9 @@ public static class HtmlSanitizer
         var sanitized = doc.DocumentNode.InnerHtml;
         return new SanitizedHtmlResult(sanitized, blockedResources);
     }
+
+    private static SanitizedHtmlResult RejectDocument() =>
+        new(RejectedHtml, new[] { new BlockedResource("document", BlockedResourceReason.DocumentLimitExceeded) });
 
     public static string? SanitizeNullable(string? html) =>
         string.IsNullOrWhiteSpace(html)
@@ -182,21 +206,26 @@ public static class HtmlSanitizer
 
     private static void CleanNode(HtmlNode node, ICollection<BlockedResource> blocked)
     {
-        foreach (var child in node.ChildNodes.ToList())
+        var pending = new Stack<HtmlNode>();
+        pending.Push(node);
+        while (pending.TryPop(out var current))
         {
-            if (child.NodeType == HtmlNodeType.Element)
+            foreach (var child in current.ChildNodes.ToList())
             {
-                if (!IsAllowedElement(child.Name))
+                if (child.NodeType == HtmlNodeType.Element)
                 {
-                    blocked.Add(new BlockedResource(child.Name, BlockedResourceReason.DisallowedTag));
-                    child.Remove();
-                    continue;
+                    if (!IsAllowedElement(child.Name))
+                    {
+                        blocked.Add(new BlockedResource(child.Name, BlockedResourceReason.DisallowedTag));
+                        child.Remove();
+                        continue;
+                    }
+
+                    SanitizeAttributes(child, blocked);
                 }
 
-                SanitizeAttributes(child, blocked);
+                pending.Push(child);
             }
-
-            CleanNode(child, blocked);
         }
     }
 
