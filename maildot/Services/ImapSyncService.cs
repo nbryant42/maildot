@@ -4424,7 +4424,7 @@ GROUP BY lids.""LabelId""";
             long? targetValidity = null;
             if (sourceUid > 0)
             {
-                var moveResult = await TryMoveMessageOnServerAsync(sourceFolderFullName, targetFolderFullName, sourceUid, sourceFolder.UidValidity, message.MessageId, token);
+                var moveResult = await TryMoveMessageOnServerAsync(sourceFolderFullName, targetFolderFullName, sourceUid, sourceFolder.UidValidity, token);
                 movedOnServer = moveResult.Moved;
                 serverAssignedUid = moveResult.TargetUid;
                 targetValidity = moveResult.TargetValidity;
@@ -5325,7 +5325,6 @@ ORDER BY ul.label_id
         string targetFolderFullName,
         long sourceUid,
         long? expectedValidity,
-        string messageIdHeader,
         CancellationToken token)
     {
         IMailFolder? sourceFolder = null;
@@ -5357,29 +5356,8 @@ ORDER BY ul.label_id
 
             if (!await ValidateSelectedFolderAsync(sourceFolder, expectedValidity, token)) return (false, null, null);
 
-            await sourceFolder.MoveToAsync(new UniqueId((uint)sourceUid), targetFolder, token);
-
-            if (!targetFolder.IsOpen)
-            {
-                await targetFolder.OpenAsync(FolderAccess.ReadOnly, token);
-            }
-
-            await ValidateSelectedFolderAsync(targetFolder, targetFolder.UidValidity, token);
-
-            if (!string.IsNullOrWhiteSpace(messageIdHeader))
-            {
-                var matching = await targetFolder.SearchAsync(
-                    SearchQuery.HeaderContains("Message-Id", messageIdHeader),
-                    token);
-
-                var resolvedUid = matching.Count > 0
-                    ? matching.Max(uid => (long)uid.Id)
-                    : (long?)null;
-
-                return (true, resolvedUid, targetFolder.UidValidity);
-            }
-
-            return (true, null, targetFolder.UidValidity);
+            return await MoveWithMappingAsync(sourceFolder, targetFolder, new UniqueId((uint)sourceUid),
+                async (target, ct) => { await ValidateSelectedFolderAsync(target, target.UidValidity, ct); }, token);
         }
         catch (OperationCanceledException)
         {
@@ -5414,6 +5392,35 @@ ORDER BY ul.label_id
             }
 
             _semaphore.Release();
+        }
+    }
+
+    internal static async Task<(bool Moved, long? TargetUid, long? TargetValidity)> MoveWithMappingAsync(
+        IMailFolder source, IMailFolder target, UniqueId sourceUid,
+        Func<IMailFolder, CancellationToken, Task> synchronizeTarget, CancellationToken token)
+    {
+        // COPYUID/MOVE's result is authoritative. Message-ID is neither unique nor an
+        // exact-match search key, so it must never be used to guess the destination UID.
+        var assigned = await source.MoveToAsync(sourceUid, target, token);
+        if (assigned is not { IsValid: true, Validity: > 0 })
+            return (true, null, null);
+
+        try
+        {
+            if (!target.IsOpen) await target.OpenAsync(FolderAccess.ReadOnly, token);
+            await synchronizeTarget(target, token);
+            // A mailbox can be recreated between MOVE and SELECT. Preserve an archive-only
+            // copy rather than associate this message with a reused UID in that generation.
+            return ImapFolderIdentity.Matches(assigned.Value.Validity, target.UidValidity)
+                ? (true, assigned.Value.Id, target.UidValidity)
+                : (true, null, null);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch
+        {
+            // The server already acknowledged the move. A failed follow-up cannot undo it;
+            // keep the archived copy using a synthetic UID until a later server sync.
+            return (true, null, null);
         }
     }
 
