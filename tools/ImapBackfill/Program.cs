@@ -169,6 +169,10 @@ internal static class Program
             return;
         }
 
+        await ImapFolderIdentity.SynchronizeAsync(db, folderEntity.Id, folder.UidValidity, CancellationToken.None);
+        db.ChangeTracker.Clear();
+        existingMessages = await LoadExistingMessagesAsync(db, folderEntity.Id, options);
+        var validity = folder.UidValidity;
         var summaryItems = MessageSummaryItems.UniqueId | MessageSummaryItems.Envelope | MessageSummaryItems.InternalDate;
 
         try
@@ -234,8 +238,11 @@ internal static class Program
                     {
                         try
                         {
+                            await using var tx = await ImapFolderIdentity.BeginWriteAsync(db, folderEntity.Id, validity, CancellationToken.None);
+                            db.ChangeTracker.Clear();
                             await UpsertImapMessageAsync(db, server, folderEntity.Id, summaryEnvelope, uid,
                                 CancellationToken.None);
+                            await tx.CommitAsync();
                             Console.WriteLine($"    Updated envelope UID {uid}");
                         }
                         catch (Exception ex)
@@ -252,7 +259,7 @@ internal static class Program
                     var mime = await folder.GetMessageAsync(summary.UniqueId);
                     var mimeEnvelope = BuildEnvelope(mime, server, uid, summary.InternalDate?.ToUniversalTime(),
                         existing.ReceivedUtc);
-                    await PersistMessageAsync(db, server, folderEntity.Id, mime, mimeEnvelope, options, uid,
+                    await PersistMessageAsync(db, server, folderEntity.Id, mime, mimeEnvelope, options, uid, validity,
                         CancellationToken.None);
                     Console.WriteLine($"    Refreshed UID {uid}");
                 }
@@ -343,8 +350,11 @@ internal static class Program
         MessageEnvelope envelope,
         BackfillOptions options,
         long uid,
+        uint validity,
         CancellationToken token)
     {
+        await using var tx = await ImapFolderIdentity.BeginWriteAsync(db, folderId, validity, token);
+        db.ChangeTracker.Clear();
         var entity = await UpsertImapMessageAsync(db, server, folderId, envelope, uid, token);
 
         var existingBody = await db.MessageBodies
@@ -361,7 +371,6 @@ internal static class Program
         }
 
         await db.Database.OpenConnectionAsync(token);
-        await using var tx = await db.Database.BeginTransactionAsync(token);
 
         if (options.ProcessBodies)
         {

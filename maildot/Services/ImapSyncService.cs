@@ -795,7 +795,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
         return new EmailMessageViewModel
         {
-            Id = result.ImapUid.ToString(),
+            Id = result.MessageId.ToString(CultureInfo.InvariantCulture),
             IsLocalOnly = result.ImapUid <= 0,
             FolderId = result.FolderFullName,
             Subject = string.IsNullOrWhiteSpace(result.Subject) ? "(No subject)" : result.Subject,
@@ -1105,11 +1105,11 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             MessageSummaryItems.Envelope | MessageSummaryItems.UniqueId | MessageSummaryItems.InternalDate | MessageSummaryItems.Flags,
             _cts.Token);
 
-        await PersistMessagesAsync(folder, summaries);
+        var persistedIds = await PersistMessagesAsync(folder, summaries);
 
         var labelMap = await LoadLabelMapAsync(summaries.Select(s => (long)s.UniqueId.Id));
 
-        var items = summaries
+        var items = summaries.Where(s => persistedIds.ContainsKey((long)s.UniqueId.Id))
             .OrderByDescending(s => s.InternalDate?.UtcDateTime ?? DateTime.MinValue)
             .Select(summary =>
             {
@@ -1135,7 +1135,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
                 var vm = new EmailMessageViewModel
                 {
-                    Id = summary.UniqueId.Id.ToString(),
+                    Id = persistedIds[(long)summary.UniqueId.Id].ToString(CultureInfo.InvariantCulture),
                     FolderId = folder.FullName,
                     Subject = summary.Envelope?.Subject ?? "(No subject)",
                     Sender = senderDisplay,
@@ -1200,6 +1200,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     orderby m.ImapUid descending
                     select new
                     {
+                        m.Id,
                         m.ImapUid,
                         m.MessageId,
                         m.IsRead,
@@ -1230,7 +1231,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 var color = SenderColorHelper.GetColor(r.FromName, r.FromAddress);
                 return new EmailMessageViewModel
                 {
-                    Id = r.ImapUid.ToString(),
+                    Id = r.Id.ToString(CultureInfo.InvariantCulture),
                     IsLocalOnly = r.ImapUid <= 0,
                     FolderId = r.Folder,
                     Subject = string.IsNullOrWhiteSpace(r.Subject) ? "(No subject)" : r.Subject!,
@@ -1245,7 +1246,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 };
             }).ToList();
 
-            var lowestUid = emailItems.Count == 0 ? (long?)null : emailItems.Min(e => long.Parse(e.Id));
+            var lowestUid = rows.Count == 0 ? (long?)null : rows.Min(r => r.ImapUid);
             _folderNextUnlabeledImapUid[folderFullName] = lowestUid.HasValue ? lowestUid.Value - 1 : -1;
 
             await EnqueueAsync(() =>
@@ -1297,6 +1298,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     orderby m.ReceivedUtc descending
                     select new
                     {
+                        m.Id,
                         m.ImapUid,
                         m.IsRead,
                         m.Subject,
@@ -1317,7 +1319,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 var color = SenderColorHelper.GetColor(r.FromName, r.FromAddress);
                 return new EmailMessageViewModel
                 {
-                    Id = r.ImapUid.ToString(),
+                    Id = r.Id.ToString(CultureInfo.InvariantCulture),
                     IsLocalOnly = true,
                     FolderId = folder.FullName,
                     Subject = string.IsNullOrWhiteSpace(r.Subject) ? "(No subject)" : r.Subject!,
@@ -1397,11 +1399,11 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             MessageSummaryItems.Envelope | MessageSummaryItems.UniqueId | MessageSummaryItems.InternalDate | MessageSummaryItems.Flags,
             token);
 
-        await PersistMessagesAsync(folder, summaries);
+        var persistedIds = await PersistMessagesAsync(folder, summaries);
 
         var labelMap = await LoadLabelMapAsync(summaries.Select(s => (long)s.UniqueId.Id));
 
-        return summaries
+        return summaries.Where(s => persistedIds.ContainsKey((long)s.UniqueId.Id))
             .OrderByDescending(s => s.InternalDate?.UtcDateTime ?? DateTime.MinValue)
             .Select(summary =>
             {
@@ -1427,7 +1429,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
                 var vm = new EmailMessageViewModel
                 {
-                    Id = summary.UniqueId.Id.ToString(),
+                    Id = persistedIds[(long)summary.UniqueId.Id].ToString(CultureInfo.InvariantCulture),
                     FolderId = folder.FullName,
                     Subject = summary.Envelope?.Subject ?? "(No subject)",
                     Sender = senderDisplay,
@@ -1526,7 +1528,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 var color = SenderColorHelper.GetColor(r.FromName, r.FromAddress);
                 var vm = new EmailMessageViewModel
                 {
-                    Id = r.ImapUid.ToString(),
+                    Id = r.Id.ToString(CultureInfo.InvariantCulture),
                     IsLocalOnly = r.ImapUid <= 0,
                     FolderId = folder.FullName,
                     Subject = string.IsNullOrWhiteSpace(r.Subject) ? "(No subject)" : r.Subject!,
@@ -1670,7 +1672,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 var color = SenderColorHelper.GetColor(r.FromName, r.FromAddress);
                 var vm = new EmailMessageViewModel
                 {
-                    Id = r.ImapUid.ToString(),
+                    Id = r.Id.ToString(CultureInfo.InvariantCulture),
                     IsLocalOnly = r.ImapUid <= 0,
                     FolderId = folder.FullName,
                     Subject = string.IsNullOrWhiteSpace(r.Subject) ? "(No subject)" : r.Subject!,
@@ -1701,17 +1703,17 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         }
     }
 
-    private async Task PersistMessagesAsync(IMailFolder folder, IList<IMessageSummary> summaries)
+    private async Task<Dictionary<long, int>> PersistMessagesAsync(IMailFolder folder, IList<IMessageSummary> summaries)
     {
         if (_settings == null || summaries.Count == 0)
         {
-            return;
+            return [];
         }
 
         var db = await CreateDbContextAsync();
         if (db == null)
         {
-            return;
+            return [];
         }
 
         await using (db)
@@ -1719,8 +1721,11 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             var folderEntity = await EnsureFolderEntityAsync(db, folder, _cts.Token);
             if (folderEntity == null)
             {
-                return;
+                return [];
             }
+
+            await ImapFolderIdentity.SynchronizeAsync(db, folderEntity.Id, folder.UidValidity, _cts.Token);
+            await using var tx = await ImapFolderIdentity.BeginWriteAsync(db, folderEntity.Id, folder.UidValidity, _cts.Token);
 
             var existingByUid = await db.ImapMessages
                 .Where(m => m.FolderId == folderEntity.Id)
@@ -1769,14 +1774,11 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 });
             }
 
-            try
-            {
-                await db.SaveChangesAsync(_cts.Token);
-            }
-            catch (DbUpdateException ex) when (IsUniqueViolation(ex))
-            {
-                // Another writer inserted the same message concurrently; safe to ignore.
-            }
+            await db.SaveChangesAsync(_cts.Token);
+            var ids = await db.ImapMessages.Where(m => m.FolderId == folderEntity.Id)
+                .ToDictionaryAsync(m => m.ImapUid, m => m.Id, _cts.Token);
+            await tx.CommitAsync(_cts.Token);
+            return ids;
         }
     }
 
@@ -2192,119 +2194,51 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
     private async Task<bool> FetchMissingBodiesForFolderAsync(IMailFolder folder, CancellationToken token)
     {
-        if (_settings == null)
-        {
-            return false;
-        }
-        var db = await CreateDbContextAsync();
-        if (db == null)
-        {
-            return false;
-        }
-
-        Models.ImapFolder? folderEntity;
-        List<(long ImapUid, int Id)> knownMessages;
-        HashSet<int> bodiesPresent;
-
-        await using (db)
-        {
-            folderEntity = await EnsureFolderEntityAsync(db, folder, token);
-            if (folderEntity == null)
-            {
-                return false;
-            }
-
-            knownMessages = (await db.ImapMessages
-                    .Where(m => m.FolderId == folderEntity.Id)
-                    .Select(m => new { m.ImapUid, m.Id })
-                    .ToListAsync(token))
-                .Select(m => (m.ImapUid, m.Id))
-                .ToList();
-
-            var messageIds = knownMessages.Select(m => m.Id).ToList();
-
-            bodiesPresent = await db.MessageBodies
-                .Where(b => messageIds.Contains(b.MessageId))
-                .Select(b => b.MessageId)
-                .ToHashSetAsync(token);
-        }
-
         List<UniqueId> serverUids;
-
-        if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
-        {
-            Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
-            return false;
-        }
-
+        int folderId;
+        uint validity;
+        if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token)) return false;
         try
         {
-            if (_client == null)
-            {
-                return false;
-            }
-
-            if (!folder.IsOpen)
-            {
-                await folder.OpenAsync(FolderAccess.ReadOnly, token);
-            }
-
-            serverUids = [.. (await folder.SearchAsync(SearchQuery.All, token))];
+            if (_client == null || !_folderCache.TryGetValue(folder.FullName, out folder!)) return false;
+            await folder.OpenAsync(FolderAccess.ReadOnly, token);
+            validity = folder.UidValidity;
+            await using var db = await CreateDbContextAsync();
+            if (db == null) return false;
+            var entity = await EnsureFolderEntityAsync(db, folder, token);
+            if (entity == null) return false;
+            folderId = entity.Id;
+            await ImapFolderIdentity.SynchronizeAsync(db, folderId, validity, token);
+            serverUids = [.. await folder.SearchAsync(SearchQuery.All, token)];
         }
         finally
         {
-            try
-            {
-                if (folder.IsOpen)
-                {
-                    await folder.CloseAsync(false, token);
-                }
-            }
-            catch
-            {
-            }
-
+            try { if (folder.IsOpen) await folder.CloseAsync(false, token); } catch { }
             _semaphore.Release();
         }
 
-        var knownUids = knownMessages.Select(m => m.ImapUid).ToHashSet();
-
-        var missingBodyUids = knownMessages
-            .Where(m => !bodiesPresent.Contains(m.Id))
-            .Select(m => m.ImapUid);
-
-        var missingMessages = serverUids.Select(u => (long)u.Id).Where(uid => !knownUids.Contains(uid));
-
-        var targets = missingBodyUids
-            .Concat(missingMessages)
-            .Distinct()
-            .OrderByDescending(uid => uid)
-            .ToList();
-
-        Debug.WriteLine($"[ReadSync] background-scan folder={folder.FullName} knownCount={knownMessages.Count} missingBodyCount={missingBodyUids.Count()} missingMessageCount={missingMessages.Count()} targetCount={targets.Count}");
-
-        if (folderEntity == null)
+        List<long> targets;
+        await using (var db = await CreateDbContextAsync())
         {
-            return false;
+            if (db == null) return false;
+            await using var tx = await ImapFolderIdentity.BeginWriteAsync(db, folderId, validity, token);
+            var completeUids = await db.ImapMessages
+                .Where(m => m.FolderId == folderId && m.ImapUid > 0 && db.MessageBodies.Any(b => b.MessageId == m.Id))
+                .Select(m => m.ImapUid).ToHashSetAsync(token);
+            targets = serverUids.Select(u => (long)u.Id).Where(u => !completeUids.Contains(u))
+                .OrderByDescending(u => u).ToList();
+            await tx.CommitAsync(token);
         }
-
-        var folderId = folderEntity.Id;
         var updated = false;
-
         foreach (var uid in targets)
         {
-            if (token.IsCancellationRequested)
-            {
-                break;
-            }
-
-            updated = await FetchAndPersistBodyAsync(folder, folderId, uid, token) || updated;
+            token.ThrowIfCancellationRequested();
+            updated = await FetchAndPersistBodyAsync(folder, folderId, validity, uid, token) || updated;
         }
-
         return updated;
     }
 
-    private async Task<bool> FetchAndPersistBodyAsync(IMailFolder folder, int folderId, long uid, CancellationToken token)
+    private async Task<bool> FetchAndPersistBodyAsync(IMailFolder folder, int folderId, uint validity, long uid, CancellationToken token)
     {
         MimeMessage? message = null;
         bool? isRead = null;
@@ -2318,7 +2252,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
         try
         {
-            if (_client == null)
+            if (_client == null || !_folderCache.TryGetValue(folder.FullName, out folder!))
             {
                 return false;
             }
@@ -2327,6 +2261,8 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             {
                 await folder.OpenAsync(FolderAccess.ReadOnly, token);
             }
+
+            if (!await ValidateSelectedFolderAsync(folder, validity, token)) return false;
 
             var summaries = await folder.FetchAsync(
                 [uniqueId],
@@ -2367,6 +2303,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
         await using (db)
         {
+            await using var tx = await ImapFolderIdentity.BeginWriteAsync(db, folderId, validity, token);
             var entity = await UpsertImapMessageAsync(db, folderId, message, uid, isRead.Value, token);
 
             var hasBody = await db.MessageBodies.AnyAsync(b => b.MessageId == entity.Id, token);
@@ -2384,6 +2321,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 overwriteBody: !hasBody,
                 overwriteAttachments: !hasAttachments,
                 token);
+            await tx.CommitAsync(token);
             Debug.WriteLine($"[ReadSync] background-persist folderId={folderId} uid={uid} isRead={isRead.Value} hasBody={hasBody} hasAttachments={hasAttachments}");
             return true;
         }
@@ -2398,7 +2336,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         CancellationToken token)
     {
         await db.Database.OpenConnectionAsync(token);
-        await using var tx = await db.Database.BeginTransactionAsync(token);
+        var tx = db.Database.CurrentTransaction ?? throw new InvalidOperationException("A folder identity transaction is required.");
         var conn = (NpgsqlConnection)db.Database.GetDbConnection();
 
         try
@@ -2482,13 +2420,43 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             }
 
             await db.SaveChangesAsync(token);
-            await tx.CommitAsync(token);
         }
         catch (DbUpdateException ex)
         {
             Debug.WriteLine(
                 $"Exception occurred while persisting MIME content for message {entity.ImapUid} in folder {entity.FolderId}: {ex}");
+            throw;
         }
+    }
+
+    private async Task<(long Uid, long? Validity)?> ResolveMessageIdentityAsync(string folderName, long messageKey, CancellationToken token)
+    {
+        if (_settings == null) return null;
+        await using var db = await CreateDbContextAsync();
+        if (db == null) return null;
+        var row = await (from m in db.ImapMessages.AsNoTracking()
+                         join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
+                         where m.Id == messageKey && f.AccountId == _settings.Id && f.FullName == folderName
+                         select new { m.ImapUid, f.UidValidity }).SingleOrDefaultAsync(token);
+        return row == null ? null : (row.ImapUid, row.UidValidity);
+    }
+
+    private async Task<bool> ValidateSelectedFolderAsync(IMailFolder folder, long? expectedValidity, CancellationToken token)
+    {
+        if (!folder.IsOpen) throw new InvalidOperationException("Select the mailbox before validating its UIDs.");
+        await using var db = await CreateDbContextAsync();
+        if (db == null) throw new InvalidOperationException("Cannot validate mailbox identity without the archive database.");
+        var entity = await EnsureFolderEntityAsync(db, folder, token)
+            ?? throw new InvalidOperationException("Mailbox identity is unavailable.");
+        await ImapFolderIdentity.SynchronizeAsync(db, entity.Id, folder.UidValidity, token);
+        return ImapFolderIdentity.Matches(expectedValidity, folder.UidValidity);
+    }
+
+    private async Task<bool> ReconnectWithLockAsync()
+    {
+        if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), _cts.Token)) return false;
+        try { return await TryReconnectAsync(); }
+        finally { _semaphore.Release(); }
     }
 
     private async Task<Models.ImapFolder?> EnsureFolderEntityAsync(MailDbContext db, IMailFolder folder, CancellationToken token)
@@ -2532,6 +2500,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         catch (DbUpdateException ex) when (IsUniqueViolation(ex))
         {
             // Another writer created the folder concurrently; re-query and return the existing row.
+            db.Entry(folderEntity).State = EntityState.Detached;
             folderEntity = await db.ImapFolders
                 .AsNoTracking()
                 .Where(f => f.AccountId == _settings.Id && f.FullName == fullName)
@@ -3700,7 +3669,7 @@ GROUP BY lids.""LabelId""";
 
         return new EmailMessageViewModel
         {
-            Id = message.ImapUid.ToString(),
+            Id = message.Id.ToString(CultureInfo.InvariantCulture),
             IsLocalOnly = message.ImapUid <= 0,
             FolderId = folder.FullName,
             Subject = message.Subject,
@@ -3843,6 +3812,7 @@ GROUP BY lids.""LabelId""";
         _cts.Dispose();
     }
 
+    // UI messageId values are archive primary keys, not IMAP UIDs.
     public Task<MessageBodyResult?> LoadMessageBodyAsync(string folderId, string messageId) =>
         LoadMessageBodyInternalAsync(folderId, messageId, true);
 
@@ -3882,7 +3852,7 @@ GROUP BY lids.""LabelId""";
 
             var messageEntity = await db.ImapMessages
                 .AsNoTracking()
-                .Where(m => m.FolderId == folderEntity.Id && m.ImapUid == uid)
+                .Where(m => m.FolderId == folderEntity.Id && m.Id == uid)
                 .FirstOrDefaultAsync(_cts.Token);
             if (messageEntity == null)
             {
@@ -3947,7 +3917,7 @@ GROUP BY lids.""LabelId""";
 
             var messageEntity = await db.ImapMessages
                 .AsNoTracking()
-                .Where(m => m.FolderId == folderEntity.Id && m.ImapUid == uid)
+                .Where(m => m.FolderId == folderEntity.Id && m.Id == uid)
                 .FirstOrDefaultAsync(token);
 
             if (messageEntity == null)
@@ -4072,11 +4042,15 @@ GROUP BY lids.""LabelId""";
 
     private async Task RefreshMessageMimeFromServerAsync(
         string folderFullName,
-        long uid,
+        long messageKey,
         bool overwriteBody,
         bool overwriteAttachments,
         CancellationToken token)
     {
+        var identity = await ResolveMessageIdentityAsync(folderFullName, messageKey, token);
+        if (identity == null || identity.Value.Uid <= 0) return;
+        var uid = identity.Value.Uid;
+        var validity = identity.Value.Validity;
         IMailFolder? folder = null;
         MimeMessage? message = null;
         bool? isRead = null;
@@ -4098,6 +4072,8 @@ GROUP BY lids.""LabelId""";
             {
                 await folder.OpenAsync(FolderAccess.ReadOnly, token);
             }
+
+            if (!await ValidateSelectedFolderAsync(folder, validity, token)) return;
 
             var summaries = await folder.FetchAsync(
                 [new UniqueId((uint)uid)],
@@ -4153,8 +4129,10 @@ GROUP BY lids.""LabelId""";
                 return;
             }
 
+            await using var tx = await ImapFolderIdentity.BeginWriteAsync(db, folderEntity.Id, validity, token);
             var entity = await UpsertImapMessageAsync(db, folderEntity.Id, message, uid, isRead.Value, token);
             await PersistMessageMimeContentAsync(db, entity, message, overwriteBody, overwriteAttachments, token);
+            await tx.CommitAsync(token);
         }
     }
 
@@ -4375,6 +4353,16 @@ GROUP BY lids.""LabelId""";
 
     public async Task<bool> MoveMessageToFolderAsync(string sourceFolderFullName, string messageId, string targetFolderFullName)
     {
+        try { return await MoveMessageToFolderAsyncCore(sourceFolderFullName, messageId, targetFolderFullName); }
+        catch (MailboxGenerationChangedException)
+        {
+            await ReportStatusAsync("Mailbox changed on the server; refresh and retry.", false);
+            return false;
+        }
+    }
+
+    private async Task<bool> MoveMessageToFolderAsyncCore(string sourceFolderFullName, string messageId, string targetFolderFullName)
+    {
         var token = _cts.Token;
         if (_settings == null ||
             string.IsNullOrWhiteSpace(sourceFolderFullName) ||
@@ -4423,22 +4411,28 @@ GROUP BY lids.""LabelId""";
             }
 
             var message = await db.ImapMessages
-                .FirstOrDefaultAsync(m => m.FolderId == sourceFolder.Id && m.ImapUid == sourceUid, token);
+                .FirstOrDefaultAsync(m => m.FolderId == sourceFolder.Id && m.Id == sourceUid, token);
 
             if (message == null)
             {
                 return false;
             }
 
+            sourceUid = message.ImapUid;
             var movedOnServer = false;
             long? serverAssignedUid = null;
+            long? targetValidity = null;
             if (sourceUid > 0)
             {
-                var moveResult = await TryMoveMessageOnServerAsync(sourceFolderFullName, targetFolderFullName, sourceUid, message.MessageId, token);
+                var moveResult = await TryMoveMessageOnServerAsync(sourceFolderFullName, targetFolderFullName, sourceUid, sourceFolder.UidValidity, message.MessageId, token);
                 movedOnServer = moveResult.Moved;
                 serverAssignedUid = moveResult.TargetUid;
+                targetValidity = moveResult.TargetValidity;
             }
 
+            await using var tx = await ImapFolderIdentity.BeginMoveAsync(db, sourceFolder.Id, targetFolder.Id, targetValidity, token);
+            await db.Entry(message).ReloadAsync(token);
+            if (message.FolderId != sourceFolder.Id) return false;
             var desiredUid = serverAssignedUid ?? await GetNextSyntheticImapUidAsync(db, targetFolder.Id, token);
             var finalUid = await EnsureUniqueImapUidAsync(db, targetFolder.Id, desiredUid, message.Id, token);
 
@@ -4446,6 +4440,7 @@ GROUP BY lids.""LabelId""";
             message.ImapUid = finalUid;
             message.Hash = $"{message.MessageId}:{finalUid}";
             await db.SaveChangesAsync(token);
+            await tx.CommitAsync(token);
 
             if (movedOnServer)
             {
@@ -4495,7 +4490,7 @@ GROUP BY lids.""LabelId""";
             }
 
             var message = await db.ImapMessages
-                .FirstOrDefaultAsync(m => m.FolderId == folder.Id && m.ImapUid == uid, token);
+                .FirstOrDefaultAsync(m => m.FolderId == folder.Id && m.Id == uid, token);
             if (message == null)
             {
                 return false;
@@ -4503,7 +4498,7 @@ GROUP BY lids.""LabelId""";
 
             if (message.ImapUid > 0)
             {
-                var serverResult = await TrySetMessageReadStateOnServerAsync(folderFullName, message.ImapUid, isRead, token);
+                var serverResult = await TrySetMessageReadStateOnServerAsync(folderFullName, message.ImapUid, folder.UidValidity, isRead, token);
                 if (serverResult == ServerReadWriteResult.Failed)
                 {
                     return false;
@@ -4550,6 +4545,16 @@ GROUP BY lids.""LabelId""";
 
     public async Task<int> MarkAllReadInFolderAsync(string folderFullName)
     {
+        try { return await MarkAllReadInFolderAsyncCore(folderFullName); }
+        catch (MailboxGenerationChangedException)
+        {
+            await ReportStatusAsync("Mailbox changed on the server; refresh and retry.", false);
+            return 0;
+        }
+    }
+
+    private async Task<int> MarkAllReadInFolderAsyncCore(string folderFullName)
+    {
         var token = _cts.Token;
         Debug.WriteLine($"[MarkAllRead][Service] enter folder={folderFullName}");
         if (_settings == null || string.IsNullOrWhiteSpace(folderFullName))
@@ -4580,7 +4585,8 @@ GROUP BY lids.""LabelId""";
             folderId = folder.Id;
         }
 
-        var serverUnreadUids = await SearchUnreadUidsOnServerAsync(folderFullName, token);
+        var (serverUnreadUids, validity) = await SearchUnreadUidsOnServerAsync(folderFullName, token);
+        if (validity == null) return 0;
         Debug.WriteLine(
             $"[MarkAllRead][Service] unread-sources folder={folderFullName} serverUnreadCount={serverUnreadUids.Count}");
 
@@ -4590,7 +4596,7 @@ GROUP BY lids.""LabelId""";
         }
 
         Debug.WriteLine($"[MarkAllRead][Service] batch-start folder={folderFullName} serverUnreadCount={serverUnreadUids.Count}");
-        var updatedCount = await MarkEntireFolderReadBatchAsync(folderFullName, folderId, serverUnreadUids, token);
+        var updatedCount = await MarkEntireFolderReadBatchAsync(folderFullName, folderId, serverUnreadUids, validity, token);
         Debug.WriteLine($"[MarkAllRead][Service] batch-finished folder={folderFullName} updatedCount={updatedCount}");
         await RefreshUnreadCountsForReadStateChangeAsync(folderFullName, token);
         Debug.WriteLine($"[MarkAllRead][Service] refresh-finished folder={folderFullName}");
@@ -4598,6 +4604,16 @@ GROUP BY lids.""LabelId""";
     }
 
     public async Task<int> MarkAllReadInLabelAsync(int labelId)
+    {
+        try { return await MarkAllReadInLabelAsyncCore(labelId); }
+        catch (MailboxGenerationChangedException)
+        {
+            await ReportStatusAsync("Mailbox changed on the server; refresh and retry.", false);
+            return 0;
+        }
+    }
+
+    private async Task<int> MarkAllReadInLabelAsyncCore(int labelId)
     {
         var token = _cts.Token;
         if (_settings == null)
@@ -4611,7 +4627,7 @@ GROUP BY lids.""LabelId""";
             return 0;
         }
 
-        List<(int FolderId, string FolderFullName, long ImapUid)> targets;
+        List<(int FolderId, string FolderFullName, long ImapUid, long? Validity)> targets;
         await using (db)
         {
             var label = await db.Labels
@@ -4628,7 +4644,7 @@ GROUP BY lids.""LabelId""";
                     join m in db.ImapMessages.AsNoTracking() on ml.MessageId equals m.Id
                     join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
                     where f.AccountId == _settings.Id && !m.IsRead
-                    select new { f.Id, f.FullName, m.ImapUid })
+                    select new { f.Id, f.FullName, m.ImapUid, f.UidValidity })
                 .ToListAsync(token);
 
             var senderTargets = await (
@@ -4637,12 +4653,12 @@ GROUP BY lids.""LabelId""";
                     join m in db.ImapMessages.AsNoTracking() on sl.FromAddress equals m.FromAddress.ToLower()
                     join f in db.ImapFolders.AsNoTracking() on m.FolderId equals f.Id
                     where f.AccountId == _settings.Id && !m.IsRead
-                    select new { f.Id, f.FullName, m.ImapUid })
+                    select new { f.Id, f.FullName, m.ImapUid, f.UidValidity })
                 .ToListAsync(token);
 
             targets = explicitTargets
                 .Concat(senderTargets)
-                .GroupBy(x => (x.Id, x.FullName, x.ImapUid))
+                .GroupBy(x => (x.Id, x.FullName, x.ImapUid, x.UidValidity))
                 .Select(g => g.Key)
                 .ToList();
         }
@@ -4653,12 +4669,13 @@ GROUP BY lids.""LabelId""";
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        foreach (var folderGroup in targets.GroupBy(t => (t.FolderId, t.FolderFullName)))
+        foreach (var folderGroup in targets.GroupBy(t => (t.FolderId, t.FolderFullName, t.Validity)))
         {
             var batchCount = await MarkMessagesReadBatchAsync(
                 folderGroup.Key.FolderFullName,
                 folderGroup.Key.FolderId,
                 [.. folderGroup.Select(t => t.ImapUid)],
+                folderGroup.Key.Validity,
                 token);
             updatedCount += batchCount;
         }
@@ -4722,6 +4739,7 @@ GROUP BY lids.""LabelId""";
     private async Task<ServerReadWriteResult> TrySetMessageReadStateOnServerAsync(
         string folderFullName,
         long uid,
+        long? expectedValidity,
         bool isRead,
         CancellationToken token)
     {
@@ -4754,6 +4772,8 @@ GROUP BY lids.""LabelId""";
                 {
                     await folder.OpenAsync(FolderAccess.ReadWrite, token);
                 }
+
+                if (!await ValidateSelectedFolderAsync(folder, expectedValidity, token)) return ServerReadWriteResult.Failed;
 
                 var uniqueId = new UniqueId((uint)uid);
                 if (isRead)
@@ -4801,7 +4821,7 @@ GROUP BY lids.""LabelId""";
                 _semaphore.Release();
             }
 
-            if (failure != null && canRetry && IsRecoverable(failure) && await TryReconnectAsync())
+            if (failure != null && canRetry && IsRecoverable(failure) && await ReconnectWithLockAsync())
             {
                 canRetry = false;
                 continue;
@@ -4815,6 +4835,7 @@ GROUP BY lids.""LabelId""";
         string folderFullName,
         int folderId,
         IReadOnlyCollection<long> unreadUids,
+        long? expectedValidity,
         CancellationToken token)
     {
         if (unreadUids.Count == 0)
@@ -4834,7 +4855,7 @@ GROUP BY lids.""LabelId""";
 
         if (positiveUids.Count > 0)
         {
-            var serverResult = await TrySetMessagesReadStateOnServerAsync(folderFullName, positiveUids, isRead: true, token);
+            var serverResult = await TrySetMessagesReadStateOnServerAsync(folderFullName, positiveUids, expectedValidity, isRead: true, token);
             if (serverResult == ServerReadWriteResult.Success)
             {
                 acceptedPositiveUids.AddRange(positiveUids.Select(uid => (long)uid.Id));
@@ -4845,7 +4866,7 @@ GROUP BY lids.""LabelId""";
 
                 foreach (var uid in positiveUids)
                 {
-                    var singleResult = await TrySetMessageReadStateOnServerAsync(folderFullName, uid.Id, isRead: true, token);
+                    var singleResult = await TrySetMessageReadStateOnServerAsync(folderFullName, uid.Id, expectedValidity, isRead: true, token);
                     if (singleResult == ServerReadWriteResult.Failed)
                     {
                         Debug.WriteLine($"[MarkAllRead][Batch] failed to mark single message as read on server folder={folderFullName} uid={uid.Id}");
@@ -4876,6 +4897,7 @@ GROUP BY lids.""LabelId""";
 
         await using (db)
         {
+            await using var tx = await ImapFolderIdentity.BeginWriteAsync(db, folderId, expectedValidity, token);
             var allUids = acceptedPositiveUids.Concat(localOnlyUids).ToArray();
             var messages = await db.ImapMessages
                 .Where(m => m.FolderId == folderId && allUids.Contains(m.ImapUid) && !m.IsRead)
@@ -4893,8 +4915,9 @@ GROUP BY lids.""LabelId""";
             }
 
             await db.SaveChangesAsync(token);
+            await tx.CommitAsync(token);
 
-            var updatedIds = messages.Select(m => m.ImapUid.ToString(CultureInfo.InvariantCulture)).ToHashSet(StringComparer.Ordinal);
+            var updatedIds = messages.Select(m => m.Id.ToString(CultureInfo.InvariantCulture)).ToHashSet(StringComparer.Ordinal);
             await EnqueueAsync(() =>
             {
                 if (_viewModel.SelectedMessage != null &&
@@ -4922,6 +4945,7 @@ GROUP BY lids.""LabelId""";
         string folderFullName,
         int folderId,
         IReadOnlyCollection<long> serverUnreadUids,
+        long? expectedValidity,
         CancellationToken token)
     {
         var positiveUids = serverUnreadUids
@@ -4931,7 +4955,7 @@ GROUP BY lids.""LabelId""";
 
         if (positiveUids.Count > 0)
         {
-            var serverResult = await TrySetMessagesReadStateOnServerAsync(folderFullName, positiveUids, isRead: true, token);
+            var serverResult = await TrySetMessagesReadStateOnServerAsync(folderFullName, positiveUids, expectedValidity, isRead: true, token);
             if (serverResult == ServerReadWriteResult.Failed)
             {
                 return 0;
@@ -4946,6 +4970,7 @@ GROUP BY lids.""LabelId""";
 
         await using (db)
         {
+            await using var tx = await ImapFolderIdentity.BeginWriteAsync(db, folderId, expectedValidity, token);
             var messages = await db.ImapMessages
                 .Where(m => m.FolderId == folderId && !m.IsRead)
                 .ToListAsync(token);
@@ -4961,8 +4986,9 @@ GROUP BY lids.""LabelId""";
             }
 
             await db.SaveChangesAsync(token);
+            await tx.CommitAsync(token);
 
-            var updatedIds = messages.Select(m => m.ImapUid.ToString(CultureInfo.InvariantCulture)).ToHashSet(StringComparer.Ordinal);
+            var updatedIds = messages.Select(m => m.Id.ToString(CultureInfo.InvariantCulture)).ToHashSet(StringComparer.Ordinal);
             await EnqueueAsync(() =>
             {
                 if (_viewModel.SelectedMessage != null &&
@@ -4989,6 +5015,7 @@ GROUP BY lids.""LabelId""";
     private async Task<ServerReadWriteResult> TrySetMessagesReadStateOnServerAsync(
         string folderFullName,
         IList<UniqueId> uids,
+        long? expectedValidity,
         bool isRead,
         CancellationToken token)
     {
@@ -5028,6 +5055,8 @@ GROUP BY lids.""LabelId""";
                 {
                     await folder.OpenAsync(FolderAccess.ReadWrite, token);
                 }
+
+                if (!await ValidateSelectedFolderAsync(folder, expectedValidity, token)) return ServerReadWriteResult.Failed;
 
                 Debug.WriteLine(
                     $"[MarkAllRead][IMAP] start folder={folderFullName} action={(isRead ? "mark-read" : "mark-unread")} uidCount={uids.Count}");
@@ -5071,7 +5100,7 @@ GROUP BY lids.""LabelId""";
                 _semaphore.Release();
             }
 
-            if (failure != null && canRetry && IsRecoverable(failure) && await TryReconnectAsync())
+            if (failure != null && canRetry && IsRecoverable(failure) && await ReconnectWithLockAsync())
             {
                 canRetry = false;
                 continue;
@@ -5083,14 +5112,14 @@ GROUP BY lids.""LabelId""";
         }
     }
 
-    private async Task<List<long>> SearchUnreadUidsOnServerAsync(string folderFullName, CancellationToken token)
+    private async Task<(List<long> Uids, long? Validity)> SearchUnreadUidsOnServerAsync(string folderFullName, CancellationToken token)
     {
         IMailFolder? folder = null;
 
         if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
         {
             Debug.WriteLine($"[MarkAllRead][IMAP] unread-search-skipped folder={folderFullName} reason=semaphore-timeout");
-            return [];
+            return ([], null);
         }
 
         try
@@ -5098,13 +5127,13 @@ GROUP BY lids.""LabelId""";
             if (_client == null)
             {
                 Debug.WriteLine($"[MarkAllRead][IMAP] unread-search-skipped folder={folderFullName} reason=client-null");
-                return [];
+                return ([], null);
             }
 
             if (!_folderCache.TryGetValue(folderFullName, out folder))
             {
                 Debug.WriteLine($"[MarkAllRead][IMAP] unread-search-skipped folder={folderFullName} reason=folder-not-cached");
-                return [];
+                return ([], null);
             }
 
             if (!folder.IsOpen)
@@ -5112,10 +5141,11 @@ GROUP BY lids.""LabelId""";
                 await folder.OpenAsync(FolderAccess.ReadOnly, token);
             }
 
+            await ValidateSelectedFolderAsync(folder, folder.UidValidity, token);
             Debug.WriteLine($"[MarkAllRead][IMAP] unread-search-start folder={folderFullName}");
             var uids = await folder.SearchAsync(SearchQuery.NotSeen, token);
             Debug.WriteLine($"[MarkAllRead][IMAP] unread-search-success folder={folderFullName} uidCount={uids.Count}");
-            return uids.Select(uid => (long)uid.Id).ToList();
+            return (uids.Select(uid => (long)uid.Id).ToList(), folder.UidValidity);
         }
         catch (OperationCanceledException)
         {
@@ -5125,7 +5155,7 @@ GROUP BY lids.""LabelId""";
         catch (Exception ex)
         {
             Debug.WriteLine($"[MarkAllRead][IMAP] unread-search-failed folder={folderFullName} error={ex.Message}");
-            return [];
+            return ([], null);
         }
         finally
         {
@@ -5290,10 +5320,11 @@ ORDER BY ul.label_id
         return result;
     }
 
-    private async Task<(bool Moved, long? TargetUid)> TryMoveMessageOnServerAsync(
+    private async Task<(bool Moved, long? TargetUid, long? TargetValidity)> TryMoveMessageOnServerAsync(
         string sourceFolderFullName,
         string targetFolderFullName,
         long sourceUid,
+        long? expectedValidity,
         string messageIdHeader,
         CancellationToken token)
     {
@@ -5303,20 +5334,20 @@ ORDER BY ul.label_id
         if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
         {
             Debug.WriteLine("Semaphore timeout: " + Environment.StackTrace);
-            return (false, null);
+            return (false, null, null);
         }
 
         try
         {
             if (_client == null)
             {
-                return (false, null);
+                return (false, null, null);
             }
 
             if (!_folderCache.TryGetValue(sourceFolderFullName, out sourceFolder) ||
                 !_folderCache.TryGetValue(targetFolderFullName, out targetFolder))
             {
-                return (false, null);
+                return (false, null, null);
             }
 
             if (!sourceFolder.IsOpen)
@@ -5324,12 +5355,16 @@ ORDER BY ul.label_id
                 await sourceFolder.OpenAsync(FolderAccess.ReadWrite, token);
             }
 
+            if (!await ValidateSelectedFolderAsync(sourceFolder, expectedValidity, token)) return (false, null, null);
+
             await sourceFolder.MoveToAsync(new UniqueId((uint)sourceUid), targetFolder, token);
 
             if (!targetFolder.IsOpen)
             {
                 await targetFolder.OpenAsync(FolderAccess.ReadOnly, token);
             }
+
+            await ValidateSelectedFolderAsync(targetFolder, targetFolder.UidValidity, token);
 
             if (!string.IsNullOrWhiteSpace(messageIdHeader))
             {
@@ -5341,10 +5376,10 @@ ORDER BY ul.label_id
                     ? matching.Max(uid => (long)uid.Id)
                     : (long?)null;
 
-                return (true, resolvedUid);
+                return (true, resolvedUid, targetFolder.UidValidity);
             }
 
-            return (true, null);
+            return (true, null, targetFolder.UidValidity);
         }
         catch (OperationCanceledException)
         {
@@ -5352,7 +5387,7 @@ ORDER BY ul.label_id
         }
         catch
         {
-            return (false, null);
+            return (false, null, null);
         }
         finally
         {
@@ -5491,7 +5526,7 @@ ORDER BY ul.label_id
 
             var message = await db.ImapMessages
                 .AsNoTracking()
-                .FirstOrDefaultAsync(m => m.FolderId == folderEntity.Id && m.ImapUid == uid, token);
+                .FirstOrDefaultAsync(m => m.FolderId == folderEntity.Id && m.Id == uid, token);
 
             if (message == null)
             {
@@ -5690,7 +5725,7 @@ ORDER BY ul.label_id
 
             var message = await db.ImapMessages
                 .Include(m => m.Body)
-                .Where(m => m.FolderId == folderEntity.Id && m.ImapUid == uid)
+                .Where(m => m.FolderId == folderEntity.Id && m.Id == uid)
                 .FirstOrDefaultAsync(token);
 
             if (message?.Body == null)
@@ -5826,17 +5861,20 @@ ORDER BY ul.label_id
                     return null;
                 }
 
-                if (!uint.TryParse(messageId, out var idValue))
-                {
-                    return null;
-                }
+                if (!long.TryParse(messageId, out var messageKey)) return null;
+                var identity = await ResolveMessageIdentityAsync(folderId, messageKey, _cts.Token);
+                if (identity == null) return null;
+                if (identity.Value.Uid <= 0)
+                    return await LoadMessageBodyFromDatabaseAsync(folderId, messageId, _cts.Token);
 
                 if (!folder.IsOpen)
                 {
                     await folder.OpenAsync(FolderAccess.ReadOnly, _cts.Token);
                 }
 
-                var uniqueId = new UniqueId(idValue);
+                if (!await ValidateSelectedFolderAsync(folder, identity.Value.Validity, _cts.Token))
+                    return await LoadMessageBodyFromDatabaseAsync(folderId, messageId, _cts.Token);
+                var uniqueId = new UniqueId((uint)identity.Value.Uid);
                 var message = await folder.GetMessageAsync(uniqueId, _cts.Token);
 
                 var html = message.HtmlBody;

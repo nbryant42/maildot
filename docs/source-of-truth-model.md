@@ -42,3 +42,15 @@ of treating it as ground truth.
 
 Instead, server presence is inferred opportunistically from current IMAP queries when needed, and many UI paths simply
 accept that the archive model should bias toward over-display.
+
+## Mailbox generations and message identity
+
+UIDs are usable only within the mailbox's recorded UIDVALIDITY. On a changed or previously unknown
+UIDVALIDITY, existing positive UIDs become unique negative archive UIDs. Primary keys, bodies,
+attachments, embeddings and labels are preserved, and the current server generation is fetched anew.
+The first sync after upgrading can therefore retain an archived copy alongside a fresh server copy.
+
+UI message references use the stable database primary key, so an old selection cannot target a new
+message that happens to reuse the same UID. Server reads and mutations validate the selected mailbox's
+generation. Folder-row transactions serialize invalidation with server-data writers, including ImapBackfill.
+MCP message identifiers remain folder-scoped IMAP/archive UIDs for its database-only tools.
