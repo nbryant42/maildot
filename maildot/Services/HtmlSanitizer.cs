@@ -278,7 +278,7 @@ public static class HtmlSanitizer
                     UrlEvaluation.Invalid => BlockedResourceReason.InvalidSchemeOrHost,
                     _ => BlockedResourceReason.ExternalContentBlocked
                 };
-                blocked.Add(new BlockedResource(attribute.Value, reason));
+                blocked.Add(new BlockedResource(attribute.Value ?? string.Empty, reason));
             }
         }
 
@@ -310,7 +310,7 @@ public static class HtmlSanitizer
                allowed.Contains(attributeName);
     }
 
-    private static string? SanitizeStyleAttribute(string value)
+    private static string? SanitizeStyleAttribute(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
@@ -396,7 +396,7 @@ public static class HtmlSanitizer
     private static string NormalizeCssValue(string value) =>
         string.Join(" ", value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
-    private static UrlEvaluation EvaluateUrl(string value, string elementName, string attributeName)
+    private static UrlEvaluation EvaluateUrl(string? value, string elementName, string attributeName)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
