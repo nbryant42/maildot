@@ -1143,7 +1143,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     SenderInitials = SenderInitialsHelper.From(senderName, senderAddress),
                     SenderColor = messageColor,
                     Preview = summary.Envelope?.Subject ?? string.Empty,
-                    Received = summary.InternalDate?.LocalDateTime ?? DateTimeOffset.UtcNow.LocalDateTime,
+                    Received = MessageTimestamp.Resolve(summary).LocalDateTime,
                     IsRead = summary.Flags?.HasFlag(MessageFlags.Seen) == true,
                     To = toList,
                     Cc = string.IsNullOrWhiteSpace(ccList) ? null : ccList,
@@ -1437,7 +1437,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                     SenderInitials = SenderInitialsHelper.From(senderName, senderAddress),
                     SenderColor = messageColor,
                     Preview = summary.Envelope?.Subject ?? string.Empty,
-                    Received = summary.InternalDate?.LocalDateTime ?? DateTimeOffset.UtcNow.LocalDateTime,
+                    Received = MessageTimestamp.Resolve(summary).LocalDateTime,
                     IsRead = summary.Flags?.HasFlag(MessageFlags.Seen) == true,
                     To = toList,
                     Cc = string.IsNullOrWhiteSpace(ccList) ? null : ccList,
@@ -1747,7 +1747,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
                 }
                 messageId = TextCleaner.CleanNullable(messageId) ?? string.Empty;
 
-                var received = summary.InternalDate?.ToUniversalTime() ?? DateTimeOffset.UtcNow;
+                var received = MessageTimestamp.Resolve(summary, existingByUid.TryGetValue(uid, out var prior) ? prior.ReceivedUtc : null);
 
                 if (existingByUid.TryGetValue(uid, out var existing))
                 {
@@ -2242,6 +2242,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
     {
         MimeMessage? message = null;
         bool? isRead = null;
+        DateTimeOffset? internalDate = null;
         var uniqueId = new UniqueId((uint)uid);
 
         if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
@@ -2266,9 +2267,11 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
             var summaries = await folder.FetchAsync(
                 [uniqueId],
-                MessageSummaryItems.Flags,
+                MessageSummaryItems.Flags | MessageSummaryItems.InternalDate,
                 token);
-            isRead = summaries.FirstOrDefault()?.Flags?.HasFlag(MessageFlags.Seen) == true;
+            var summary = summaries.FirstOrDefault();
+            internalDate = summary?.InternalDate;
+            isRead = summary?.Flags?.HasFlag(MessageFlags.Seen) == true;
             message = await folder.GetMessageAsync(uniqueId, token);
         }
         catch
@@ -2304,7 +2307,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         await using (db)
         {
             await using var tx = await ImapFolderIdentity.BeginWriteAsync(db, folderId, validity, token);
-            var entity = await UpsertImapMessageAsync(db, folderId, message, uid, isRead.Value, token);
+            var entity = await UpsertImapMessageAsync(db, folderId, message, uid, isRead.Value, internalDate, token);
 
             var hasBody = await db.MessageBodies.AnyAsync(b => b.MessageId == entity.Id, token);
             var hasAttachments = await db.MessageAttachments.AnyAsync(a => a.MessageId == entity.Id, token);
@@ -2511,7 +2514,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         return folderEntity;
     }
 
-    private ImapMessage CreateImapMessage(int folderId, MimeMessage message, long uid, bool isRead)
+    private ImapMessage CreateImapMessage(int folderId, MimeMessage message, long uid, bool isRead, DateTimeOffset? internalDate)
     {
         var sender = message.From.OfType<MailboxAddress>().FirstOrDefault();
         var senderName = TextCleaner.CleanNullable(sender?.Name) ?? string.Empty;
@@ -2520,7 +2523,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             ? $"uid:{uid}@{_settings?.Server}"
             : message.MessageId;
         var messageId = TextCleaner.CleanNullable(rawMessageId) ?? string.Empty;
-        var receivedUtc = ResolveReceivedUtc(message, internalDateFallback: null, existingReceived: null);
+        var receivedUtc = MessageTimestamp.Resolve(message, internalDate);
 
         return new ImapMessage
         {
@@ -2536,73 +2539,18 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         };
     }
 
-    private static void UpdateImapMessage(ImapMessage entity, MimeMessage message, bool isRead)
+    private static void UpdateImapMessage(ImapMessage entity, MimeMessage message, bool isRead, DateTimeOffset? internalDate)
     {
         var sender = message.From.OfType<MailboxAddress>().FirstOrDefault();
         entity.Subject = TextCleaner.CleanNullable(message.Subject) ?? string.Empty;
         entity.FromName = TextCleaner.CleanNullable(sender?.Name) ?? string.Empty;
         entity.FromAddress = TextCleaner.CleanNullable(sender?.Address) ?? string.Empty;
-        entity.ReceivedUtc = ResolveReceivedUtc(message, internalDateFallback: null, existingReceived: entity.ReceivedUtc);
+        entity.ReceivedUtc = MessageTimestamp.Resolve(message, internalDate, entity.ReceivedUtc);
         entity.IsRead = isRead;
     }
 
     private static bool IsUniqueViolation(DbUpdateException ex) =>
         ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation };
-
-    private static DateTimeOffset ResolveReceivedUtc(
-        MimeMessage message,
-        DateTimeOffset? internalDateFallback,
-        DateTimeOffset? existingReceived)
-    {
-        if (TryParseReceivedHeader(message, out var parsed))
-        {
-            return parsed;
-        }
-
-        if (internalDateFallback.HasValue)
-        {
-            return internalDateFallback.Value;
-        }
-
-        if (existingReceived.HasValue)
-        {
-            return existingReceived.Value;
-        }
-
-        return DateTimeOffset.UtcNow;
-    }
-
-    private static bool TryParseReceivedHeader(MimeMessage message, out DateTimeOffset receivedUtc)
-    {
-        receivedUtc = default;
-        var receivedHeader = message.Headers?
-            .FirstOrDefault(h => h != null && string.Equals(h.Field, "Received", StringComparison.OrdinalIgnoreCase))
-            ?.Value;
-
-        if (string.IsNullOrWhiteSpace(receivedHeader))
-        {
-            return false;
-        }
-
-        var semicolonIndex = receivedHeader.LastIndexOf(';');
-        var datePortion = semicolonIndex >= 0
-            ? receivedHeader[(semicolonIndex + 1)..].Trim()
-            : receivedHeader.Trim();
-
-        if (DateUtils.TryParse(datePortion, out var parsed))
-        {
-            receivedUtc = parsed.ToUniversalTime();
-            return true;
-        }
-
-        if (DateTimeOffset.TryParse(datePortion, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var dto))
-        {
-            receivedUtc = dto.ToUniversalTime();
-            return true;
-        }
-
-        return false;
-    }
 
     private string BuildConnectionString(MailDbContext db)
     {
@@ -2617,7 +2565,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         return string.IsNullOrWhiteSpace(csFromDb) ? string.Empty : csFromDb;
     }
 
-    private async Task<ImapMessage> UpsertImapMessageAsync(MailDbContext db, int folderId, MimeMessage message, long uid, bool isRead, CancellationToken token)
+    private async Task<ImapMessage> UpsertImapMessageAsync(MailDbContext db, int folderId, MimeMessage message, long uid, bool isRead, DateTimeOffset? internalDate, CancellationToken token)
     {
         var existing = await db.ImapMessages
             .FirstOrDefaultAsync(m => m.FolderId == folderId && m.ImapUid == uid, token);
@@ -2625,7 +2573,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         if (existing != null)
         {
             var previousIsRead = existing.IsRead;
-            UpdateImapMessage(existing, message, isRead);
+            UpdateImapMessage(existing, message, isRead, internalDate);
             if (previousIsRead != isRead)
             {
                 Debug.WriteLine($"[ReadSync] updated existing message from server flags folderId={folderId} uid={uid} oldIsRead={previousIsRead} newIsRead={isRead}");
@@ -2635,7 +2583,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         }
 
         Debug.WriteLine($"[ReadSync] created new message from server flags folderId={folderId} uid={uid} isRead={isRead}");
-        var entity = CreateImapMessage(folderId, message, uid, isRead);
+        var entity = CreateImapMessage(folderId, message, uid, isRead, internalDate);
         db.ImapMessages.Add(entity);
 
         try
@@ -2649,7 +2597,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
             var reloaded = await db.ImapMessages
                 .FirstAsync(m => m.FolderId == folderId && m.ImapUid == uid, token);
             var previousIsRead = reloaded.IsRead;
-            UpdateImapMessage(reloaded, message, isRead);
+            UpdateImapMessage(reloaded, message, isRead, internalDate);
             if (previousIsRead != isRead)
             {
                 Debug.WriteLine($"[ReadSync] updated reloaded message from server flags folderId={folderId} uid={uid} oldIsRead={previousIsRead} newIsRead={isRead}");
@@ -4054,6 +4002,7 @@ GROUP BY lids.""LabelId""";
         IMailFolder? folder = null;
         MimeMessage? message = null;
         bool? isRead = null;
+        DateTimeOffset? internalDate = null;
 
         if (!await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), token))
         {
@@ -4077,9 +4026,11 @@ GROUP BY lids.""LabelId""";
 
             var summaries = await folder.FetchAsync(
                 [new UniqueId((uint)uid)],
-                MessageSummaryItems.Flags,
+                MessageSummaryItems.Flags | MessageSummaryItems.InternalDate,
                 token);
-            isRead = summaries.FirstOrDefault()?.Flags?.HasFlag(MessageFlags.Seen) == true;
+            var summary = summaries.FirstOrDefault();
+            internalDate = summary?.InternalDate;
+            isRead = summary?.Flags?.HasFlag(MessageFlags.Seen) == true;
             message = await folder.GetMessageAsync(new UniqueId((uint)uid), token);
         }
         catch (MessageNotFoundException)
@@ -4130,7 +4081,7 @@ GROUP BY lids.""LabelId""";
             }
 
             await using var tx = await ImapFolderIdentity.BeginWriteAsync(db, folderEntity.Id, validity, token);
-            var entity = await UpsertImapMessageAsync(db, folderEntity.Id, message, uid, isRead.Value, token);
+            var entity = await UpsertImapMessageAsync(db, folderEntity.Id, message, uid, isRead.Value, internalDate, token);
             await PersistMessageMimeContentAsync(db, entity, message, overwriteBody, overwriteAttachments, token);
             await tx.CommitAsync(token);
         }

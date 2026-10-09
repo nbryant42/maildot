@@ -316,7 +316,7 @@ internal static class Program
             : summary.Envelope!.MessageId;
 
         var messageId = TextCleaner.CleanNullable(rawMessageId) ?? $"uid:{uid}@{server}";
-        var received = summary.InternalDate?.ToUniversalTime() ?? DateTimeOffset.UtcNow;
+        var received = MessageTimestamp.Resolve(summary);
 
         return new MessageEnvelope(subject, fromName, fromAddress, messageId, received);
     }
@@ -337,7 +337,7 @@ internal static class Program
             : message.MessageId;
 
         var messageId = TextCleaner.CleanNullable(rawMessageId) ?? $"uid:{uid}@{server}";
-        var received = ResolveReceivedUtc(message, internalDateFallback, existingReceived);
+        var received = MessageTimestamp.Resolve(message, internalDateFallback, existingReceived);
 
         return new MessageEnvelope(subject, fromName, fromAddress, messageId, received);
     }
@@ -483,62 +483,6 @@ internal static class Program
         entity.FromName = envelope.FromName;
         entity.FromAddress = envelope.FromAddress;
         entity.ReceivedUtc = envelope.ReceivedUtc;
-    }
-
-    private static DateTimeOffset ResolveReceivedUtc(
-        MimeMessage message,
-        DateTimeOffset? internalDateFallback,
-        DateTimeOffset? existingReceived)
-    {
-        if (TryParseReceivedHeader(message, out var parsed))
-        {
-            return parsed;
-        }
-
-        if (internalDateFallback.HasValue)
-        {
-            return internalDateFallback.Value;
-        }
-
-        if (existingReceived.HasValue)
-        {
-            return existingReceived.Value;
-        }
-
-        return DateTimeOffset.UtcNow;
-    }
-
-    private static bool TryParseReceivedHeader(MimeMessage message, out DateTimeOffset receivedUtc)
-    {
-        receivedUtc = default;
-        var receivedHeader = message.Headers?
-            .FirstOrDefault(h => h != null && string.Equals(h.Field, "Received", StringComparison.OrdinalIgnoreCase))
-            ?.Value;
-
-        if (string.IsNullOrWhiteSpace(receivedHeader))
-        {
-            return false;
-        }
-
-        var semicolonIndex = receivedHeader.LastIndexOf(';');
-
-        var datePortion = semicolonIndex >= 0
-            ? receivedHeader[(semicolonIndex + 1)..].Trim()
-            : receivedHeader.Trim();
-
-        if (DateUtils.TryParse(datePortion, out var parsed))
-        {
-            receivedUtc = parsed.ToUniversalTime();
-            return true;
-        }
-
-        if (DateTimeOffset.TryParse(datePortion, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var dto))
-        {
-            receivedUtc = dto.ToUniversalTime();
-            return true;
-        }
-
-        return false;
     }
 
     private static MessageBody BuildMessageBody(MimeMessage message, int messageId)
