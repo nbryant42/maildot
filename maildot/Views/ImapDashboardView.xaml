@@ -316,15 +316,12 @@
                                                            FontSize="12"
                                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                             </Border>
+                                            <FontIcon Glyph="&#xE932;"
+                                                      Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                      HorizontalAlignment="Right"
+                                                      ToolTipService.ToolTip="{Binding LabelNames, Converter={StaticResource LabelNamesTooltipConverter}}"
+                                                      Visibility="{Binding LabelNames.Count, Converter={StaticResource LabelCountToVisibilityConverter}}" />
                                         </StackPanel>
-
-                                        <FontIcon Grid.Column="3"
-                                                  Glyph="&#xE932;"
-                                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                                  VerticalAlignment="Top"
-                                                  HorizontalAlignment="Right"
-                                                  ToolTipService.ToolTip="{Binding LabelNames, Converter={StaticResource LabelNamesTooltipConverter}}"
-                                                  Visibility="{Binding LabelNames.Count, Converter={StaticResource LabelCountToVisibilityConverter}}" />
                                     </Grid>
                                 </Border>
                             </DataTemplate>
