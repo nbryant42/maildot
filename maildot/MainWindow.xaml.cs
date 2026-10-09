@@ -361,12 +361,41 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void OnRetryRequested(object? sender, EventArgs e)
+    private async void OnRetryRequested(object? sender, EventArgs e)
     {
         if (_imapService != null && _mailboxViewModel?.SelectedFolder is MailFolderViewModel folder)
         {
-            _mailboxViewModel.SetRetryVisible(false);
-            _ = _imapService.LoadFolderAsync(folder.Id);
+            var service = _imapService;
+            var viewModel = _mailboxViewModel;
+            viewModel.SetRetryVisible(false);
+            try
+            {
+                if (await service.RetryConnectionAsync() &&
+                    ReferenceEquals(_imapService, service) &&
+                    ReferenceEquals(_mailboxViewModel, viewModel) &&
+                    viewModel.SelectedFolder?.Id == folder.Id &&
+                    !viewModel.IsSearchActive)
+                {
+                    await service.LoadFolderAsync(folder.Id);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // The account or window was closed while retrying.
+            }
+            catch (ObjectDisposedException)
+            {
+                // The account or window was closed while retrying.
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"IMAP retry failed: {ex}");
+                if (ReferenceEquals(_imapService, service) && ReferenceEquals(_mailboxViewModel, viewModel))
+                {
+                    viewModel.SetStatus($"Unable to reconnect: {ex.Message}", false);
+                    viewModel.SetRetryVisible(true);
+                }
+            }
             return;
         }
 

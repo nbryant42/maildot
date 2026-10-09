@@ -93,6 +93,35 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
     public Task LoadFolderAsync(string folderId) => LoadFolderInternalAsync(folderId, allowReconnect: true);
 
+    public async Task<bool> RetryConnectionAsync()
+    {
+        bool locked;
+        try
+        {
+            locked = await _semaphore.WaitAsync(TimeSpan.FromMinutes(1), _cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+
+        if (!locked)
+        {
+            await ReportStatusAsync("Unable to reconnect: semaphore timeout", false);
+            await EnqueueAsync(() => _viewModel.SetRetryVisible(true));
+            return false;
+        }
+
+        try
+        {
+            return await TryReconnectAsync();
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
     private async Task LoadFolderInternalAsync(string folderId, bool allowReconnect)
     {
         if (string.IsNullOrEmpty(folderId))
@@ -123,13 +152,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
             if (!_folderCache.TryGetValue(folderId, out folder))
             {
-                if (allowReconnect && await TryReconnectAsync())
-                {
-                    reconnected = true;
-                    return;
-                }
-
-                throw new InvalidOperationException("Folder could not be found on the server.");
+                throw new ServiceNotConnectedException("Folder is unavailable on the current connection.");
             }
 
             folderDisplay = string.IsNullOrEmpty(folder.Name) ? folderId : folder.Name;
@@ -275,13 +298,7 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
 
             if (!_folderCache.TryGetValue(folderId, out folder))
             {
-                if (allowReconnect && await TryReconnectAsync())
-                {
-                    reconnected = true;
-                    return;
-                }
-
-                throw new InvalidOperationException("Folder could not be found on the server.");
+                throw new ServiceNotConnectedException("Folder is unavailable on the current connection.");
             }
 
             if (_viewModel.UnlabeledOnly)
@@ -386,7 +403,9 @@ public sealed class ImapSyncService(MailboxViewModel viewModel, DispatcherQueue 
         // do this after releasing the semaphore
         if (reconnected)
         {
-            await LoadOlderMessagesInternalAsync(folderId, false);
+            // Reconnection invalidates sequence indexes and all paging cursors. Reload
+            // the current folder so scrolling starts from a fresh server snapshot.
+            await LoadFolderInternalAsync(folderId, false);
             return;
         }
 
