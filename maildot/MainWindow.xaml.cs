@@ -273,6 +273,9 @@ public sealed partial class MainWindow : Window
         _dashboardView.SenderSuggestionAccepted += OnSenderSuggestionAccepted;
         _dashboardView.LabelSenderRequested -= OnLabelSenderRequested;
         _dashboardView.LabelSenderRequested += OnLabelSenderRequested;
+        _dashboardView.RemoveLabelRequested -= OnRemoveLabelRequested;
+        _dashboardView.RemoveLabelRequested += OnRemoveLabelRequested;
+        _dashboardView.GetLabelRemovalAvailabilityAsync = GetLabelRemovalAvailabilityAsync;
         _dashboardView.DeleteMessageRequested -= OnDeleteMessageRequested;
         _dashboardView.DeleteMessageRequested += OnDeleteMessageRequested;
         _dashboardView.FilterChanged -= OnFilterChanged;
@@ -1275,6 +1278,95 @@ public sealed partial class MainWindow : Window
         }
 
         await _imapService.AddSenderLabelAsync(labelId, senderAddress);
+    }
+
+    private async Task<(bool Email, bool Sender)> GetLabelRemovalAvailabilityAsync(IReadOnlyList<EmailMessageViewModel> messages)
+    {
+        var service = _imapService;
+        if (service == null) return (false, false);
+        try
+        {
+            var availability = await service.GetLabelRemovalAvailabilityAsync(messages);
+            return service == _imapService ? availability : (false, false);
+        }
+        catch (OperationCanceledException) { return (false, false); }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Unable to check removable labels: {ex.Message}");
+            return (false, false);
+        }
+    }
+
+    private async void OnRemoveLabelRequested(object? sender, RemoveLabelRequest request)
+    {
+        var service = _imapService;
+        var viewModel = _mailboxViewModel;
+        var xamlRoot = GetXamlRoot();
+        if (service == null || viewModel == null || xamlRoot == null)
+        {
+            return;
+        }
+
+        try
+        {
+            var labels = await service.GetRemovableLabelsAsync(request.Messages, request.FromSender);
+            if (service != _imapService)
+            {
+                return;
+            }
+
+            if (labels.Count == 0)
+            {
+                viewModel.SetStatus(request.FromSender
+                    ? "The selected senders have no labels to remove."
+                    : "The selected emails have no directly assigned labels. Use Remove sender label for inherited labels.", false);
+                return;
+            }
+
+            var combo = new ComboBox
+            {
+                ItemsSource = labels,
+                DisplayMemberPath = "Name",
+                SelectedIndex = 0,
+                MinWidth = 260
+            };
+            var content = new StackPanel { Spacing = 12 };
+            content.Children.Add(new TextBlock
+            {
+                Text = request.FromSender
+                    ? "Remove this label from the selected senders. This affects all their emails; directly assigned email labels remain."
+                    : "Remove this label from the selected emails. Labels inherited from a sender remain.",
+                TextWrapping = TextWrapping.Wrap,
+                MaxWidth = 400
+            });
+            content.Children.Add(combo);
+            var dialog = new ContentDialog
+            {
+                Title = request.FromSender ? "Remove sender label" : "Remove email label",
+                Content = content,
+                PrimaryButtonText = "Remove",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+                XamlRoot = xamlRoot
+            };
+            if (await dialog.ShowAsync() == ContentDialogResult.Primary &&
+                combo.SelectedItem is LabelViewModel label && service == _imapService)
+            {
+                await service.RemoveLabelAsync(label.Id, request.Messages, request.FromSender);
+                if (service == _imapService && viewModel.SelectedMessage is { } selectedMessage &&
+                    !viewModel.Messages.Contains(selectedMessage))
+                {
+                    viewModel.SelectedMessage = null;
+                    _ = _dashboardView?.ClearMessageContentAsync();
+                    _ = _dashboardView?.ClearAttachmentsAsync();
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            viewModel.SetStatus($"Unable to remove label: {ex.Message}", false);
+        }
     }
 
     private async void OnLabelSenderRequested(object? sender, LabelSenderRequest request)

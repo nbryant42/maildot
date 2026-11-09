@@ -5540,6 +5540,132 @@ ORDER BY ul.label_id
         }
     }
 
+    private IQueryable<ImapMessage> SelectedAccountMessages(MailDbContext db, IReadOnlyList<EmailMessageViewModel> messages)
+    {
+        var ids = messages.Select(m => int.TryParse(m.Id, out var id) ? id : 0).Where(id => id > 0).Distinct().ToArray();
+        var accountId = _settings?.Id ?? 0;
+        return db.ImapMessages.Where(m => ids.Contains(m.Id) && m.Folder.AccountId == accountId);
+    }
+
+    public async Task<(bool Email, bool Sender)> GetLabelRemovalAvailabilityAsync(IReadOnlyList<EmailMessageViewModel> messages)
+    {
+        var db = await CreateDbContextAsync();
+        if (db == null) return (false, false);
+
+        await using (db)
+        {
+            var accountId = _settings?.Id ?? 0;
+            var selected = SelectedAccountMessages(db, messages);
+            var email = await db.MessageLabels.AnyAsync(ml => ml.Label.AccountId == accountId &&
+                selected.Any(m => m.Id == ml.MessageId), _cts.Token);
+            var sender = await db.SenderLabels.AnyAsync(sl => sl.Label.AccountId == accountId &&
+                selected.Any(m => m.FromAddress.ToLower() == sl.FromAddress), _cts.Token);
+            return (email, sender);
+        }
+    }
+
+    public async Task<List<LabelViewModel>> GetRemovableLabelsAsync(IReadOnlyList<EmailMessageViewModel> messages, bool fromSender)
+    {
+        var db = await CreateDbContextAsync();
+        if (db == null || _settings == null)
+        {
+            if (db != null) await db.DisposeAsync();
+            return [];
+        }
+
+        await using (db)
+        {
+            var selected = SelectedAccountMessages(db, messages);
+            var labelIds = fromSender
+                ? db.SenderLabels.Where(sl => selected.Any(m => m.FromAddress.ToLower() == sl.FromAddress)).Select(sl => sl.LabelId)
+                : db.MessageLabels.Where(ml => selected.Any(m => m.Id == ml.MessageId)).Select(ml => ml.LabelId);
+            var labels = await db.Labels.AsNoTracking()
+                .Where(l => l.AccountId == _settings.Id && labelIds.Contains(l.Id))
+                .OrderBy(l => l.Name).ThenBy(l => l.Id).ToListAsync(_cts.Token);
+            return labels.Select(l => new LabelViewModel(l.Id, l.Name, l.ParentLabelId)).ToList();
+        }
+    }
+
+    public async Task RemoveLabelAsync(int labelId, IReadOnlyList<EmailMessageViewModel> messages, bool fromSender)
+    {
+        var db = await CreateDbContextAsync();
+        if (db == null || _settings == null)
+        {
+            if (db != null) await db.DisposeAsync();
+            return;
+        }
+
+        await using (db)
+        {
+            var token = _cts.Token;
+            var label = await db.Labels.AsNoTracking()
+                .FirstOrDefaultAsync(l => l.Id == labelId && l.AccountId == _settings.Id, token);
+            if (label == null) return;
+
+            var selected = SelectedAccountMessages(db, messages);
+            var removed = fromSender
+                ? await db.SenderLabels.Where(sl => sl.LabelId == labelId &&
+                    selected.Any(m => m.FromAddress.ToLower() == sl.FromAddress)).ExecuteDeleteAsync(token)
+                : await db.MessageLabels.Where(ml => ml.LabelId == labelId &&
+                    selected.Any(m => m.Id == ml.MessageId)).ExecuteDeleteAsync(token);
+
+            ClearSuggestionCaches();
+            await RefreshVisibleLabelAssignmentsAsync(db, token);
+            await RefreshLabelUnreadCountsAsync(token);
+            await ReportStatusAsync(removed == 0 ? "No matching label assignments remain."
+                : $"Removed label \"{label.Name}\" from {removed} {(fromSender ? "sender(s)" : "email(s)")}", false);
+        }
+    }
+
+    private async Task RefreshVisibleLabelAssignmentsAsync(MailDbContext db, CancellationToken token)
+    {
+        List<EmailMessageViewModel> visible = [];
+        await EnqueueAsync(() => visible = _viewModel.Messages.ToList());
+        var selected = SelectedAccountMessages(db, visible);
+        var direct = from ml in db.MessageLabels
+                     join l in db.Labels on ml.LabelId equals l.Id
+                     where selected.Any(m => m.Id == ml.MessageId) && l.AccountId == _settings!.Id
+                     select new { MessageId = ml.MessageId, LabelId = l.Id, l.Name };
+        var inherited = from m in selected
+                        join sl in db.SenderLabels on m.FromAddress.ToLower() equals sl.FromAddress
+                        join l in db.Labels on sl.LabelId equals l.Id
+                        where l.AccountId == _settings!.Id
+                        select new { MessageId = m.Id, LabelId = l.Id, l.Name };
+        var rows = await direct.Union(inherited).ToListAsync(token);
+        var assignments = rows.GroupBy(r => r.MessageId)
+            .ToDictionary(g => g.Key, g => g.Select(r => r.LabelId).Distinct().ToList());
+        var names = rows.GroupBy(r => r.LabelId).ToDictionary(g => g.Key, g => g.First().Name);
+        await EnqueueAsync(() =>
+        {
+            var removed = ApplyVisibleLabelAssignments(_viewModel, visible, assignments, names);
+            if (_viewModel.SelectedLabelId is int labelId &&
+                _labelNextOffset.TryGetValue(labelId, out var offset) && offset >= 0)
+            {
+                _labelNextOffset[labelId] = Math.Max(0, offset - removed);
+            }
+        });
+    }
+
+    internal static int ApplyVisibleLabelAssignments(MailboxViewModel viewModel,
+        IReadOnlyList<EmailMessageViewModel> visible, IReadOnlyDictionary<int, List<int>> assignments,
+        IReadOnlyDictionary<int, string> names)
+    {
+        var removed = 0;
+        foreach (var message in visible)
+        {
+            if (!viewModel.Messages.Contains(message) || !int.TryParse(message.Id, out var id)) continue;
+            var labelIds = assignments.TryGetValue(id, out var labels) ? labels : [];
+            message.LabelNames = labelIds.Select(labelId => names[labelId]).Distinct().ToList();
+            if (!viewModel.IsSearchActive && !message.IsSuggested &&
+                viewModel.SelectedLabelId is int selectedLabelId && !labelIds.Contains(selectedLabelId))
+            {
+                viewModel.Messages.Remove(message);
+                removed++;
+            }
+        }
+        return removed;
+    }
+
     public async Task<bool> AddSenderLabelAsync(int labelId, string fromAddress)
     {
         var token = _cts.Token;

@@ -26,6 +26,9 @@ public sealed partial class ImapDashboardView : UserControl
     private EmailMessageViewModel? _contextMenuMessage;
     private MailFolderViewModel? _contextMenuFolder;
     private LabelViewModel? _contextMenuLabel;
+    private int _messageContextRequestVersion;
+
+    public Func<IReadOnlyList<EmailMessageViewModel>, Task<(bool Email, bool Sender)>>? GetLabelRemovalAvailabilityAsync { get; set; }
 
     public TreeView LabelsTreeControl => LabelsTree;
 
@@ -51,6 +54,7 @@ public sealed partial class ImapDashboardView : UserControl
     public event EventHandler<EmailMessageViewModel>? SuggestionAccepted;
     public event EventHandler<EmailMessageViewModel>? SenderSuggestionAccepted;
     public event EventHandler<LabelSenderRequest>? LabelSenderRequested;
+    public event EventHandler<RemoveLabelRequest>? RemoveLabelRequested;
     public event EventHandler<EmailMessageViewModel>? DeleteMessageRequested;
     public event EventHandler? FilterChanged;
     public event EventHandler<MessageReadStateRequest>? MessageReadStateChangeRequested;
@@ -417,7 +421,7 @@ public sealed partial class ImapDashboardView : UserControl
         }
     }
 
-    private void OnMessagesContextRequested(object sender, ContextRequestedEventArgs e)
+    private async void OnMessagesContextRequested(object sender, ContextRequestedEventArgs e)
     {
         if (sender is not FrameworkElement)
         {
@@ -447,6 +451,17 @@ public sealed partial class ImapDashboardView : UserControl
         }
 
         var vm = DataContext as MailboxViewModel;
+        var requestVersion = ++_messageContextRequestVersion;
+        var hasPosition = e.TryGetPosition(MessagesList, out var point);
+        e.Handled = true;
+        var availability = GetLabelRemovalAvailabilityAsync == null
+            ? (Email: false, Sender: false)
+            : await GetLabelRemovalAvailabilityAsync(contextMessages);
+        if (requestVersion != _messageContextRequestVersion || DataContext != vm || !IsLoaded ||
+            !contextMessages.SequenceEqual(MessagesList.SelectedItems.OfType<EmailMessageViewModel>()))
+        {
+            return;
+        }
         var inFolderView = vm?.SelectedFolder != null && vm.SelectedLabelId == null && !vm.IsSearchActive;
         var flyout = new MenuFlyout();
 
@@ -505,6 +520,22 @@ public sealed partial class ImapDashboardView : UserControl
         };
         flyout.Items.Add(labelSender);
 
+        if (availability.Email)
+        {
+            var removeEmailLabel = new MenuFlyoutItem { Text = "Remove email label..." };
+            removeEmailLabel.Click += (_, __) =>
+                RemoveLabelRequested?.Invoke(this, new RemoveLabelRequest(contextMessages, FromSender: false));
+            flyout.Items.Add(removeEmailLabel);
+        }
+
+        if (availability.Sender)
+        {
+            var removeSenderLabel = new MenuFlyoutItem { Text = "Remove sender label..." };
+            removeSenderLabel.Click += (_, __) =>
+                RemoveLabelRequested?.Invoke(this, new RemoveLabelRequest(contextMessages, FromSender: true));
+            flyout.Items.Add(removeSenderLabel);
+        }
+
         if (_contextMenuMessage.IsSuggested)
         {
             var addItem = new MenuFlyoutItem { Text = "Add to label" };
@@ -516,7 +547,7 @@ public sealed partial class ImapDashboardView : UserControl
             flyout.Items.Add(addSenderItem);
         }
 
-        if (e.TryGetPosition(MessagesList, out var point))
+        if (hasPosition)
         {
             flyout.ShowAt(MessagesList, point);
         }
@@ -608,4 +639,5 @@ public sealed partial class ImapDashboardView : UserControl
 public sealed record LabelDropRequest(int LabelId, string? MessageId, string? FolderId);
 public sealed record MessageReadStateRequest(EmailMessageViewModel Message, bool IsRead);
 public sealed record LabelSenderRequest(IReadOnlyList<EmailMessageViewModel> Messages);
+public sealed record RemoveLabelRequest(IReadOnlyList<EmailMessageViewModel> Messages, bool FromSender);
 
